@@ -86,7 +86,7 @@ async function writeAuditRecord(status, extra = {}) {
         ).then(r => r?.ms || null).catch(() => null)
       : Promise.resolve(null),
     agent(
-      `Run: git -C ${repoPath} rev-parse HEAD\nReturn { sha: "<40-char hex>" }`,
+      `Run: git -C ~/Desktop/Repos/skills rev-parse HEAD 2>/dev/null || git -C ~/.claude/skills rev-parse HEAD 2>/dev/null || echo unknown\nReturn { sha: "<40-char hex or unknown>" }`,
       { label: 'skills-commit', phase: 'Debrief', model: haikuModel, effort: 'low',
         schema: { type: 'object', required: ['sha'], properties: { sha: { type: 'string' } } } }
     ).then(r => r?.sha || null).catch(() => null),
@@ -895,11 +895,15 @@ function classifyAcBullet(bullet) {
   const text = bullet.toLowerCase()
   // isValidation: 'no ' removed (matches any sentence), ' check'/'remain' tightened to avoid
   // false positives on implementation ACs like "No bare fetch() calls remain standardized"
+  // 'ran clean' catches "npm install ran clean with no warnings" — a validation outcome, not a file-touch task
   const isCleanup    = text.includes('remov') || text.includes('delet') || text.includes('package.json') || text.includes('npm install')
-  const isValidation = text.includes('verif') || text.includes('confirm') || text.includes('passing') || text.includes('clean install') || text.includes('baseline') || /\bcheck\b/.test(text) || /\bremains?\b/.test(text)
+  const isValidation = text.includes('verif') || text.includes('confirm') || text.includes('passing') || text.includes('clean install') || text.includes('ran clean') || text.includes('baseline') || /\bcheck\b/.test(text) || /\bremains?\b/.test(text)
   const isDeferred   = text.includes('abortcontroller') || text.includes('timeout') || text.includes('npm ')
-  const isMigration  = !isCleanup && !isValidation && !isDeferred
-  return { isCleanup, isValidation, isDeferred, isMigration }
+  // isCleanup+isDeferred together always means a package-level validation step (e.g. npm install) —
+  // treat as validation (no file list, not a Jira subtask)
+  const isValidationFinal = isValidation || (isCleanup && isDeferred)
+  const isMigration  = !isCleanup && !isValidationFinal && !isDeferred
+  return { isCleanup, isValidation: isValidationFinal, isDeferred, isMigration }
 }
 
 // Stage 1: design:grouper — one Haiku per AC, mechanical batching only (no cross-AC decisions)
@@ -1111,6 +1115,10 @@ for (const r of validAcResults) {
   const { isDeferred, isCleanup, isValidation, isMigration } = classifyAcBullet(r.acBullet)
   if (!isDeferred && !isCleanup) continue  // migration ACs are handled by layer designers
   if (isValidation) continue               // validation ACs are done-conditions, not work items
+  // Sanity cap: cleanup/deferred ACs should touch ≤20 files (package.json, config, a handful of wiring).
+  // A large file list means the AC researcher ran a broad find/ls and returned the whole directory —
+  // that's a shell-research artifact, not real work. Treat as done-condition and skip.
+  if ((r.files || []).length > 20) continue
   // Check if any existing subtask already covers these files (>50% overlap)
   const acFiles = r.files || []
   const alreadyCovered = acFiles.length > 0 && acFiles.filter(f => coveredFileSet.has(f)).length / acFiles.length > 0.5

@@ -64,7 +64,7 @@ async function writeAuditRecord(status, extra = {}) {
         ).then(r => r?.ms || null).catch(() => null)
       : Promise.resolve(null),
     agent(
-      `Run: git -C ${repoPath || '.'} rev-parse HEAD\nReturn { sha: "<40-char hex>" }`,
+      `Run: git -C ~/Desktop/Repos/skills rev-parse HEAD 2>/dev/null || git -C ~/.claude/skills rev-parse HEAD 2>/dev/null || echo unknown\nReturn { sha: "<40-char hex or unknown>" }`,
       { label: 'skills-commit', phase: 'Debrief', model: haikuModel, effort: 'low',
         schema: { type: 'object', required: ['sha'], properties: { sha: { type: 'string' } } } }
     ).then(r => r?.sha || null).catch(() => null),
