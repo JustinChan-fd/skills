@@ -1368,9 +1368,11 @@ if (acResult?.missing?.length > 0) {
     )
     if (!alreadyStubbed) {
       const { isValidation, isCleanup, isDeferred, isMigration } = classifyAcBullet(missingBullet)
-      // Validation ACs are shell checks — route to doneConditionAcs, never create a stub
-      if (isValidation) {
-        doneConditionAcs.push(missingBullet)
+      // Validation ACs and ACs already in doneConditionAcs are shell checks or
+      // done-conditions — never create a separate stub for them.
+      const alreadyDoneCondition = doneConditionAcs.includes(missingBullet)
+      if (isValidation || alreadyDoneCondition) {
+        if (!alreadyDoneCondition) doneConditionAcs.push(missingBullet)
         continue
       }
       const acResearch = validAcResults.find(r => r.acBullet === missingBullet)
@@ -1477,9 +1479,19 @@ phase('Debrief')
 
 const qualityIssues = []
 
-// Carry forward coordinator misclassification flags
+// Carry forward coordinator misclassification flags — but suppress ones that
+// _ejectTestFiles already resolved. The coordinator flags test files in migration
+// batches; ejection moves them. Surfacing both is redundant noise.
+// A misclassification is ejection-resolved when: the described batch title matches
+// a now-empty (removed) migration subtask, OR the pattern "test file in a migration
+// batch" matches and ejectedCount > 0 for this run.
+const ejectionResolved = testMockSubtasks.length > 0  // ejection ran and produced batches
+const TEST_MISCLASS_RE = /test file.*migration batch|migration batch.*test file|isMigration.*\.test\.|\.test\..*isMigration|only \*\.test\./i
 if (coordinatorResult?.misclassifications?.length > 0) {
-  for (const m of coordinatorResult.misclassifications) qualityIssues.push(`misclassification: ${m}`)
+  for (const m of coordinatorResult.misclassifications) {
+    if (ejectionResolved && TEST_MISCLASS_RE.test(m)) continue  // handled by ejection
+    qualityIssues.push(`misclassification: ${m}`)
+  }
 }
 
 // Carry forward verify issues — but filter out ticket-vs-reality corrections that are
@@ -1556,17 +1568,20 @@ if (!structuralPass) {
   log(`✅ Structural validator passed — phase-c:${grepAcs.length}/${grepAcs.length} G1:${structuralScore.g1Count} deps:wired oversized:none stubs:${mergeResult.subtasks.filter(s => s.needsReview).length}`)
 }
 
-// Build groups via pure JS (no agent)
+// Build groups via pure JS (no agent) — G1 first, then G2, then G3
 const groupMap = {}
 for (const s of mergeResult.subtasks) {
   if (!groupMap[s.groupId]) groupMap[s.groupId] = []
   groupMap[s.groupId].push(s)
 }
-const groups = Object.entries(groupMap).map(([groupId, subtasks]) => ({
-  groupId,
-  parallel: subtasks.every(s => s.canRunInParallel),
-  subtasks,  // jiraKey/jiraUrl added by SKILL.md after Jira creation
-}))
+const GROUP_ORDER = ['G1', 'G2', 'G3']
+const groups = Object.entries(groupMap)
+  .sort(([a], [b]) => GROUP_ORDER.indexOf(a) - GROUP_ORDER.indexOf(b))
+  .map(([groupId, subtasks]) => ({
+    groupId,
+    parallel: subtasks.every(s => s.canRunInParallel),
+    subtasks,  // jiraKey/jiraUrl added by SKILL.md after Jira creation
+  }))
 
 const groundedReality = verifyResult?.groundedReality || null
 
