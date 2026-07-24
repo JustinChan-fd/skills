@@ -36,18 +36,30 @@ async function trackedAgent(prompt, opts) {
   return result
 }
 
+// Era marker — bump when the skill paradigm changes significantly.
+const SKILLS_SCHEMA_VERSION = 'spec-v8'
+
 async function writeAuditRecord(status, extra = {}) {
   const outputTokensTotal = budget.spent() - workflowStartTokens
-  const durationMs = args.startTs
-    ? await agent(
-        `Run: python3 -c "import time; print(int(time.time()*1000) - ${args.startTs})"\nReturn { ms: <number> }`,
-        { label: 'duration-ms', phase: 'Debrief', model: 'haiku', effort: 'low',
-          schema: { type: 'object', required: ['ms'], properties: { ms: { type: 'number' } } } }
-      ).then(r => r?.ms || null).catch(() => null)
-    : null
+  const [durationMs, skillsCommit] = await Promise.all([
+    args.startTs
+      ? agent(
+          `Run: python3 -c "import time; print(int(time.time()*1000) - ${args.startTs})"\nReturn { ms: <number> }`,
+          { label: 'duration-ms', phase: 'Debrief', model: 'haiku', effort: 'low',
+            schema: { type: 'object', required: ['ms'], properties: { ms: { type: 'number' } } } }
+        ).then(r => r?.ms || null).catch(() => null)
+      : Promise.resolve(null),
+    agent(
+      `Run: git -C ${args.repoPath || '.'} rev-parse HEAD\nReturn { sha: "<40-char hex>" }`,
+      { label: 'skills-commit', phase: 'Debrief', model: 'haiku', effort: 'low',
+        schema: { type: 'object', required: ['sha'], properties: { sha: { type: 'string' } } } }
+    ).then(r => r?.sha || null).catch(() => null),
+  ])
   const record = JSON.stringify({
     ts: args.today || 'unknown',
     skill: 'harness-implement',
+    skillsSchemaVersion: SKILLS_SCHEMA_VERSION,
+    skillsCommit,
     status,
     planPath: args.planPath || 'unknown',
     durationMs,
