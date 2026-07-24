@@ -28,7 +28,16 @@ const manifestEntry = args.manifestEntry || null
 
 if (!input) throw new Error('harness-plan requires input or manifestEntry')
 
-// ─── Token tracking ───────────────────────────────────────────────────────────
+// ─── Token tracking + wall-clock start ───────────────────────────────────────
+// _workflowStartTs: captured by a haiku shell agent at the top of the run so
+// durationMs is self-contained and does not require the caller to pass startTs.
+
+let _workflowStartTs = null
+const _startTsPromise = agent(
+  `Run: python3 -c "import time; print(int(time.time()*1000))"\nReturn { ms: <number> }`,
+  { label: 'workflow-start-ts', phase: 'Intake', model: 'claude-haiku-4-5-20251001', effort: 'low',
+    schema: { type: 'object', required: ['ms'], properties: { ms: { type: 'number' } } } }
+).then(r => { _workflowStartTs = r?.ms || null }).catch(() => {})
 
 const workflowStartTokens = budget.spent()
 const tokensByModel = {}
@@ -58,14 +67,13 @@ async function writeAuditRecord(status, extra = {}) {
       return sum + (tokens / 1_000_000) * rate
     }, 0).toFixed(4)
   )
+  await _startTsPromise  // ensure start timestamp resolved before computing delta
   const [durationMs, skillsCommit, runTs] = await Promise.all([
-    args.startTs
-      ? agent(
-          `Run: python3 -c "import time; print(int(time.time()*1000) - ${args.startTs})"\nReturn { ms: <number> }`,
-          { label: 'duration-ms', phase: 'Debrief', model: haikuModel, effort: 'low',
-            schema: { type: 'object', required: ['ms'], properties: { ms: { type: 'number' } } } }
-        ).then(r => r?.ms || null).catch(() => null)
-      : Promise.resolve(null),
+    agent(
+      `Run: python3 -c "import time; print(int(time.time()*1000) - ${_workflowStartTs || (args.startTs || 0)})"\nReturn { ms: <number> }`,
+      { label: 'duration-ms', phase: 'Debrief', model: haikuModel, effort: 'low',
+        schema: { type: 'object', required: ['ms'], properties: { ms: { type: 'number' } } } }
+    ).then(r => r?.ms || null).catch(() => null),
     agent(
       `Run: git -C ~/Desktop/Repos/skills rev-parse HEAD 2>/dev/null || git -C ~/.claude/skills rev-parse HEAD 2>/dev/null || echo unknown\nReturn { sha: "<40-char hex or unknown>" }`,
       { label: 'skills-commit', phase: 'Debrief', model: haikuModel, effort: 'low',
@@ -87,8 +95,11 @@ async function writeAuditRecord(status, extra = {}) {
     const _homeDir = (repoPath || '').replace(/\/Desktop\/Repos\/[^/]+\/?$/, '') || '/tmp'
     _telemetryPath = `${_homeDir}/Desktop/Repos/harness-telemetry/logs/${repo}__harness-plan__${issueKey}__${runTs || 'unknown-ts'}.jsonl`
   }
+  // ts: YYYY-MM-DD for dashboard day-grouping.
+  // args.today preferred; fall back to first 8 chars of compact UTC runTs (20260724T...)
+  const tsDate = args.today || (runTs ? runTs.slice(0, 4) + '-' + runTs.slice(4, 6) + '-' + runTs.slice(6, 8) : 'unknown')
   const record = JSON.stringify({
-    ts: args.today || 'unknown',
+    ts: tsDate,
     skill: 'harness-plan',
     skillsSchemaVersion: SKILLS_SCHEMA_VERSION,
     skillsCommit,

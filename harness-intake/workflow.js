@@ -617,11 +617,19 @@ for (let i = 0; i < grepAcs.length; i++) {
   entry.suspiciousZeroRetried = true  // audit trail — Phase C ran on this AC
   if (!retry) continue
   if (retry.retriedCount > entry.verifiedCount) {
-    log(`  Phase C ↳ "${ac.bullet.slice(0, 60)}": ${entry.verifiedCount} → ${retry.retriedCount} via ${retry.retriedPattern}`)
-    entry.verifiedCount = retry.retriedCount
-    entry.claimConflict = false
-    entry.suspiciousZeroResolved = true
-    entry.zeroRetryVariant = retry.retriedPattern
+    if (retry.retriedPattern === 'first-word') {
+      // first-word fallback is last-resort only — it matches too broadly (comments,
+      // package.json, test mocks, partial identifiers). Do NOT update verifiedCount.
+      // Flag for audit but don't let it inflate size decisions or count totals.
+      entry.phaseCFirstWordOnly = true
+      log(`  Phase C ↳ "${ac.bullet.slice(0, 60)}": first-word found ${retry.retriedCount} (broad match, not authoritative — verifiedCount stays ${entry.verifiedCount})`)
+    } else {
+      log(`  Phase C ↳ "${ac.bullet.slice(0, 60)}": ${entry.verifiedCount} → ${retry.retriedCount} via ${retry.retriedPattern}`)
+      entry.verifiedCount = retry.retriedCount
+      entry.claimConflict = false
+      entry.suspiciousZeroResolved = true
+      entry.zeroRetryVariant = retry.retriedPattern
+    }
   } else if (entry.verifiedCount === 0) {
     entry.suspiciousZeroConfirmed = true
     log(`  Phase C ↳ "${ac.bullet.slice(0, 60)}": still 0 after all variants — genuinely zero or pattern wrong`)
@@ -673,6 +681,17 @@ if (!workIntelResult) throw new Error('Work Intelligence merge failed — cannot
 const { workType, size, splitRequired, repoLayers, scopePath, acList } = workIntelResult
 const ticketType = workType  // preserve compatibility with downstream references
 const sourceTitle = workIntelResult.sourceTitle || input.split('\n')[0].slice(0, 80)
+
+// Triage vs. grounded size — track when Work Intelligence overrides the triage estimate.
+// classifyResult.size = ticket-text estimate (before grep verification)
+// size = research-verified final size
+const triageSize = classifyResult.size
+const triageSizeOverride = (triageSize && triageSize !== size)
+  ? { triageSize, groundedSize: size, reason: 'Work Intelligence re-derived from verified grep counts' }
+  : null
+if (triageSizeOverride) {
+  log(`⚠️  Size override: triage estimated ${triageSize} → research verified ${size} (ticket claims corrected)`)
+}
 
 // Lock migrationPattern with shell verification — try progressively simpler patterns
 // until one finds files, then use that as the authoritative pattern for the rest of the run.
@@ -752,6 +771,10 @@ if (!splitRequired) {
     ? `/harness-plan --intake <path-to-intake-manifest>`
     : `/harness-plan --intake <intake-manifest-path>`
 
+  const triageSizeLine = triageSizeOverride
+    ? `\n  triage:  estimated ${triageSizeOverride.triageSize} → verified ${triageSizeOverride.groundedSize} (ticket claims overridden by research)`
+    : ''
+
   const skipSummary = `
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 harness-intake
@@ -759,7 +782,7 @@ harness-intake
 
   ticket:  ${issueKey || 'unknown'}
   size:    ${size}        cost:  ~$${estimatedCostUsd}
-  type:    ${workType}
+  type:    ${workType}${triageSizeLine}
 
   reason:  ${workIntelResult.reasoning}
   ac:      ${acList.length} criteria synthesized${migrationPattern ? `  pattern: ${migrationPattern}` : ''}
@@ -778,6 +801,7 @@ harness-intake
     subtaskCount: 0,
     execution: 'sequential',
     framingConflicts: 0,
+    triageSizeOverride,
   })
   log(skipSummary)
   return {
@@ -1592,6 +1616,7 @@ await writeAuditRecord(planStatus, {
     .filter(ac => ac.suspiciousZeroResolved || ac.suspiciousZeroConfirmed)
     .map(ac => ({ bullet: ac.bullet, resolved: !!ac.suspiciousZeroResolved, variant: ac.zeroRetryVariant || null, finalCount: ac.verifiedCount })),
   qualityIssues,
+  triageSizeOverride,
 })
 
 // Build CLI group display lines
@@ -1646,13 +1671,17 @@ const groundedRealityLines = (() => {
   return lines.join('\n')
 })()
 
+const triageSizeLineLpath = triageSizeOverride
+  ? `\n  triage:  estimated ${triageSizeOverride.triageSize} → verified ${triageSizeOverride.groundedSize} (ticket claims overridden by research)`
+  : ''
+
 const cliSummary = `
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 harness-intake
   status:  ${planStatus}  ${statusIcon}
 
   ticket:  ${issueKey || 'unknown'}
-  size:    ${size}
+  size:    ${size}${triageSizeLineLpath}
   agents:  ${totalAgents}
 ${agentMetricsLines}
   cost:    ~$${estimatedCostUsd}

@@ -19,9 +19,17 @@ export const meta = {
 
 const resume = args.resumeState || {}
 
-// ─── Token tracking ───────────────────────────────────────────────────────────
+// ─── Token tracking + wall-clock start ───────────────────────────────────────
 // trackedAgent wraps agent() to accumulate output tokens per model tier.
 // For parallel blocks, snapshot from outside the block — never inside thunks.
+// _workflowStartTs: captured at run start for self-contained durationMs.
+
+let _workflowStartTs = null
+const _startTsPromise = agent(
+  `Run: python3 -c "import time; print(int(time.time()*1000))"\nReturn { ms: <number> }`,
+  { label: 'workflow-start-ts', phase: 'Load', model: 'claude-haiku-4-5-20251001', effort: 'low',
+    schema: { type: 'object', required: ['ms'], properties: { ms: { type: 'number' } } } }
+).then(r => { _workflowStartTs = r?.ms || null }).catch(() => {})
 
 const workflowStartTokens = budget.spent()
 const tokensByModel = { haiku: 0, sonnet: 0, opus: 0 }
@@ -68,14 +76,13 @@ let _telemetryPath = null
 
 async function writeAuditRecord(status, extra = {}) {
   const outputTokensTotal = budget.spent() - workflowStartTokens
+  await _startTsPromise  // ensure start timestamp resolved before computing delta
   const [durationMs, skillsCommit, runTs] = await Promise.all([
-    args.startTs
-      ? agent(
-          `Run: python3 -c "import time; print(int(time.time()*1000) - ${args.startTs})"\nReturn { ms: <number> }`,
-          { label: 'duration-ms', phase: 'Debrief', model: 'haiku', effort: 'low',
-            schema: { type: 'object', required: ['ms'], properties: { ms: { type: 'number' } } } }
-        ).then(r => r?.ms || null).catch(() => null)
-      : Promise.resolve(null),
+    agent(
+      `Run: python3 -c "import time; print(int(time.time()*1000) - ${_workflowStartTs || (args.startTs || 0)})"\nReturn { ms: <number> }`,
+      { label: 'duration-ms', phase: 'Debrief', model: 'haiku', effort: 'low',
+        schema: { type: 'object', required: ['ms'], properties: { ms: { type: 'number' } } } }
+    ).then(r => r?.ms || null).catch(() => null),
     agent(
       `Run: git -C ~/Desktop/Repos/skills rev-parse HEAD 2>/dev/null || git -C ~/.claude/skills rev-parse HEAD 2>/dev/null || echo unknown\nReturn { sha: "<40-char hex or unknown>" }`,
       { label: 'skills-commit', phase: 'Debrief', model: 'haiku', effort: 'low',
@@ -93,8 +100,9 @@ async function writeAuditRecord(status, extra = {}) {
     const issueKey = (args.planPath || '').match(/\b([A-Z]+-\d+)\b/i)?.[1] || null
     _telemetryPath = _buildImplTelemetryPath({ repoPath: args.repoPath, issueKey, rawText: args.planPath, timestamp: runTs })
   }
+  const tsDate = args.today || (runTs ? runTs.slice(0, 4) + '-' + runTs.slice(4, 6) + '-' + runTs.slice(6, 8) : 'unknown')
   const record = JSON.stringify({
-    ts: args.today || 'unknown',
+    ts: tsDate,
     skill: 'harness-implement',
     skillsSchemaVersion: SKILLS_SCHEMA_VERSION,
     skillsCommit,
