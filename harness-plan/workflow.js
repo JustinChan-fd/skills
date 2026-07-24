@@ -84,7 +84,8 @@ async function writeAuditRecord(status, extra = {}) {
     const issueKey = (input || '').match(/\b([A-Z]+-\d+)\b/)?.[1]
       || manifestEntry?.jiraKey
       || _slugFromInput(input)
-    _telemetryPath = `${process.env.HOME}/Desktop/Repos/harness-telemetry/logs/${repo}__harness-plan__${issueKey}__${runTs || 'unknown-ts'}.jsonl`
+    const _homeDir = (repoPath || '').replace(/\/Desktop\/Repos\/[^/]+\/?$/, '') || '/tmp'
+    _telemetryPath = `${_homeDir}/Desktop/Repos/harness-telemetry/logs/${repo}__harness-plan__${issueKey}__${runTs || 'unknown-ts'}.jsonl`
   }
   const record = JSON.stringify({
     ts: args.today || 'unknown',

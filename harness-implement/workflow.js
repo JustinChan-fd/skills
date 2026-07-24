@@ -41,7 +41,7 @@ const SKILLS_SCHEMA_VERSION = 'spec-v8'
 
 // ===== PURE (mirrors lib/) =====
 // lib/telemetry.js — keep identical. import() unavailable in workflow scripts (probe-confirmed).
-const _HARNESS_TELEMETRY_DIR = `${process.env.HOME}/Desktop/Repos/harness-telemetry`
+// NOTE: process.env is unavailable in the workflow runtime — home dir is derived from repoPath.
 function _repoNameFromPath(p) {
   if (!p) return 'unknown-repo'
   return String(p).replace(/\/$/, '').split('/').pop() || 'unknown-repo'
@@ -55,10 +55,11 @@ function _slugFromInput(text) {
 }
 // Format: {telemetryDir}/logs/{repo}__{skill}__{ticket}__{timestamp}.jsonl
 function _buildImplTelemetryPath({ repoPath, issueKey, rawText, timestamp }) {
-  const repo = _repoNameFromPath(repoPath)
-  const key  = issueKey || _slugFromInput(rawText)
-  const ts   = timestamp || 'unknown-ts'
-  return `${_HARNESS_TELEMETRY_DIR}/logs/${repo}__harness-implement__${key}__${ts}.jsonl`
+  const repo    = _repoNameFromPath(repoPath)
+  const key     = issueKey || _slugFromInput(rawText)
+  const ts      = timestamp || 'unknown-ts'
+  const homeDir = (repoPath || '').replace(/\/Desktop\/Repos\/[^/]+\/?$/, '') || '/tmp'
+  return `${homeDir}/Desktop/Repos/harness-telemetry/logs/${repo}__harness-implement__${key}__${ts}.jsonl`
 }
 // ===== END PURE =====
 
