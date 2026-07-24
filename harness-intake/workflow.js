@@ -426,7 +426,7 @@ ${ac.searchScope  ? `SEARCH SCOPE: ${repoPath}/${ac.searchScope}` : `SEARCH SCOP
 ${ac.shellCommand ? `SHELL COMMAND: ${ac.shellCommand}` : ''}
 
 EXECUTE one command (pick by researchType):
-  grep:  timeout 15 grep -rl --include="*.ts" --include="*.tsx" --include="*.js" --include="*.jsx" "${ac.grepPattern || '.'}" ${ac.searchScope ? repoPath + '/' + ac.searchScope : acSearchRoot}/ 2>/dev/null | wc -l
+  grep:  timeout 15 grep -rl "${ac.grepPattern || '.'}" ${ac.searchScope ? repoPath + '/' + ac.searchScope : acSearchRoot}/ 2>/dev/null | wc -l
   find:  ${ac.shellCommand || `find ${ac.searchScope ? repoPath + '/' + ac.searchScope : acSearchRoot} -type f 2>/dev/null | wc -l`}
   read:  ${ac.shellCommand || `cat ${repoPath}/package.json`} (count relevant lines)
   shell: ${ac.shellCommand || 'echo 0'}
@@ -454,8 +454,7 @@ const acListWithVerify = acSynthList.map((ac, idx) => {
 
 // Phase C — broader-pattern retry for ALL grep ACs (un-skippable)
 // Runs on every AC where researchType=grep, regardless of verifiedCount.
-// Phase B uses --include filters that can silently exclude test files (*.test.js etc).
-// Running 3 broader variants on every grep AC catches those misses before Phase D sizes the ticket.
+// Phase C runs broader pattern variants to catch files missed by the initial grep.
 //
 // Audit trail: every grep AC gets suspiciousZeroRetried=true after this phase.
 // The structural validator will FAIL with PHASE_C_NOT_RUN if any grep AC has
@@ -602,7 +601,7 @@ if (migrationPattern && workIntelResult.workType === 'migration') {
   for (const candidate of candidates) {
     const escaped = candidate.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
     const checkResult = await trackedAgent(
-      `Run: timeout 15 grep -rl --include="*.ts" --include="*.tsx" --include="*.js" --include="*.jsx" "${escaped}" ${verifyRoot}/ 2>/dev/null | wc -l\nReturn { count: <number> }`,
+      `Run: timeout 15 grep -rl "${escaped}" ${verifyRoot}/ 2>/dev/null | wc -l\nReturn { count: <number> }`,
       { label: 'pattern-lock', phase: 'Triage', model: haikuModel,
         schema: { type: 'object', required: ['count'], properties: { count: { type: 'number' } } } }
     )
@@ -659,7 +658,7 @@ if (!splitRequired) {
   }
 
   const nextCmd = issueKey
-    ? `/harness-plan --intake docs/plans/${args.today || 'today'}-${issueKey}-intake-manifest.json`
+    ? `/harness-plan --intake <path-to-intake-manifest>`
     : `/harness-plan --intake <intake-manifest-path>`
 
   const skipSummary = `
@@ -724,7 +723,7 @@ ${ac.searchScope ? `SEARCH SCOPE: ${repoPath}/${ac.searchScope}` : `SEARCH SCOPE
 ${ac.shellCommand ? `SHELL COMMAND: ${ac.shellCommand}` : ''}
 
 REQUIRED (pick by researchType):
-  grep:  timeout 15 grep -rl --include="*.ts" --include="*.tsx" --include="*.js" --include="*.jsx" "${ac.grepPattern || '.'}" ${ac.searchScope ? repoPath + '/' + ac.searchScope : searchRoot}/ 2>/dev/null
+  grep:  timeout 15 grep -rl "${ac.grepPattern || '.'}" ${ac.searchScope ? repoPath + '/' + ac.searchScope : searchRoot}/ 2>/dev/null
          Capture ALL paths. Then wc -l for count.
   find:  ${ac.shellCommand || `find ${ac.searchScope ? repoPath + '/' + ac.searchScope : searchRoot} -type f 2>/dev/null`}
   read:  ${ac.shellCommand || `cat ${repoPath}/package.json`}
@@ -767,13 +766,13 @@ SEARCH ROOT: ${searchRoot}${layer ? '/' + layer : ''}
 ${patternGrepArg ? `PATTERN: ${patternGrepArg}` : 'TICKET TYPE: non-migration — enumerate all source files by directory'}
 
 REQUIRED COMMANDS (run ALL of these in order):
-${patternGrepArg ? `1. timeout 15 grep -rl --include="*.ts" --include="*.tsx" --include="*.js" --include="*.jsx" "${patternGrepArg}" ${searchRoot}${layer ? '/' + layer : ''}/ 2>/dev/null
+${patternGrepArg ? `1. timeout 15 grep -rl "${patternGrepArg}" ${searchRoot}${layer ? '/' + layer : ''}/ 2>/dev/null
    → capture the full list of matching paths (ALL paths, not just head -5)
    → if command times out or returns nothing, return files=[] fileCount=0
 2. echo above output | wc -l → for fileCount
 3. if fileCount > 8:
    ls ${searchRoot}${layer ? '/' + layer : ''}/ → enumerate subdirectories
-   then timeout 10 grep -rl --include="*.ts" --include="*.tsx" --include="*.js" --include="*.jsx" "${patternGrepArg}" ${searchRoot}${layer ? '/' + layer : ''}/<subdir>/ 2>/dev/null for each subdir` : `1. find ${searchRoot}${layer ? '/' + layer : ''} -type f \\( -name "*.ts" -o -name "*.tsx" -o -name "*.js" -o -name "*.jsx" \\) 2>/dev/null
+   then timeout 10 grep -rl "${patternGrepArg}" ${searchRoot}${layer ? '/' + layer : ''}/<subdir>/ 2>/dev/null for each subdir` : `1. find ${searchRoot}${layer ? '/' + layer : ''} -type f 2>/dev/null
    → capture ALL paths
 2. echo above output | wc -l → for fileCount
 3. if fileCount > 8:

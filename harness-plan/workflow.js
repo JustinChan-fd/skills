@@ -96,7 +96,7 @@ Return { appended: true }.`,
 const researcherModel = 'anthropic.claude-sonnet-4-6'
 const synthModel      = 'anthropic.claude-sonnet-4-6'
 const haikuModel      = 'anthropic.claude-haiku-4-5-20251001'
-const opusModel       = 'anthropic.claude-opus-4-6-v1'
+const opusModel       = 'claude-opus-4-8'
 // architectModel and decomposeModel hoisted — set from either manifestEntry or Intake path
 
 // ─── Manifest contract ────────────────────────────────────────────────────────
@@ -300,20 +300,6 @@ const COVERAGE_SCHEMA = {
       },
     },
   },
-}
-
-// ─── Shared merge helper ──────────────────────────────────────────────────────
-
-function mergeResearchResults(base, additions) {
-  return {
-    filesInScope: [...(base.filesInScope || []), ...(additions.filesInScope || [])],
-    patterns: [...(base.patterns || []), ...(additions.patterns || [])],
-    constraints: [...(base.constraints || []), ...(additions.constraints || [])],
-    testFramework: base.testFramework || additions.testFramework,
-    mockPolicy: base.mockPolicy || additions.mockPolicy,
-    codegenTools: [...(base.codegenTools || []), ...(additions.codegenTools || [])],
-    couldNotDetermine: [...(base.couldNotDetermine || []), ...(additions.couldNotDetermine || [])],
-  }
 }
 
 // ─── Phase 0: Intake ─────────────────────────────────────────────────────────
@@ -608,7 +594,7 @@ The architect produces one task per file being modified. This is non-negotiable 
 - Concerns exist to gather information, not to group tasks. One concern can produce many tasks.`,
     { label: 'decompose', phase: 'Decompose', model: decomposeModel, schema: DECOMPOSE_SCHEMA }
   )
-  decomposeConcerns = decomposeResult?.concerns || [{ label: 'researcher', filesToRead: [], question: input }]
+  decomposeConcerns = decomposeResult?.concerns || [{ label: 'researcher', filesToRead: [], questions: [input] }]
 
   // Post-decompose validation: warn on obvious over-bundling before research runs
   for (const c of decomposeConcerns) {
@@ -648,7 +634,7 @@ The architect produces one task per file being modified. This is non-negotiable 
   }]
   log(`Decompose: skipped — manifest entry, ${decomposeConcerns[0].filesToRead.length} file(s) pre-scoped`)
 } else {
-  decomposeConcerns = [{ label: 'main', filesToRead: [], question: input }]
+  decomposeConcerns = [{ label: 'main', filesToRead: [], questions: [input] }]
   log(`Decompose: skipped — size is ${size}`)
 }
 
@@ -1146,8 +1132,6 @@ const manifestObj = {
 }
 
 // Write each concern's plan files in parallel — one agent per concern (bounded prompt size)
-const allPlanFiles = planEntries.flatMap(e => [`docs/plans/${e.fileName}`, `docs/plans/${e.jsonName}`])
-
 const writeResults = await parallel(planEntries.map(e => () => trackedAgent(
   `Write TWO files exactly as provided using the Write tool. Do NOT truncate or reformat — write byte-for-byte.
 

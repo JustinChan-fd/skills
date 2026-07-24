@@ -464,15 +464,6 @@ const implementationReports = []
 async function runDeveloper(task) {
   const label = `${task.id}-${task.title.slice(0, 25).replace(/\s+/g, '-').toLowerCase()}`
 
-  // TDD: capture red run before implementation
-  let tddRedOutput = null
-  if (task.tddRequired) {
-    tddRedOutput = await agent(
-      `Run: cd ${workDir} && npm test -- --run 2>&1 | tail -30\nReturn ONLY the raw output.`,
-      { label: `tdd-red-${task.id}`, phase: 'Implement', model: 'haiku' }
-    )
-  }
-
   const devPrompt = `REPO: ${workDir}
 TASK_ID: ${task.id}
 TITLE: ${task.title}
@@ -533,7 +524,7 @@ At the end of your work, your return value must be a structured handoff JSON:
     { label: `diff-${label}`, phase: 'Implement', model: 'haiku' }
   ) || 'diff unavailable'
 
-  return { task, handoff, diffText, label, needsContext: false, tddRedOutput, tddGreenOutput }
+  return { task, handoff, diffText, label, needsContext: false, tddGreenOutput }
 }
 
 // Group-level round: fan-out devs → per-task diff review → evaluate.
@@ -566,16 +557,16 @@ ${dr.diffText}`,
   tokensByModel.haiku += budget.spent() - reviewBlockStart
 
   // Partition: NEEDS_CONTEXT is blocked; everything else is passed
-  const passed = [], blocked = [], needsContext = []
+  const passed = [], needsContext = []
   for (const r of withReviews.filter(Boolean)) {
     if (r.needsContext || r.handoff?.status === 'NEEDS_CONTEXT') {
       needsContext.push({ task: r.task, handoff: r.handoff, qaResult: { status: 'NEEDS_CONTEXT' }, codeReview: null })
     } else {
-      passed.push({ task: r.task, handoff: r.handoff, qaResult: { status: 'PASS' }, codeReview: r.codeReview, tddRedOutput: r.tddRedOutput, tddGreenOutput: r.tddGreenOutput })
+      passed.push({ task: r.task, handoff: r.handoff, qaResult: { status: 'PASS' }, codeReview: r.codeReview, tddGreenOutput: r.tddGreenOutput })
     }
   }
 
-  return { passed, blocked, needsContext }
+  return { passed, blocked: [], needsContext }
 }
 
 for (const group of taskGroups) {
@@ -598,7 +589,7 @@ for (const group of taskGroups) {
   } else {
     for (const report of implementationReports.filter(r => group.tasks.some(t => t.id === r.task.id))) {
       const s = report.qaResult?.status
-      if (s === 'PASS' || s === 'PASS_WITH_CONCERNS') {
+      if (s === 'PASS') {
         await trackedAgent(
           `Commit completed task.\nREPO: ${workDir}\n1. git -C ${workDir} add -A\n2. git -C ${workDir} commit -m "${planKey} ${report.task.id}: ${report.task.title.slice(0, 55)}"\nReturn commit hash or "NOTHING_TO_COMMIT".`,
           { label: `commit-${report.task.id}`, phase: 'Implement', model: 'haiku' }
@@ -866,7 +857,6 @@ Format: one paragraph + bullet list of key changes. No headers.`,
 
 const passed = implementationReports.filter(r => r.handoff?.status === 'DONE' || r.qaResult?.status === 'PASS')
 const blocked = implementationReports.filter(r => r.handoff?.status === 'NEEDS_CONTEXT' || r.qaResult?.status === 'NEEDS_CONTEXT')
-const totalRedispatches = 0
 
 const debrief = `# harness-implement debrief: ${planData.prTitle}
 
@@ -883,7 +873,7 @@ const debrief = `# harness-implement debrief: ${planData.prTitle}
 | Tasks total | ${implementationReports.length} |
 | Tasks passed QA | ${passed.length} |
 | Tasks blocked | ${blocked.length} |
-| QA redispatches | ${totalRedispatches} |
+| QA redispatches | 0 |
 | Critical code review findings | ${criticalFindings.length} |
 | Code review fixes applied | ${codeReviewFixes.length} |
 | Security status | ${securityResult?.status || 'not run'} |
@@ -1000,7 +990,6 @@ const auditRecord = JSON.stringify({
   tasksTotal: implementationReports.length,
   tasksPassed: passed.length,
   tasksBlocked: blocked.length,
-  totalRedispatches,
   criticalFindings: criticalFindings.length,
   codeReviewFixesApplied: codeReviewFixes.length,
   testsPassed: verifyResult?.testsPassed ?? null,
@@ -1017,7 +1006,7 @@ const auditRecord = JSON.stringify({
   costNote: 'estimated total: output cost × 2.5 (input tokens not tracked; input rates ~1/5 of output rates, typical input volume ~4-6x output). Verify on Anthropic usage dashboard.',
   blockedDetails: blocked.map(r => ({ id: r.task.id, reason: r.handoff?.caveats || 'NEEDS_CONTEXT' })),
   recommendations: [
-    ...(totalRedispatches === 0 ? ['plan quality: no redispatches — descriptions are self-contained'] : [`plan quality: ${totalRedispatches} redispatch(es) — review task descriptions for missing snippets or ambiguous HOW fields`]),
+    'plan quality: no redispatches — descriptions are self-contained',
     ...(verifyResult?.testsPassed === false ? ['failing tests after implement — check TDD evidence in task reports'] : []),
     ...(verifyResult?.typeCheckPassed === false ? ['type errors present — run npx tsc --noEmit to see details'] : []),
     ...(hasUnfixedCritical ? [`${criticalFindings.length - codeReviewFixes.length} unfixed critical finding(s) — must resolve before merge`] : criticalFindings.length > 0 ? [`${criticalFindings.length} critical finding(s) applied as fixes`] : []),
@@ -1090,7 +1079,7 @@ harness-implement
 ${agentMetricsLines}
   cost:    ~$${estimatedCostUsd}
 
-  tasks: ${passed.length}/${implementationReports.length} passed    blocks: ${blocked.length}    redispatches: ${totalRedispatches}
+  tasks: ${passed.length}/${implementationReports.length} passed    blocks: ${blocked.length}
   tests: ${verifyResult?.testsPassed === true ? 'PASS' : verifyResult?.testsPassed === false ? 'FAIL' : 'not run'}    types: ${verifyResult?.typeCheckPassed === true ? 'clean' : verifyResult?.typeCheckPassed === false ? 'errors' : 'not run'}    security: ${securityResult?.status || 'not run'}
 ${taskLines}${blockedLines}
 
@@ -1129,7 +1118,6 @@ return {
       tasksTotal: partialState.tasksTotal || 0,
       tasksPassed: 0,
       tasksBlocked: 0,
-      totalRedispatches: 0,
       criticalFindings: 0,
       codeReviewFixesApplied: 0,
       testsPassed: null,
