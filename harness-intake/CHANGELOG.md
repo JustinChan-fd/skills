@@ -4,6 +4,30 @@ A running journal of paradigm shifts, key decisions, and bug fixes. Most recent 
 
 ---
 
+## 2026-07-24 — Path normalization on coordinator output
+
+**Problem (run 9):** Even though grouper inputs were path-normalized before the coordinator, the coordinator reconstructed absolute paths in its output (`/Users/.../src/client/middleware/auth.js`) for some subtasks. The dedup then compared absolute vs relative paths and couldn't match them, producing "4 duplicate pairs with relative/absolute paths" in the verifier.
+
+**Fix:** Apply the same `_toRelPath` normalization to coordinator output subtasks (after description re-attachment, before any dedup). Now both pre- and post-coordinator paths are consistently relative before dedup runs.
+
+**Principle:** Any path-emitting agent may hallucinate absolute paths. Normalize at the boundary, not just at the input side.
+
+---
+
+## 2026-07-24 — Post-coordinator dedup merge + ac-gap: category
+
+**Problem (run 8):** Two quality issues were classified misleadingly:
+1. The coordinator emitted both "Remove src/client/middleware" and "Remove src/client/middleware/auth.js" targeting the same 2 files. The existing file-key dedup dropped one, but it surfaced as `verify: DUPLICATE SUBTASK` in the verifier output — a symptom of the dedup not merging, just silently dropping.
+2. Three `verify: AC UNCOVERED:` issues were surfaced as harness defects, but they're legitimate ticket-writing gaps — the ticket genuinely has no scope for those tasks.
+
+**Fix 1 — dedupeByFileSet:** Replaced the secondary file-key dedup with `dedupeByFileSet()` (extracted to `lib/dedup.js`, TDD'd). Same dedup key (sorted joined file array), but now merges rather than drops — keeps the subtask with the shorter (broader-scope) title. Eliminates the coordinator's duplicate-file-set output.
+
+**Fix 2 — categorizeVerifyIssue:** Any `verify: AC UNCOVERED:` string is now reclassified to `ac-gap:` before being pushed to qualityIssues. This makes clear these are ticket-writing gaps, not harness defects.
+
+**TDD:** Both functions are pure, extracted to `lib/dedup.js`, and covered by `lib/dedup.test.js` (12 cases).
+
+---
+
 ## 2026-07-24 — Pre-coordinator dedup + path normalization
 
 **Problem:** Coordinator was receiving 41 subtask drafts (304 file refs, 45k chars) and stalling on all 6 retry attempts (180s each). Two root causes:

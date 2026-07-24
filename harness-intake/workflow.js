@@ -125,6 +125,67 @@ function _ejectTestFiles(subtasks, issueKey, scopePath) {
     needsReview: false,
   }))
 }
+// lib/dedup.js — keep identical.
+function makeAbsPrefix(repoPath) {
+  if (!repoPath) return null
+  return String(repoPath).replace(/\/$/, '') + '/'
+}
+function toRelPath(f, absPrefix) {
+  if (!absPrefix || !f) return f
+  return f.startsWith(absPrefix) ? f.slice(absPrefix.length) : f
+}
+function dedupeByOverlapRatio(subtasks, absPrefix) {
+  const sorted = [...subtasks].sort((a, b) => (b.scopePath || '').length - (a.scopePath || '').length)
+  const seen = new Set()
+  const result = []
+  for (const s of sorted) {
+    const rawFiles = s.files || []
+    if (rawFiles.length === 0) { result.push(s); continue }
+    const files = absPrefix ? rawFiles.map(f => toRelPath(f, absPrefix)) : rawFiles
+    const sf = new Set(files)
+    const overlap = [...sf].filter(f => seen.has(f)).length / sf.size
+    if (overlap < 0.5) {
+      result.push(s)
+      for (const f of sf) seen.add(f)
+    }
+  }
+  return result
+}
+function dedupeByFileSet(subtasks) {
+  const seenKeys = new Map()
+  const result = []
+  for (const s of subtasks) {
+    const files = s.files || []
+    if (files.length === 0) { result.push(s); continue }
+    const key = files.slice().sort().join('|')
+    if (seenKeys.has(key)) {
+      const idx = seenKeys.get(key)
+      if (s.title.length < result[idx].title.length) {
+        result[idx] = { ...result[idx], title: s.title }
+      }
+    } else {
+      seenKeys.set(key, result.length)
+      result.push(s)
+    }
+  }
+  return result
+}
+function categorizeVerifyIssue(issue) {
+  if (issue.startsWith('verify: AC UNCOVERED:')) {
+    return 'ac-gap:' + issue.slice('verify:'.length)
+  }
+  return issue
+}
+// lib/classify.js — keep identical.
+function classifyAcBullet(bullet) {
+  const text = bullet.toLowerCase()
+  const isCleanup    = text.includes('remov') || text.includes('delet') || text.includes('package.json') || text.includes('npm install')
+  const isValidation = text.includes('verif') || text.includes('confirm') || text.includes('passing') || text.includes('clean install') || text.includes('ran clean') || text.includes('baseline') || /\bcheck\b/.test(text) || /\bremains?\b/.test(text)
+  const isDeferred   = text.includes('abortcontroller') || text.includes('timeout') || text.includes('npm ')
+  const isValidationFinal = isValidation || (isCleanup && isDeferred)
+  const isMigration  = !isCleanup && !isValidationFinal && !isDeferred
+  return { isCleanup, isValidation: isValidationFinal, isDeferred, isMigration }
+}
 // ===== END PURE =====
 
 // telemetryPath is set on first writeAuditRecord call (needs a timestamp agent),
@@ -999,22 +1060,6 @@ phase('Split Design')
 // Extract plain paths for verify/debrief prompts, keep acCoverage for context
 const layerFilePaths = (files) => files.map(f => typeof f === 'string' ? f : f.path)
 
-// Classify an AC bullet by type — used by groupers and post-verify stub injectors
-function classifyAcBullet(bullet) {
-  const text = bullet.toLowerCase()
-  // isValidation: 'no ' removed (matches any sentence), ' check'/'remain' tightened to avoid
-  // false positives on implementation ACs like "No bare fetch() calls remain standardized"
-  // 'ran clean' catches "npm install ran clean with no warnings" — a validation outcome, not a file-touch task
-  const isCleanup    = text.includes('remov') || text.includes('delet') || text.includes('package.json') || text.includes('npm install')
-  const isValidation = text.includes('verif') || text.includes('confirm') || text.includes('passing') || text.includes('clean install') || text.includes('ran clean') || text.includes('baseline') || /\bcheck\b/.test(text) || /\bremains?\b/.test(text)
-  const isDeferred   = text.includes('abortcontroller') || text.includes('timeout') || text.includes('npm ')
-  // isCleanup+isDeferred together always means a package-level validation step (e.g. npm install) —
-  // treat as validation (no file list, not a Jira subtask)
-  const isValidationFinal = isValidation || (isCleanup && isDeferred)
-  const isMigration  = !isCleanup && !isValidationFinal && !isDeferred
-  return { isCleanup, isValidation: isValidationFinal, isDeferred, isMigration }
-}
-
 // Stage 1: design:grouper — one Haiku per AC, mechanical batching only (no cross-AC decisions)
 // Input: a single AC's file list from AC research results (not layer research)
 // Each grouper sees ≤N files for its own AC — tiny context, no stall risk
@@ -1065,31 +1110,16 @@ const allGrouperDraftsRaw = grouperResultsAll.filter(Boolean).flatMap(d => d.sub
 // Pre-normalize: strip absolute path prefix so all file refs are repo-relative.
 // Groupers sometimes emit absolute paths (the grep returns full paths); the coordinator
 // cannot detect conflicts between "/Users/.../src/client/foo.js" and "src/client/foo.js".
-const _absPrefix = repoPath ? repoPath.replace(/\/$/, '') + '/' : null
-function _toRelPath(f) {
-  if (!_absPrefix || !f) return f
-  return f.startsWith(_absPrefix) ? f.slice(_absPrefix.length) : f
-}
+const _absPrefix = makeAbsPrefix(repoPath)
 for (const s of allGrouperDraftsRaw) {
-  if (s.files) s.files = s.files.map(_toRelPath)
+  if (s.files) s.files = s.files.map(f => toRelPath(f, _absPrefix))
 }
 
 // Pre-dedup: run overlap-ratio dedup BEFORE the coordinator so it receives a lean set.
 // The same dedup runs again post-coordinator to catch any stubs the coordinator re-introduces.
 // This is the primary fix for coordinator stalls — 41 drafts → typically 10-18 after dedup.
-const _preDedupSorted = [...allGrouperDraftsRaw].sort((a, b) => (b.scopePath || '').length - (a.scopePath || '').length)
-const _preSeen = new Set()
-const _preDedupResult = []
-for (const s of _preDedupSorted) {
-  const sf = new Set(s.files || [])
-  if (sf.size === 0) { _preDedupResult.push(s); continue }
-  const overlap = [...sf].filter(f => _preSeen.has(f)).length / sf.size
-  if (overlap < 0.5) {
-    _preDedupResult.push(s)
-    for (const f of sf) _preSeen.add(f)
-  }
-}
-const allGrouperDrafts = _preDedupResult
+// Files are already normalized to relative paths at this point (_absPrefix applied above).
+const allGrouperDrafts = dedupeByOverlapRatio(allGrouperDraftsRaw)
 log(`design:grouper: ${validAcResults.length} ACs → ${allGrouperDraftsRaw.length} raw drafts → ${allGrouperDrafts.length} after pre-dedup (coordinator input)`)
 
 // Stage 2: design:coordinator — file conflict resolution and misclassification detection.
@@ -1198,37 +1228,16 @@ if (rawProposedNonEmpty.length < rawProposed.length) {
   rawProposed.push(...rawProposedNonEmpty)
 }
 
-// Dedup by file set — parent layers contain child layer files, so parallel designers
-// produce overlapping subtasks. Keep the subtask whose scopePath is most specific
-// (longest path). Two subtasks are duplicates if their file sets overlap >50%.
-const deduped = []
-const seenFiles = new Set()
-// Sort by scopePath length desc — most specific subtasks win
-const sorted = [...rawProposed].sort((a, b) => (b.scopePath || '').length - (a.scopePath || '').length)
-for (const s of sorted) {
-  const sFiles = new Set(s.files || [])
-  if (sFiles.size === 0) { deduped.push(s); continue }
-  const overlapCount = [...sFiles].filter(f => seenFiles.has(f)).length
-  const overlapRatio = overlapCount / sFiles.size
-  if (overlapRatio < 0.5) {
-    deduped.push(s)
-    for (const f of sFiles) seenFiles.add(f)
-  }
-}
+// Post-coordinator dedup: same overlap-ratio logic as pre-coordinator.
+// Pass _absPrefix so coordinator's absolute paths normalize before comparison —
+// this is the root cause of the run 10 subtask explosion (51 subtasks vs 13).
+// Without _absPrefix, relative paths from groupers never match absolute paths from coordinator.
+const deduped = dedupeByOverlapRatio(rawProposed, _absPrefix)
 
-// Secondary dedup: keyed on sorted-joined file paths — catches identical file sets
-// that survived the overlap-ratio check (e.g. two designers with the same files, different scopePaths)
-const seenFileKeys = new Set()
-const finalDeduped = []
-for (const s of deduped) {
-  const fileKey = (s.files || []).slice().sort().join('|')
-  if (!fileKey || !seenFileKeys.has(fileKey)) {
-    finalDeduped.push(s)
-    if (fileKey) seenFileKeys.add(fileKey)
-  }
-}
-
-const flatProposed = finalDeduped
+// Secondary dedup: merge any two subtasks sharing identical sorted file arrays.
+// Keeps the subtask with the shorter (broader-scope) title — fixes coordinator
+// emitting both "Remove middleware" and "Remove middleware/auth.js" for the same 2 files.
+const flatProposed = dedupeByFileSet(deduped)
 log(`Split Design: coordinator → ${rawProposed.length} subtasks → ${deduped.length} after overlap-ratio dedup → ${flatProposed.length} after file-key dedup`)
 
 // Build stub(s) for a given AC + file list — chunks at 8 files to enforce the size cap
@@ -1524,7 +1533,7 @@ if (verifyResult?.issues?.length > 0) {
   for (const issue of verifyResult.issues) {
     // If it's a ticket-number complaint AND groundedReality already documents it, skip
     if (TICKET_CORRECTION_RE.test(issue) && ticketCorrections.length > 0) continue
-    qualityIssues.push(`verify: ${issue}`)
+    qualityIssues.push(categorizeVerifyIssue(`verify: ${issue}`))
   }
 }
 if (verifyResult?.stubsNeedReview?.length > 0) {
