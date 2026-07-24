@@ -1060,21 +1060,42 @@ Return LAYER_SUBTASKS_SCHEMA.`,
   grouperResultsAll.push(...batchResults)
 }
 
-const allGrouperDrafts = grouperResultsAll.filter(Boolean).flatMap(d => d.subtasks || [])
-log(`design:grouper: ${validAcResults.length} ACs → ${allGrouperDrafts.length} subtask drafts`)
+const allGrouperDraftsRaw = grouperResultsAll.filter(Boolean).flatMap(d => d.subtasks || [])
 
-// Stage 2: design:coordinator (Sonnet) — G1/G2/G3 assignment, dependsOn wiring,
-// file conflict resolution, and misclassification detection across all grouper outputs.
-// Input: subtask drafts (~10-20 objects) — context is ~5-6x smaller than design:root was.
-// Returns COORDINATOR_SCHEMA (SPLIT_SCHEMA subtasks + misclassifications[]).
-// Opus handles the stall: coordinator receives all grouper outputs simultaneously (~100+ prompt lines).
-// Input is stripped to mechanical fields only — descriptions are prose the coordinator doesn't need
-// for conflict resolution, G-group assignment, or dependsOn wiring. Cuts input ~50%.
-// Coordinator still outputs description (copied from grouper draft via schema pass-through).
-// The deterministic merge below re-normalizes groupId/dependsOn on any later-injected stubs.
-// groupId/canRunInParallel/dependsOn/execution are NOT in this schema —
-// they are computed deterministically in JS after the coordinator returns.
-// Asking the model to produce them caused persistent G1/G2/G3 inversions.
+// Pre-normalize: strip absolute path prefix so all file refs are repo-relative.
+// Groupers sometimes emit absolute paths (the grep returns full paths); the coordinator
+// cannot detect conflicts between "/Users/.../src/client/foo.js" and "src/client/foo.js".
+const _absPrefix = repoPath ? repoPath.replace(/\/$/, '') + '/' : null
+function _toRelPath(f) {
+  if (!_absPrefix || !f) return f
+  return f.startsWith(_absPrefix) ? f.slice(_absPrefix.length) : f
+}
+for (const s of allGrouperDraftsRaw) {
+  if (s.files) s.files = s.files.map(_toRelPath)
+}
+
+// Pre-dedup: run overlap-ratio dedup BEFORE the coordinator so it receives a lean set.
+// The same dedup runs again post-coordinator to catch any stubs the coordinator re-introduces.
+// This is the primary fix for coordinator stalls — 41 drafts → typically 10-18 after dedup.
+const _preDedupSorted = [...allGrouperDraftsRaw].sort((a, b) => (b.scopePath || '').length - (a.scopePath || '').length)
+const _preSeen = new Set()
+const _preDedupResult = []
+for (const s of _preDedupSorted) {
+  const sf = new Set(s.files || [])
+  if (sf.size === 0) { _preDedupResult.push(s); continue }
+  const overlap = [...sf].filter(f => _preSeen.has(f)).length / sf.size
+  if (overlap < 0.5) {
+    _preDedupResult.push(s)
+    for (const f of sf) _preSeen.add(f)
+  }
+}
+const allGrouperDrafts = _preDedupResult
+log(`design:grouper: ${validAcResults.length} ACs → ${allGrouperDraftsRaw.length} raw drafts → ${allGrouperDrafts.length} after pre-dedup (coordinator input)`)
+
+// Stage 2: design:coordinator — file conflict resolution and misclassification detection.
+// groupId/canRunInParallel/dependsOn/execution are computed deterministically in JS after it returns.
+// Input is stripped to mechanical fields only — descriptions are prose the coordinator doesn't need.
+// Asking the model to produce groupId caused persistent G1/G2/G3 inversions.
 const COORDINATOR_SCHEMA = {
   type: 'object',
   required: ['subtasks', 'misclassifications'],
