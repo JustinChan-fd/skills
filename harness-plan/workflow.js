@@ -100,6 +100,34 @@ const haikuModel      = 'anthropic.claude-haiku-4-5-20251001'
 const opusModel       = 'claude-opus-4-8'
 // architectModel and decomposeModel hoisted — set from either manifestEntry or Intake path
 
+// ===== PURE (mirrors lib/) =====
+// lib/barrier.js — keep identical. import() unavailable in workflow scripts (probe-confirmed).
+const MAX_PROBE_LOOPS = 2
+const NEVER_LIST = {
+  'irreversible-destructive': ['delete', 'drop table', 'force-push', 'force push', 'prod deploy', 'rm -rf', 'truncate'],
+  'security-auth-permission': ['auth', 'permission', 'credential', 'secret', 'token', 'iam', 'acl', 'rbac'],
+  'cost-over-threshold':      ['budget exceed', 'over budget', 'cost cap'],
+  'public-api-contract':      ['public api', 'breaking change', 'contract change', 'schema migration'],
+  'out-of-scope':             ['outside scope', 'unplanned file', 'not in plan'],
+  'legal-compliance':         ['license', 'gdpr', 'compliance', 'pii'],
+}
+function matchesNeverList(action) {
+  const a = String(action).toLowerCase()
+  for (const [cat, kws] of Object.entries(NEVER_LIST))
+    if (kws.some(k => a.includes(k))) return cat
+  return null
+}
+function makeBarrierRecord({ decision, hinge, options, probes, confidence, blocking }) {
+  return { decision, hinge, options: options ?? [], probes: probes ?? [], confidence: confidence ?? null, blocking: !!blocking }
+}
+function validateBarrierRecord(r) {
+  const errors = []
+  for (const k of ['decision', 'hinge']) if (!r?.[k]) errors.push(`missing ${k}`)
+  if (typeof r?.blocking !== 'boolean') errors.push('blocking must be boolean')
+  return { valid: errors.length === 0, errors }
+}
+// ===== END PURE =====
+
 // ─── Manifest contract ────────────────────────────────────────────────────────
 // Every harness-plan run produces a manifest alongside plan files.
 // XS/S/M → manifest with plans array length 1.
@@ -837,6 +865,76 @@ ${qaAnswers ? `\nQA_ANSWERS:\n${qaAnswers}` : ''}`,
       log(`⚠ Architect[${concern.label}]: stalled/null — concern dropped. Check researcher output for oversized payload.`)
       return null
     }
+
+    // ── Barrier Protocol (architect/decompose fork only) ──────────────────────
+    // Check every task title+description for NEVER_LIST keywords.
+    // On match: record barrier, write audit entry, return null (PROPOSED_WITH_GAPS via crash handler).
+    // On no match: run confidence probe loop (≤ MAX_PROBE_LOOPS) if openQuestions contains blockers.
+    {
+      // Phase 1: NEVER_LIST scan — hard stop, no probe loop
+      let neverHit = null
+      for (const task of architectResult.tasks) {
+        const combined = `${task.title || ''} ${task.description || ''}`
+        const cat = matchesNeverList(combined)
+        if (cat) { neverHit = { task, cat }; break }
+      }
+      if (neverHit) {
+        const rec = makeBarrierRecord({
+          decision: `task "${neverHit.task.title}" matches NEVER_LIST category "${neverHit.cat}"`,
+          hinge: neverHit.cat,
+          probes: [],
+          confidence: 0,
+          blocking: true,
+        })
+        log(`🛑 Barrier[${concern.label}]: NEVER_LIST hit — "${neverHit.cat}" in task "${neverHit.task.title}". Surfacing for user review.`)
+        await writeAuditRecord('PROPOSED_WITH_GAPS', { barrier: rec })
+        return null
+      }
+
+      // Phase 2: confidence probe loop — only when architect flagged open blockers
+      const openBlockers = (architectResult.openQuestions || []).filter(q => q)
+      if (openBlockers.length > 0) {
+        let probeLog = []
+        let probesRun = 0
+        let resolved = false
+        while (probesRun < MAX_PROBE_LOOPS && !resolved) {
+          const hingeResult = await trackedAgent(
+            `You are a confidence evaluator. The architect returned ${openBlockers.length} open question(s) for concern "${concern.label}".
+Open questions: ${JSON.stringify(openBlockers)}
+Name the SINGLE unknown that, if resolved, would most change whether the plan is safe to proceed.
+Return { hinge: "<one sentence>", readOnlyLookup: "<exact shell command to resolve it, read-only only>" }`,
+            { label: `barrier-hinge:${concern.label}-${probesRun}`, phase: 'Architect', model: haikuModel, effort: 'low',
+              schema: { type: 'object', required: ['hinge', 'readOnlyLookup'],
+                properties: { hinge: { type: 'string' }, readOnlyLookup: { type: 'string' } } } }
+          )
+          if (!hingeResult) break
+          probeLog.push(hingeResult.hinge)
+          const probeResult = await trackedAgent(
+            `Run this read-only command and return the output. Do not modify any files.
+Command: ${hingeResult.readOnlyLookup}
+Return { output: "<stdout>" }`,
+            { label: `barrier-probe:${concern.label}-${probesRun}`, phase: 'Architect', model: haikuModel, effort: 'low',
+              schema: { type: 'object', required: ['output'], properties: { output: { type: 'string' } } } }
+          )
+          probesRun++
+          // Treat the probe result as resolving if we got non-empty output (heuristic: any answer is better than none)
+          if (probeResult?.output?.trim()) { resolved = true; break }
+        }
+        if (!resolved && probesRun >= MAX_PROBE_LOOPS) {
+          const rec = makeBarrierRecord({
+            decision: `concern "${concern.label}" has ${openBlockers.length} unresolved blocker(s) after ${probesRun} probe(s)`,
+            hinge: probeLog[0] || 'unknown',
+            probes: probeLog,
+            confidence: 0,
+            blocking: false,
+          })
+          log(`⚠ Barrier[${concern.label}]: ${openBlockers.length} blocker(s) unresolved after ${probesRun} probe(s) — proceeding under labeled default.`)
+          await writeAuditRecord('PROPOSED_WITH_GAPS', { barrier: rec })
+          // non-blocking: proceed with the plan; caller sees PROPOSED_WITH_GAPS status
+        }
+      }
+    }
+    // ── End Barrier Protocol ──────────────────────────────────────────────────
 
     // DAG file-conflict guard
     const tasksByGroup = {}

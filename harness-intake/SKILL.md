@@ -207,3 +207,28 @@ harness-plan reads this via `--intake` flag and skips its own Intake phase entir
 
 ### split-manifest.json (L only)
 Same shape as before — `groups[]` with subtasks carrying `scopePath`, `files[]`, `jiraKey`, `jiraUrl`.
+
+## Getting past a barrier
+
+When you are stuck or unsure on an important, hard-to-reverse decision:
+
+1. **Name the single unknown** that would most change your answer.
+2. **Do a quick read-only look** to resolve just that — one shell command, no file writes.
+3. **Re-decide.** Repeat at most **twice** (`MAX_PROBE_LOOPS = 2`).
+
+**NEVER-list decisions** (categories below) are never yours to make — stop and surface them regardless of confidence:
+
+| Category | Keywords |
+|---|---|
+| irreversible-destructive | delete, drop table, force-push, prod deploy, rm -rf, truncate |
+| security-auth-permission | auth, permission, credential, secret, token, iam, acl, rbac |
+| cost-over-threshold | budget exceed, over budget, cost cap |
+| public-api-contract | public api, breaking change, contract change, schema migration |
+| out-of-scope | outside scope, unplanned file, not in plan |
+| legal-compliance | license, gdpr, compliance, pii |
+
+**After two probes, if still stuck:** record the decision, options, and what you found, then:
+- **Blocking** — stop and surface; do not proceed.
+- **Non-blocking** — proceed under a clearly-labeled default; flag it in the output.
+
+Every barrier event is logged to the audit record (`~/.claude/harness-intake-runs.jsonl`).
