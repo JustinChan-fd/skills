@@ -832,6 +832,13 @@ Return AC_RESEARCH_SCHEMA.`,
   )
   acResearchResultsAll.push(...batchResults)
 }
+// Enforce acBullet from original acList — Haiku research agents occasionally put
+// their findings summary (e.g. "Found 3 files in /Users/...") into acBullet instead
+// of copying the original AC text. Since Phase 1 iterates acList in order and
+// parallel() resolves in order, index alignment is guaranteed.
+for (let i = 0; i < acResearchResultsAll.length; i++) {
+  if (acResearchResultsAll[i] && acList[i]) acResearchResultsAll[i].acBullet = acList[i].bullet
+}
 const acResearchResults = acResearchResultsAll
 
 // Stream 2: layer structure research — one agent per repo layer (existing behavior)
@@ -1136,6 +1143,15 @@ if (testMockSubtasks.length > 0) {
   log(`test-file ejection: moved ${ejectedCount} test file(s) out of migration batches → ${testMockSubtasks.length} test-mock subtask(s)`)
   rawProposed.push(...testMockSubtasks)
 }
+// After ejection, drop migration subtasks that are now empty (files=[]).
+// These were grouper-created batches whose entire file list was test files — they
+// should not become empty G1 Jira subtasks. The test-mock batch above owns those files.
+const rawProposedNonEmpty = rawProposed.filter(s => !s.isMigration || (s.files || []).length > 0)
+if (rawProposedNonEmpty.length < rawProposed.length) {
+  log(`test-file ejection: removed ${rawProposed.length - rawProposedNonEmpty.length} now-empty migration stub(s)`)
+  rawProposed.length = 0
+  rawProposed.push(...rawProposedNonEmpty)
+}
 
 // Dedup by file set — parent layers contain child layer files, so parallel designers
 // produce overlapping subtasks. Keep the subtask whose scopePath is most specific
@@ -1243,7 +1259,16 @@ const doneConditionAcs = []
 for (const r of zeroCoverageAcs) {
   const { isMigration } = classifyAcBullet(r.acBullet)
   if (isMigration) {
-    const stubs = makeStubs(r.acBullet, [], r.findings, 'Auto-generated stub — AC research found no files. Implementer must locate relevant files.')
+    // Before creating a files-empty stub, check whether Phase C found files for this AC.
+    // Phase C runs on all grep ACs and may have resolved a higher count even when Phase 1
+    // research returned 0 (different include-filter or broader pattern). If Phase C has a
+    // count > 0, note it in the stub description so the implementer knows where to look.
+    const phaseCEntry = acListWithVerify.find(a => a.bullet === r.acBullet)
+    const phaseCCount = phaseCEntry?.verifiedCount || 0
+    const reason = phaseCCount > 0
+      ? `Auto-generated stub — Phase 1 research found no files matching the AC grep but Phase C broader-pattern retry found ${phaseCCount} file(s). Implementer should verify file list using: grep -rl "${phaseCEntry?.grepPattern || ''}" ${scopePath ? repoPath + '/' + scopePath : repoPath + '/src'}/ 2>/dev/null`
+      : 'Auto-generated stub — AC research found no files. Implementer must locate relevant files.'
+    const stubs = makeStubs(r.acBullet, [], r.findings, reason)
     flatProposed.push(...stubs)
   } else {
     doneConditionAcs.push(r.acBullet)
