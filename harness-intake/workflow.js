@@ -67,6 +67,29 @@ async function trackedAgent(prompt, opts) {
 // Era marker — bump when the skill paradigm changes significantly.
 const SKILLS_SCHEMA_VERSION = 'spec-v8'
 
+// ===== PURE (mirrors lib/) =====
+// lib/telemetry.js — keep identical. import() unavailable in workflow scripts (probe-confirmed).
+const HARNESS_TELEMETRY_DIR = `${process.env.HOME}/Desktop/Repos/harness-telemetry`
+function _repoNameFromPath(p) {
+  if (!p) return 'unknown-repo'
+  return String(p).replace(/\/$/, '').split('/').pop() || 'unknown-repo'
+}
+function _buildTelemetryPath({ repoPath, skill, issueKey, timestamp }) {
+  const repo = _repoNameFromPath(repoPath)
+  const key  = issueKey || 'no-ticket'
+  const ts   = timestamp || 'unknown-ts'
+  return `${HARNESS_TELEMETRY_DIR}/${repo}-${skill}-${key}-${ts}.jsonl`
+}
+function _buildAppendCmd(path, jsonLine) {
+  const escaped = jsonLine.replace(/'/g, "'\\''")
+  return `mkdir -p "$(dirname '${path}')" && echo '${escaped}' >> '${path}'`
+}
+// ===== END PURE =====
+
+// telemetryPath is set on first writeAuditRecord call (needs a timestamp agent),
+// then reused so all writes within a run land in the same file.
+let _telemetryPath = null
+
 async function writeAuditRecord(status, extra = {}) {
   const outputTokensTotal = budget.spent() - workflowStartTokens
   const estimatedCostUsd = parseFloat(
@@ -77,7 +100,7 @@ async function writeAuditRecord(status, extra = {}) {
   )
   // durationMs: computed via shell since Date.now() is unavailable in workflow scripts
   // startTs is passed as args.startTs (epoch ms string) from SKILL.md before Workflow() call
-  const [durationMs, skillsCommit] = await Promise.all([
+  const [durationMs, skillsCommit, runTs] = await Promise.all([
     args.startTs
       ? agent(
           `Run: python3 -c "import time; print(int(time.time()*1000) - ${args.startTs})"\nReturn { ms: <number> }`,
@@ -90,7 +113,17 @@ async function writeAuditRecord(status, extra = {}) {
       { label: 'skills-commit', phase: 'Debrief', model: haikuModel, effort: 'low',
         schema: { type: 'object', required: ['sha'], properties: { sha: { type: 'string' } } } }
     ).then(r => r?.sha || null).catch(() => null),
+    _telemetryPath
+      ? Promise.resolve(null)
+      : agent(
+          `Run: python3 -c "from datetime import datetime, timezone; print(datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ'))"\nReturn { ts: "<compact-utc-timestamp>" }`,
+          { label: 'run-ts', phase: 'Debrief', model: haikuModel, effort: 'low',
+            schema: { type: 'object', required: ['ts'], properties: { ts: { type: 'string' } } } }
+        ).then(r => r?.ts || null).catch(() => null),
   ])
+  if (!_telemetryPath) {
+    _telemetryPath = _buildTelemetryPath({ repoPath, skill: 'harness-intake', issueKey, timestamp: runTs })
+  }
   const record = JSON.stringify({
     ts: args.today || 'unknown',
     skill: 'harness-intake',
@@ -98,6 +131,9 @@ async function writeAuditRecord(status, extra = {}) {
     skillsCommit,
     status,
     sourceIssue: issueKey || 'unknown',
+    repo: _repoNameFromPath(repoPath),
+    repoPath: repoPath || null,
+    branch: null,
     durationMs,
     outputTokensByModel: tokensByModel,
     agentCountByModel,
@@ -105,10 +141,10 @@ async function writeAuditRecord(status, extra = {}) {
     estimatedCostUsd,
     ...extra,
   })
+  const legacyCmd  = `echo '${record.replace(/'/g, "'\\''")}' >> ~/.claude/harness-intake-runs.jsonl`
+  const telemetryCmd = _buildAppendCmd(_telemetryPath, record)
   await agent(
-    `Append exactly one line to a JSONL file. Use the Bash tool only.
-Run: echo '${record.replace(/'/g, "'\\''")}' >> ~/.claude/harness-intake-runs.jsonl
-Return { appended: true }.`,
+    `Append an audit record to two JSONL files. Use the Bash tool only. Run both commands:\n1. ${legacyCmd}\n2. ${telemetryCmd}\nReturn { appended: true }.`,
     {
       label: 'audit-write',
       phase: 'Debrief',
@@ -690,6 +726,7 @@ harness-intake
   quality: ✓ clean
   next:    ${nextCmd}
   audit:   ~/.claude/harness-intake-runs.jsonl
+           ~/Desktop/Repos/harness-telemetry/  (run-specific file)
   tokens:  ${outputTokensTotal.toLocaleString()}  (~$${estimatedCostUsd} estimated)
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`
 
@@ -1528,6 +1565,7 @@ ${doneConditionAcs.length > 0 ? `\n  done-conditions (add to predecessor AC crit
   quality: ${qualityLine}
   next:    confirm → create Jira subtasks → /harness-plan each G1 subtask
   audit:   ~/.claude/harness-intake-runs.jsonl
+           ~/Desktop/Repos/harness-telemetry/  (run-specific file)
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`
 
 log(cliSummary)

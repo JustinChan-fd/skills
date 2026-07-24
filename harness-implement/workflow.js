@@ -39,9 +39,27 @@ async function trackedAgent(prompt, opts) {
 // Era marker — bump when the skill paradigm changes significantly.
 const SKILLS_SCHEMA_VERSION = 'spec-v8'
 
+// ===== PURE (mirrors lib/) =====
+// lib/telemetry.js — keep identical. import() unavailable in workflow scripts (probe-confirmed).
+const _HARNESS_TELEMETRY_DIR = `${process.env.HOME}/Desktop/Repos/harness-telemetry`
+function _repoNameFromPath(p) {
+  if (!p) return 'unknown-repo'
+  return String(p).replace(/\/$/, '').split('/').pop() || 'unknown-repo'
+}
+function _buildImplTelemetryPath({ repoPath, issueKey, timestamp }) {
+  const repo = _repoNameFromPath(repoPath)
+  const key  = issueKey || 'no-ticket'
+  const ts   = timestamp || 'unknown-ts'
+  return `${_HARNESS_TELEMETRY_DIR}/${repo}-harness-implement-${key}-${ts}.jsonl`
+}
+// ===== END PURE =====
+
+// telemetryPath is set on first writeAuditRecord call, then reused for the Debrief write.
+let _telemetryPath = null
+
 async function writeAuditRecord(status, extra = {}) {
   const outputTokensTotal = budget.spent() - workflowStartTokens
-  const [durationMs, skillsCommit] = await Promise.all([
+  const [durationMs, skillsCommit, runTs] = await Promise.all([
     args.startTs
       ? agent(
           `Run: python3 -c "import time; print(int(time.time()*1000) - ${args.startTs})"\nReturn { ms: <number> }`,
@@ -54,13 +72,27 @@ async function writeAuditRecord(status, extra = {}) {
       { label: 'skills-commit', phase: 'Debrief', model: 'haiku', effort: 'low',
         schema: { type: 'object', required: ['sha'], properties: { sha: { type: 'string' } } } }
     ).then(r => r?.sha || null).catch(() => null),
+    _telemetryPath
+      ? Promise.resolve(null)
+      : agent(
+          `Run: python3 -c "from datetime import datetime, timezone; print(datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ'))"\nReturn { ts: "<compact-utc-timestamp>" }`,
+          { label: 'run-ts', phase: 'Debrief', model: 'haiku', effort: 'low',
+            schema: { type: 'object', required: ['ts'], properties: { ts: { type: 'string' } } } }
+        ).then(r => r?.ts || null).catch(() => null),
   ])
+  if (!_telemetryPath) {
+    const issueKey = (args.planPath || '').match(/\b([A-Z]+-\d+)\b/i)?.[1] || 'no-ticket'
+    _telemetryPath = _buildImplTelemetryPath({ repoPath: args.repoPath, issueKey, timestamp: runTs })
+  }
   const record = JSON.stringify({
     ts: args.today || 'unknown',
     skill: 'harness-implement',
     skillsSchemaVersion: SKILLS_SCHEMA_VERSION,
     skillsCommit,
     status,
+    repo: _repoNameFromPath(args.repoPath),
+    repoPath: args.repoPath || null,
+    branch: null,
     planPath: args.planPath || 'unknown',
     durationMs,
     outputTokensByModel: tokensByModel,
@@ -68,8 +100,10 @@ async function writeAuditRecord(status, extra = {}) {
     outputTokensTotal,
     ...extra,
   })
+  const legacyCmd    = `echo '${record.replace(/'/g, "'\\''")}' >> ~/.claude/harness-implement-runs.jsonl`
+  const telemetryCmd = `mkdir -p "$(dirname '${_telemetryPath}')" && echo '${record.replace(/'/g, "'\\''")}' >> '${_telemetryPath}'`
   await agent(
-    `Append exactly one line to a JSONL file. Use the Bash tool only.\nRun: echo '${record.replace(/'/g, "'\\''")}' >> ~/.claude/harness-implement-runs.jsonl\nReturn { appended: true }.`,
+    `Append an audit record to two JSONL files. Use the Bash tool only. Run both commands:\n1. ${legacyCmd}\n2. ${telemetryCmd}\nReturn { appended: true }.`,
     { label: 'audit-write', phase: 'Debrief', model: 'haiku', effort: 'low',
       schema: { type: 'object', required: ['appended'], properties: { appended: { type: 'boolean' } } },
     }
@@ -997,10 +1031,13 @@ const estimatedCostUsd = parseFloat((outputCostUsd * 2.5).toFixed(4))
 const auditRecord = JSON.stringify({
   ts: args.today || 'unknown',
   skill: 'harness-implement',
+  skillsSchemaVersion: SKILLS_SCHEMA_VERSION,
   status: runStatus,
+  repo: _repoNameFromPath(args.repoPath),
+  repoPath: args.repoPath || null,
+  branch: worktreeResult.branch,
   planPath: args.planPath,
   planKey,
-  branch: worktreeResult.branch,
   tasksTotal: implementationReports.length,
   tasksPassed: passed.length,
   tasksBlocked: blocked.length,
@@ -1029,13 +1066,16 @@ const auditRecord = JSON.stringify({
   ],
 })
 
+// If crash handler already set _telemetryPath, reuse it; otherwise build from planPath
+if (!_telemetryPath) {
+  const issueKey = (args.planPath || '').match(/\b([A-Z]+-\d+)\b/i)?.[1] || 'no-ticket'
+  _telemetryPath = _buildImplTelemetryPath({ repoPath: args.repoPath, issueKey, timestamp: null })
+}
+const _legacyCmd    = `echo '${auditRecord.replace(/'/g, "'\\''")}' >> ~/.claude/harness-implement-runs.jsonl`
+const _telemetryCmd = `mkdir -p "$(dirname '${_telemetryPath}')" && echo '${auditRecord.replace(/'/g, "'\\''")}' >> '${_telemetryPath}'`
+
 await agent(
-  `Append exactly one line to a JSONL file. Use the Bash tool only.
-
-Run this exact command:
-echo '${auditRecord.replace(/'/g, "'\\''")}' >> ~/.claude/harness-implement-runs.jsonl
-
-Return { appended: true }.`,
+  `Append an audit record to two JSONL files. Use the Bash tool only. Run both commands:\n1. ${_legacyCmd}\n2. ${_telemetryCmd}\nReturn { appended: true }.`,
   { label: 'audit-write', phase: 'Debrief', model: 'haiku', effort: 'low',
     schema: { type: 'object', required: ['appended'], properties: { appended: { type: 'boolean' } } },
   }
@@ -1101,6 +1141,7 @@ ${taskLines}${blockedLines}
   drift:   ${!scopeDriftResult || scopeDriftResult.verdict === 'CLEAN' ? '✓ none' : `${scopeDriftResult.verdict} — ${unplannedFiles.length} unplanned file(s)${scopeDriftResult.suggestedTickets?.length > 0 ? '\n' + scopeDriftResult.suggestedTickets.map(t => `    · follow-up: ${t.title}`).join('\n') : ''}`}
   next:    git push -u origin ${worktreeResult.branch} && gh pr create
   audit:   ~/.claude/harness-implement-runs.jsonl
+           ~/Desktop/Repos/harness-telemetry/  (run-specific file)
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`
 
 log(cliSummary)

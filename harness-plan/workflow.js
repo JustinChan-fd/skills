@@ -47,6 +47,9 @@ async function trackedAgent(prompt, opts) {
 // Lets future analysis slice runs by era (pre/post spec-v8, etc).
 const SKILLS_SCHEMA_VERSION = 'spec-v8'
 
+// telemetryPath is set on first writeAuditRecord call, then reused across writes within the run.
+let _telemetryPath = null
+
 async function writeAuditRecord(status, extra = {}) {
   const outputTokensTotal = budget.spent() - workflowStartTokens
   const estimatedCostUsd = parseFloat(
@@ -55,7 +58,7 @@ async function writeAuditRecord(status, extra = {}) {
       return sum + (tokens / 1_000_000) * rate
     }, 0).toFixed(4)
   )
-  const [durationMs, skillsCommit] = await Promise.all([
+  const [durationMs, skillsCommit, runTs] = await Promise.all([
     args.startTs
       ? agent(
           `Run: python3 -c "import time; print(int(time.time()*1000) - ${args.startTs})"\nReturn { ms: <number> }`,
@@ -68,13 +71,29 @@ async function writeAuditRecord(status, extra = {}) {
       { label: 'skills-commit', phase: 'Debrief', model: haikuModel, effort: 'low',
         schema: { type: 'object', required: ['sha'], properties: { sha: { type: 'string' } } } }
     ).then(r => r?.sha || null).catch(() => null),
+    _telemetryPath
+      ? Promise.resolve(null)
+      : agent(
+          `Run: python3 -c "from datetime import datetime, timezone; print(datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ'))"\nReturn { ts: "<compact-utc-timestamp>" }`,
+          { label: 'run-ts', phase: 'Debrief', model: haikuModel, effort: 'low',
+            schema: { type: 'object', required: ['ts'], properties: { ts: { type: 'string' } } } }
+        ).then(r => r?.ts || null).catch(() => null),
   ])
+  if (!_telemetryPath) {
+    const repo = (repoPath || '').replace(/\/$/, '').split('/').pop() || 'unknown-repo'
+    const issueKey = (input || '').match(/\b([A-Z]+-\d+)\b/)?.[1]
+      || manifestEntry?.jiraKey || 'no-ticket'
+    _telemetryPath = `${process.env.HOME}/Desktop/Repos/harness-telemetry/${repo}-harness-plan-${issueKey}-${runTs || 'unknown-ts'}.jsonl`
+  }
   const record = JSON.stringify({
     ts: args.today || 'unknown',
     skill: 'harness-plan',
     skillsSchemaVersion: SKILLS_SCHEMA_VERSION,
     skillsCommit,
     status,
+    repo: (repoPath || '').replace(/\/$/, '').split('/').pop() || null,
+    repoPath: repoPath || null,
+    branch: null,
     durationMs,
     outputTokensByModel: tokensByModel,
     agentCountByModel,
@@ -82,10 +101,10 @@ async function writeAuditRecord(status, extra = {}) {
     estimatedCostUsd,
     ...extra,
   })
+  const legacyCmd    = `echo '${record.replace(/'/g, "'\\''")}' >> ~/.claude/harness-plan-runs.jsonl`
+  const telemetryCmd = `mkdir -p "$(dirname '${_telemetryPath}')" && echo '${record.replace(/'/g, "'\\''")}' >> '${_telemetryPath}'`
   await agent(
-    `Append exactly one line to a JSONL file. Use the Bash tool only.
-Run: echo '${record.replace(/'/g, "'\\''")}' >> ~/.claude/harness-plan-runs.jsonl
-Return { appended: true }.`,
+    `Append an audit record to two JSONL files. Use the Bash tool only. Run both commands:\n1. ${legacyCmd}\n2. ${telemetryCmd}\nReturn { appended: true }.`,
     { label: 'audit-write', phase: 'Debrief', model: haikuModel, effort: 'low',
       schema: { type: 'object', required: ['appended'], properties: { appended: { type: 'boolean' } } },
     }
@@ -114,6 +133,9 @@ const opusModel       = 'claude-opus-4-8'
 // architectModel and decomposeModel hoisted — set from either manifestEntry or Intake path
 
 // ===== PURE (mirrors lib/) =====
+// lib/telemetry.js — keep identical. import() unavailable in workflow scripts (probe-confirmed).
+// (telemetryPath logic is inlined directly in writeAuditRecord above for harness-plan)
+
 // lib/barrier.js — keep identical. import() unavailable in workflow scripts (probe-confirmed).
 const MAX_PROBE_LOOPS = 2
 const NEVER_LIST = {
@@ -518,6 +540,7 @@ harness-plan
   quality: ✓ clean
   next:    /harness-implement docs/plans/${planJsonName}
   audit:   ~/.claude/harness-plan-runs.jsonl
+           ~/Desktop/Repos/harness-telemetry/  (run-specific file)
   tokens:  ${xsTokensTotal.toLocaleString()}  (~$${xsCostUsd} estimated)
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`
   log(xsCliSummary)
@@ -1454,6 +1477,7 @@ ${planEntries.map(e => `    • docs/plans/${e.fileName}  (${e.concern.label})`)
   quality: ${qualityIssues.length === 0 ? '✓ clean' : `${qualityIssues.length} issue(s) — see audit log`}
   next:    ${nextCmd}
   audit:   ~/.claude/harness-plan-runs.jsonl
+           ~/Desktop/Repos/harness-telemetry/  (run-specific file)
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`
 
 log(cliSummary)
