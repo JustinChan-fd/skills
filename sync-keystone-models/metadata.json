@@ -1,0 +1,49 @@
+{
+  "id": "users/tmenagh@fandango.com/sync-keystone-models",
+  "organization": "users/tmenagh@fandango.com",
+  "name": "sync-keystone-models",
+  "version": "1.0.0",
+  "displayName": "Sync Keystone Models",
+  "description": "Check Keystone platform for changes to available models and governance rules, then update local model configs to only show models that won't be auto-downgraded and meet the minimum context window (1M tokens). Use when asked to \"sync my models\", \"check for new models\", \"update my keystone models\", \"refresh model list\", or \"what models are available now\".\n",
+  "category": "development",
+  "tags": [],
+  "skillType": "action",
+  "license": "Private",
+  "author": {
+    "name": "tmenagh@fandango.com",
+    "email": "tmenagh@fandango.com"
+  },
+  "repository": "",
+  "homepage": "",
+  "dependencies": {},
+  "maintainers": [],
+  "isGlobal": false,
+  "verified": false,
+  "published": true,
+  "uploadedBy": "tmenagh@fandango.com",
+  "accountType": "user",
+  "uploadedAt": "2026-06-16T00:20:45.306Z",
+  "updatedAt": "2026-06-16T16:28:09.240Z",
+  "created": "2026-06-16T00:20:45.306Z",
+  "updated": "2026-06-16T00:20:45.306Z",
+  "files": {
+    "skill": "SKILL.md",
+    "config": null,
+    "readme": null,
+    "examples": [],
+    "templates": [],
+    "scripts": [
+      "filter-models.py",
+      "sync-models.sh"
+    ],
+    "assets": [],
+    "references": []
+  },
+  "compatibility": "macOS/Linux with curl, python3, and ANTHROPIC_AUTH_TOKEN set",
+  "allowedTools": null,
+  "specVersion": "1.0",
+  "metadataSource": "frontmatter+config",
+  "publishedBy": "tmenagh@fandango.com",
+  "publishedAt": "2026-06-16T16:28:09.240Z",
+  "unpublishedAt": null
+}
