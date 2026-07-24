@@ -43,6 +43,10 @@ async function trackedAgent(prompt, opts) {
   return result
 }
 
+// Era marker — bump when the skill paradigm changes significantly.
+// Lets future analysis slice runs by era (pre/post spec-v8, etc).
+const SKILLS_SCHEMA_VERSION = 'spec-v8'
+
 async function writeAuditRecord(status, extra = {}) {
   const outputTokensTotal = budget.spent() - workflowStartTokens
   const estimatedCostUsd = parseFloat(
@@ -51,19 +55,29 @@ async function writeAuditRecord(status, extra = {}) {
       return sum + (tokens / 1_000_000) * rate
     }, 0).toFixed(4)
   )
-  const durationMs = args.startTs
-    ? await agent(
-        `Run: python3 -c "import time; print(int(time.time()*1000) - ${args.startTs})"\nReturn { ms: <number> }`,
-        { label: 'duration-ms', phase: 'Debrief', model: haikuModel,
-          schema: { type: 'object', required: ['ms'], properties: { ms: { type: 'number' } } } }
-      ).then(r => r?.ms || null).catch(() => null)
-    : null
+  const [durationMs, skillsCommit] = await Promise.all([
+    args.startTs
+      ? agent(
+          `Run: python3 -c "import time; print(int(time.time()*1000) - ${args.startTs})"\nReturn { ms: <number> }`,
+          { label: 'duration-ms', phase: 'Debrief', model: haikuModel, effort: 'low',
+            schema: { type: 'object', required: ['ms'], properties: { ms: { type: 'number' } } } }
+        ).then(r => r?.ms || null).catch(() => null)
+      : Promise.resolve(null),
+    agent(
+      `Run: git -C ${repoPath || '.'} rev-parse HEAD\nReturn { sha: "<40-char hex>" }`,
+      { label: 'skills-commit', phase: 'Debrief', model: haikuModel, effort: 'low',
+        schema: { type: 'object', required: ['sha'], properties: { sha: { type: 'string' } } } }
+    ).then(r => r?.sha || null).catch(() => null),
+  ])
   const record = JSON.stringify({
     ts: args.today || 'unknown',
     skill: 'harness-plan',
+    skillsSchemaVersion: SKILLS_SCHEMA_VERSION,
+    skillsCommit,
     status,
     durationMs,
     outputTokensByModel: tokensByModel,
+    agentCountByModel,
     outputTokensTotal,
     estimatedCostUsd,
     ...extra,
@@ -72,7 +86,7 @@ async function writeAuditRecord(status, extra = {}) {
     `Append exactly one line to a JSONL file. Use the Bash tool only.
 Run: echo '${record.replace(/'/g, "'\\''")}' >> ~/.claude/harness-plan-runs.jsonl
 Return { appended: true }.`,
-    { label: 'audit-write', phase: 'Debrief', model: haikuModel,
+    { label: 'audit-write', phase: 'Debrief', model: haikuModel, effort: 'low',
       schema: { type: 'object', required: ['appended'], properties: { appended: { type: 'boolean' } } },
     }
   )
@@ -96,8 +110,36 @@ Return { appended: true }.`,
 const researcherModel = 'anthropic.claude-sonnet-4-6'
 const synthModel      = 'anthropic.claude-sonnet-4-6'
 const haikuModel      = 'anthropic.claude-haiku-4-5-20251001'
-const opusModel       = 'anthropic.claude-opus-4-6-v1'
+const opusModel       = 'claude-opus-4-8'
 // architectModel and decomposeModel hoisted — set from either manifestEntry or Intake path
+
+// ===== PURE (mirrors lib/) =====
+// lib/barrier.js — keep identical. import() unavailable in workflow scripts (probe-confirmed).
+const MAX_PROBE_LOOPS = 2
+const NEVER_LIST = {
+  'irreversible-destructive': ['delete', 'drop table', 'force-push', 'force push', 'prod deploy', 'rm -rf', 'truncate'],
+  'security-auth-permission': ['auth', 'permission', 'credential', 'secret', 'token', 'iam', 'acl', 'rbac'],
+  'cost-over-threshold':      ['budget exceed', 'over budget', 'cost cap'],
+  'public-api-contract':      ['public api', 'breaking change', 'contract change', 'schema migration'],
+  'out-of-scope':             ['outside scope', 'unplanned file', 'not in plan'],
+  'legal-compliance':         ['license', 'gdpr', 'compliance', 'pii'],
+}
+function matchesNeverList(action) {
+  const a = String(action).toLowerCase()
+  for (const [cat, kws] of Object.entries(NEVER_LIST))
+    if (kws.some(k => a.includes(k))) return cat
+  return null
+}
+function makeBarrierRecord({ decision, hinge, options, probes, confidence, blocking }) {
+  return { decision, hinge, options: options ?? [], probes: probes ?? [], confidence: confidence ?? null, blocking: !!blocking }
+}
+function validateBarrierRecord(r) {
+  const errors = []
+  for (const k of ['decision', 'hinge']) if (!r?.[k]) errors.push(`missing ${k}`)
+  if (typeof r?.blocking !== 'boolean') errors.push('blocking must be boolean')
+  return { valid: errors.length === 0, errors }
+}
+// ===== END PURE =====
 
 // ─── Manifest contract ────────────────────────────────────────────────────────
 // Every harness-plan run produces a manifest alongside plan files.
@@ -302,20 +344,6 @@ const COVERAGE_SCHEMA = {
   },
 }
 
-// ─── Shared merge helper ──────────────────────────────────────────────────────
-
-function mergeResearchResults(base, additions) {
-  return {
-    filesInScope: [...(base.filesInScope || []), ...(additions.filesInScope || [])],
-    patterns: [...(base.patterns || []), ...(additions.patterns || [])],
-    constraints: [...(base.constraints || []), ...(additions.constraints || [])],
-    testFramework: base.testFramework || additions.testFramework,
-    mockPolicy: base.mockPolicy || additions.mockPolicy,
-    codegenTools: [...(base.codegenTools || []), ...(additions.codegenTools || [])],
-    couldNotDetermine: [...(base.couldNotDetermine || []), ...(additions.couldNotDetermine || [])],
-  }
-}
-
 // ─── Phase 0: Intake ─────────────────────────────────────────────────────────
 // Sonnet reasons about ticket size from the input text before anything else runs.
 // No file reading — input text + file counts mentioned in the ticket only.
@@ -370,7 +398,7 @@ INPUT:
 ${input}
 
 Return your sizing decision with a one-sentence reasoning and the repo layer list.`,
-    { label: 'intake', phase: 'Intake', model: researcherModel, schema: INTAKE_SCHEMA }
+    { label: 'intake', phase: 'Intake', model: researcherModel, effort: 'medium', schema: INTAKE_SCHEMA }
   )
 
   if (!intakeResult) throw new Error('Intake sizing failed — cannot proceed')
@@ -451,7 +479,7 @@ CONTENT:
 ${JSON.stringify(manifestObj, null, 2)}
 
 Return { written: true }`,
-    { label: 'write-xs-plan', phase: 'Return', model: haikuModel,
+    { label: 'write-xs-plan', phase: 'Return', model: haikuModel, effort: 'low',
       schema: { type: 'object', required: ['written'], properties: { written: { type: 'boolean' } } } }
   )
 
@@ -606,9 +634,9 @@ The architect produces one task per file being modified. This is non-negotiable 
 - A task that requires the developer to discover files or call sites will stall with NEEDS_CONTEXT.
 - More tasks is always better. A task too small = one extra developer dispatch. A task too large = stall.
 - Concerns exist to gather information, not to group tasks. One concern can produce many tasks.`,
-    { label: 'decompose', phase: 'Decompose', model: decomposeModel, schema: DECOMPOSE_SCHEMA }
+    { label: 'decompose', phase: 'Decompose', model: decomposeModel, effort: 'high', schema: DECOMPOSE_SCHEMA }
   )
-  decomposeConcerns = decomposeResult?.concerns || [{ label: 'researcher', filesToRead: [], question: input }]
+  decomposeConcerns = decomposeResult?.concerns || [{ label: 'researcher', filesToRead: [], questions: [input] }]
 
   // Post-decompose validation: warn on obvious over-bundling before research runs
   for (const c of decomposeConcerns) {
@@ -648,7 +676,7 @@ The architect produces one task per file being modified. This is non-negotiable 
   }]
   log(`Decompose: skipped — manifest entry, ${decomposeConcerns[0].filesToRead.length} file(s) pre-scoped`)
 } else {
-  decomposeConcerns = [{ label: 'main', filesToRead: [], question: input }]
+  decomposeConcerns = [{ label: 'main', filesToRead: [], questions: [input] }]
   log(`Decompose: skipped — size is ${size}`)
 }
 
@@ -716,8 +744,8 @@ You MUST populate:
 - answeredQuestions: one entry per question above (every question, every answer)
 - keyFindings: 3-7 single-line bullets — the most important facts for the architect: exact paths, pattern names, critical constraints, any "could not determine" blockers. This is all the architect will see; make it complete.`,
     isValidationConcern
-      ? { label: `hp-researcher:${concern.label}`, phase: 'Research', model: researcherModel, schema: RESEARCHER_SCHEMA }
-      : { label: `hp-researcher:${concern.label}`, phase: 'Research', model: researcherModel, schema: RESEARCHER_SCHEMA, agentType: 'hp-researcher' }
+      ? { label: `hp-researcher:${concern.label}`, phase: 'Research', model: researcherModel, effort: 'medium', schema: RESEARCHER_SCHEMA }
+      : { label: `hp-researcher:${concern.label}`, phase: 'Research', model: researcherModel, effort: 'medium', schema: RESEARCHER_SCHEMA, agentType: 'hp-researcher' }
   )
 }
 
@@ -737,7 +765,7 @@ ${securityConcern ? `FILES TO READ: ${securityConcern.filesToRead.join(', ')}` :
 
 INPUT:
 ${input}`,
-        { label: 'hp-security', phase: 'Research', model: researcherModel, schema: SECURITY_SCHEMA, agentType: 'hp-security' }
+        { label: 'hp-security', phase: 'Research', model: researcherModel, effort: 'medium', schema: SECURITY_SCHEMA, agentType: 'hp-security' }
       ),
       ...thunks,
     ])
@@ -843,13 +871,83 @@ ${JSON.stringify(architectResearch, null, 2)}
 ${securityNewSurface.length > 0 ? `NEW SECURITY SURFACE (address in tasks where relevant):
 ${securityNewSurface.map(s => `• ${s}`).join('\n')}` : ''}
 ${qaAnswers ? `\nQA_ANSWERS:\n${qaAnswers}` : ''}`,
-      { label: `hp-architect:${concern.label}`, phase: 'Architect', model: architectModel, schema: ARCHITECT_SCHEMA, agentType: 'hp-architect' }
+      { label: `hp-architect:${concern.label}`, phase: 'Architect', model: architectModel, effort: 'high', schema: ARCHITECT_SCHEMA, agentType: 'hp-architect' }
     )
 
     if (!architectResult) {
       log(`⚠ Architect[${concern.label}]: stalled/null — concern dropped. Check researcher output for oversized payload.`)
       return null
     }
+
+    // ── Barrier Protocol (architect/decompose fork only) ──────────────────────
+    // Check every task title+description for NEVER_LIST keywords.
+    // On match: record barrier, write audit entry, return null (PROPOSED_WITH_GAPS via crash handler).
+    // On no match: run confidence probe loop (≤ MAX_PROBE_LOOPS) if openQuestions contains blockers.
+    {
+      // Phase 1: NEVER_LIST scan — hard stop, no probe loop
+      let neverHit = null
+      for (const task of architectResult.tasks) {
+        const combined = `${task.title || ''} ${task.description || ''}`
+        const cat = matchesNeverList(combined)
+        if (cat) { neverHit = { task, cat }; break }
+      }
+      if (neverHit) {
+        const rec = makeBarrierRecord({
+          decision: `task "${neverHit.task.title}" matches NEVER_LIST category "${neverHit.cat}"`,
+          hinge: neverHit.cat,
+          probes: [],
+          confidence: 0,
+          blocking: true,
+        })
+        log(`🛑 Barrier[${concern.label}]: NEVER_LIST hit — "${neverHit.cat}" in task "${neverHit.task.title}". Surfacing for user review.`)
+        await writeAuditRecord('PROPOSED_WITH_GAPS', { barrier: rec })
+        return null
+      }
+
+      // Phase 2: confidence probe loop — only when architect flagged open blockers
+      const openBlockers = (architectResult.openQuestions || []).filter(q => q)
+      if (openBlockers.length > 0) {
+        let probeLog = []
+        let probesRun = 0
+        let resolved = false
+        while (probesRun < MAX_PROBE_LOOPS && !resolved) {
+          const hingeResult = await trackedAgent(
+            `You are a confidence evaluator. The architect returned ${openBlockers.length} open question(s) for concern "${concern.label}".
+Open questions: ${JSON.stringify(openBlockers)}
+Name the SINGLE unknown that, if resolved, would most change whether the plan is safe to proceed.
+Return { hinge: "<one sentence>", readOnlyLookup: "<exact shell command to resolve it, read-only only>" }`,
+            { label: `barrier-hinge:${concern.label}-${probesRun}`, phase: 'Architect', model: haikuModel, effort: 'low',
+              schema: { type: 'object', required: ['hinge', 'readOnlyLookup'],
+                properties: { hinge: { type: 'string' }, readOnlyLookup: { type: 'string' } } } }
+          )
+          if (!hingeResult) break
+          probeLog.push(hingeResult.hinge)
+          const probeResult = await trackedAgent(
+            `Run this read-only command and return the output. Do not modify any files.
+Command: ${hingeResult.readOnlyLookup}
+Return { output: "<stdout>" }`,
+            { label: `barrier-probe:${concern.label}-${probesRun}`, phase: 'Architect', model: haikuModel, effort: 'low',
+              schema: { type: 'object', required: ['output'], properties: { output: { type: 'string' } } } }
+          )
+          probesRun++
+          // Treat the probe result as resolving if we got non-empty output (heuristic: any answer is better than none)
+          if (probeResult?.output?.trim()) { resolved = true; break }
+        }
+        if (!resolved && probesRun >= MAX_PROBE_LOOPS) {
+          const rec = makeBarrierRecord({
+            decision: `concern "${concern.label}" has ${openBlockers.length} unresolved blocker(s) after ${probesRun} probe(s)`,
+            hinge: probeLog[0] || 'unknown',
+            probes: probeLog,
+            confidence: 0,
+            blocking: false,
+          })
+          log(`⚠ Barrier[${concern.label}]: ${openBlockers.length} blocker(s) unresolved after ${probesRun} probe(s) — proceeding under labeled default.`)
+          await writeAuditRecord('PROPOSED_WITH_GAPS', { barrier: rec })
+          // non-blocking: proceed with the plan; caller sees PROPOSED_WITH_GAPS status
+        }
+      }
+    }
+    // ── End Barrier Protocol ──────────────────────────────────────────────────
 
     // DAG file-conflict guard
     const tasksByGroup = {}
@@ -895,7 +993,7 @@ TASKS TO FIX:
 ${JSON.stringify(failingTasks, null, 2)}
 
 Return ONLY the revised tasks array (same schema, same ids).`,
-        { label: `architect-revision:${concern.label}-${revisionRound}`, phase: 'Architect', model: researcherModel,
+        { label: `architect-revision:${concern.label}-${revisionRound}`, phase: 'Architect', model: researcherModel, effort: 'medium',
           schema: { type: 'object', required: ['tasks'], properties: { tasks: { type: 'array', items: ARCHITECT_SCHEMA.properties.tasks.items } } }
         }
       )
@@ -943,7 +1041,7 @@ ${(securityResult?.alreadyHandled || []).map(s => `• ${s}`).join('\n') || 'non
 SECURITY_NEW_SURFACE:
 ${(securityResult?.newSurface || []).map(s => `• ${s}`).join('\n') || 'none'}
 ${qaAnswers ? `\nQA_ANSWERS:\n${qaAnswers}` : ''}`,
-      { label: `hp-synthesizer:${concern.label}`, phase: 'Synthesize', model: synthModel, agentType: 'hp-synthesizer' }
+      { label: `hp-synthesizer:${concern.label}`, phase: 'Synthesize', model: synthModel, effort: 'medium', agentType: 'hp-synthesizer' }
     )
 
     if (!planText) {
@@ -1013,7 +1111,9 @@ ${planFileContent.slice(-2000)}`
       const coverageResult = await trackedAgent(
         coveragePrompt,
         { label: `coverage:${concern.label}-round-${coverageRound}`, phase: 'Coverage',
-          model: coverageRound === 1 ? researcherModel : haikuModel, schema: COVERAGE_SCHEMA }
+          model: coverageRound === 1 ? researcherModel : haikuModel,
+          effort: coverageRound === 1 ? 'medium' : 'low',
+          schema: COVERAGE_SCHEMA }
       )
 
       if (!coverageResult || coverageResult.covered || !coverageResult.gaps?.length) {
@@ -1036,19 +1136,21 @@ GAP: ${gap.missingRequirement}
 QUESTION: ${gap.question}
 KEY FINDINGS: ${(research.keyFindings || []).map(f => `• ${f}`).join('\n') || 'none'}`,
             { label: `coverage-patch:${concern.label}-${gap.section}`, phase: 'Coverage',
-              model: coverageRound === 1 ? researcherModel : haikuModel }
+              model: coverageRound === 1 ? researcherModel : haikuModel,
+              effort: coverageRound === 1 ? 'medium' : 'low' }
           )
         } else {
           const gapResearch = await agent(
             `REPO: ${repoPath}\nFILES TO READ: ${gap.filesToRead.join(', ')}\nQUESTION: ${gap.question}\nCONCERN: ${concern.label}`,
-            { label: `gap-fill:${concern.label}-${gap.section}`, phase: 'Coverage', model: researcherModel, schema: RESEARCHER_SCHEMA, agentType: 'hp-researcher' }
+            { label: `gap-fill:${concern.label}-${gap.section}`, phase: 'Coverage', model: researcherModel, effort: 'medium', schema: RESEARCHER_SCHEMA, agentType: 'hp-researcher' }
           )
           patch = await trackedAgent(
             `Patch the "${gap.section}" section to address this gap. Return ONLY the patched section (markdown).
 GAP: ${gap.missingRequirement}
 NEW RESEARCH: ${JSON.stringify(gapResearch || {}, null, 2)}`,
             { label: `coverage-patch:${concern.label}-${gap.section}`, phase: 'Coverage',
-              model: coverageRound === 1 ? researcherModel : haikuModel }
+              model: coverageRound === 1 ? researcherModel : haikuModel,
+              effort: coverageRound === 1 ? 'medium' : 'low' }
           )
         }
         gapFillResults.push(patch)
@@ -1067,7 +1169,7 @@ NEW RESEARCH: ${JSON.stringify(gapResearch || {}, null, 2)}`,
           `Integrate patches into the plan by merging each into the correct section in place.
 Do NOT append as addendums. Keep the Tasks JSON block exactly as-is.
 PATCHES:\n${patchBundle}\n\nPLAN:\n${planForIntegrate}`,
-          { label: `coverage-integrate:${concern.label}-round-${coverageRound}`, phase: 'Coverage', model: haikuModel }
+          { label: `coverage-integrate:${concern.label}-round-${coverageRound}`, phase: 'Coverage', model: haikuModel, effort: 'low' }
         )
         if (integrated) planFileContent = integrated
       }
@@ -1146,8 +1248,6 @@ const manifestObj = {
 }
 
 // Write each concern's plan files in parallel — one agent per concern (bounded prompt size)
-const allPlanFiles = planEntries.flatMap(e => [`docs/plans/${e.fileName}`, `docs/plans/${e.jsonName}`])
-
 const writeResults = await parallel(planEntries.map(e => () => trackedAgent(
   `Write TWO files exactly as provided using the Write tool. Do NOT truncate or reformat — write byte-for-byte.
 
@@ -1162,7 +1262,7 @@ CONTENT:
 ${e.planJson}
 
 Return JSON: { written: true }`,
-  { label: `write-plan:${e.concern.label}`, phase: 'Return', model: haikuModel,
+  { label: `write-plan:${e.concern.label}`, phase: 'Return', model: haikuModel, effort: 'low',
     schema: { type: 'object', required: ['written'], properties: { written: { type: 'boolean' } } },
   }
 )))
@@ -1184,7 +1284,7 @@ CONTENT:
 ${JSON.stringify(manifestObj, null, 2)}
 
 Return JSON: { written: true, committed: false, planCount: ${planEntries.length} }`,
-  { label: 'write-manifest', phase: 'Return', model: haikuModel,
+  { label: 'write-manifest', phase: 'Return', model: haikuModel, effort: 'low',
     schema: {
       type: 'object',
       required: ['written', 'committed', 'planCount'],
@@ -1203,7 +1303,7 @@ Run these commands:
 2. Validate each JSON: ${planEntries.map(e => `node -e "JSON.parse(require('fs').readFileSync('${repoPath}/docs/plans/${e.jsonName}','utf8'))" && echo "valid: ${e.jsonName}" || echo "invalid: ${e.jsonName}"`).join('\n')}
 
 Return JSON: { allFilesPresent: boolean, allJsonValid: boolean, commitStat: "n/a — plans are local only, not committed", issues: string[] }`,
-  { label: 'verify-files', phase: 'Return', model: haikuModel,
+  { label: 'verify-files', phase: 'Return', model: haikuModel, effort: 'low',
     schema: {
       type: 'object',
       required: ['allFilesPresent', 'allJsonValid', 'commitStat', 'issues'],

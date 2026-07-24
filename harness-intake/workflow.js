@@ -64,6 +64,9 @@ async function trackedAgent(prompt, opts) {
   return result
 }
 
+// Era marker — bump when the skill paradigm changes significantly.
+const SKILLS_SCHEMA_VERSION = 'spec-v8'
+
 async function writeAuditRecord(status, extra = {}) {
   const outputTokensTotal = budget.spent() - workflowStartTokens
   const estimatedCostUsd = parseFloat(
@@ -74,20 +77,30 @@ async function writeAuditRecord(status, extra = {}) {
   )
   // durationMs: computed via shell since Date.now() is unavailable in workflow scripts
   // startTs is passed as args.startTs (epoch ms string) from SKILL.md before Workflow() call
-  const durationMs = args.startTs
-    ? await agent(
-        `Run: python3 -c "import time; print(int(time.time()*1000) - ${args.startTs})"\nReturn { ms: <number> }`,
-        { label: 'duration-ms', phase: 'Debrief', model: haikuModel,
-          schema: { type: 'object', required: ['ms'], properties: { ms: { type: 'number' } } } }
-      ).then(r => r?.ms || null).catch(() => null)
-    : null
+  const [durationMs, skillsCommit] = await Promise.all([
+    args.startTs
+      ? agent(
+          `Run: python3 -c "import time; print(int(time.time()*1000) - ${args.startTs})"\nReturn { ms: <number> }`,
+          { label: 'duration-ms', phase: 'Debrief', model: haikuModel, effort: 'low',
+            schema: { type: 'object', required: ['ms'], properties: { ms: { type: 'number' } } } }
+        ).then(r => r?.ms || null).catch(() => null)
+      : Promise.resolve(null),
+    agent(
+      `Run: git -C ${repoPath} rev-parse HEAD\nReturn { sha: "<40-char hex>" }`,
+      { label: 'skills-commit', phase: 'Debrief', model: haikuModel, effort: 'low',
+        schema: { type: 'object', required: ['sha'], properties: { sha: { type: 'string' } } } }
+    ).then(r => r?.sha || null).catch(() => null),
+  ])
   const record = JSON.stringify({
     ts: args.today || 'unknown',
     skill: 'harness-intake',
+    skillsSchemaVersion: SKILLS_SCHEMA_VERSION,
+    skillsCommit,
     status,
     sourceIssue: issueKey || 'unknown',
     durationMs,
     outputTokensByModel: tokensByModel,
+    agentCountByModel,
     outputTokensTotal,
     estimatedCostUsd,
     ...extra,
@@ -100,6 +113,7 @@ Return { appended: true }.`,
       label: 'audit-write',
       phase: 'Debrief',
       model: haikuModel,
+      effort: 'low',
       schema: { type: 'object', required: ['appended'], properties: { appended: { type: 'boolean' } } },
     }
   )
@@ -332,7 +346,7 @@ const [layerDiscoverResult, classifyResult, acSynthResult] = await parallel([
     `You are a repo layer discoverer for harness-intake. Run exactly ONE shell command and return.
 Run: ls ${repoPath}/src 2>/dev/null || ls ${repoPath}/app 2>/dev/null || ls ${repoPath}/lib 2>/dev/null
 Return the directory names as repoLayers[]. Do not read any files or run any other commands.`,
-    { label: 'layer-discover', phase: 'Triage', model: haikuModel, schema: LAYER_DISCOVER_SCHEMA }
+    { label: 'layer-discover', phase: 'Triage', model: haikuModel, effort: 'low', schema: LAYER_DISCOVER_SCHEMA }
   ),
   () => trackedAgent(
     `You are a work classifier for harness-intake. Do NOT use any tools or run any shell commands.
@@ -357,7 +371,7 @@ SOURCE TITLE: first line of ticket text, max 80 chars.
 
 INPUT:
 ${input}`,
-    { label: 'classify', phase: 'Triage', model: sonnetModel, schema: CLASSIFY_SCHEMA }
+    { label: 'classify', phase: 'Triage', model: sonnetModel, effort: 'high', schema: CLASSIFY_SCHEMA }
   ),
   () => trackedAgent(
     `You are an AC synthesizer for harness-intake. Do NOT use any tools or run any shell commands.
@@ -398,7 +412,7 @@ CRITICAL rules for AC strategies:
 
 INPUT:
 ${input}`,
-    { label: 'ac-synth', phase: 'Triage', model: sonnetModel, schema: AC_SYNTH_SCHEMA }
+    { label: 'ac-synth', phase: 'Triage', model: sonnetModel, effort: 'medium', schema: AC_SYNTH_SCHEMA }
   ),
 ])
 
@@ -426,7 +440,7 @@ ${ac.searchScope  ? `SEARCH SCOPE: ${repoPath}/${ac.searchScope}` : `SEARCH SCOP
 ${ac.shellCommand ? `SHELL COMMAND: ${ac.shellCommand}` : ''}
 
 EXECUTE one command (pick by researchType):
-  grep:  timeout 15 grep -rl --include="*.ts" --include="*.tsx" --include="*.js" --include="*.jsx" "${ac.grepPattern || '.'}" ${ac.searchScope ? repoPath + '/' + ac.searchScope : acSearchRoot}/ 2>/dev/null | wc -l
+  grep:  timeout 15 grep -rl "${ac.grepPattern || '.'}" ${ac.searchScope ? repoPath + '/' + ac.searchScope : acSearchRoot}/ 2>/dev/null | wc -l
   find:  ${ac.shellCommand || `find ${ac.searchScope ? repoPath + '/' + ac.searchScope : acSearchRoot} -type f 2>/dev/null | wc -l`}
   read:  ${ac.shellCommand || `cat ${repoPath}/package.json`} (count relevant lines)
   shell: ${ac.shellCommand || 'echo 0'}
@@ -437,7 +451,7 @@ RULES:
 - rawOutput = first 20 lines of what the command produced (for traceability)
 
 Return AC_VERIFY_ITEM_SCHEMA.`,
-    { label: `ac-verify:${i + batchIdx}`, phase: 'Triage', model: haikuModel, schema: AC_VERIFY_ITEM_SCHEMA }
+    { label: `ac-verify:${i + batchIdx}`, phase: 'Triage', model: haikuModel, effort: 'low', schema: AC_VERIFY_ITEM_SCHEMA }
   )))
   acVerifyItems.push(...batchResults)
 }
@@ -454,8 +468,7 @@ const acListWithVerify = acSynthList.map((ac, idx) => {
 
 // Phase C — broader-pattern retry for ALL grep ACs (un-skippable)
 // Runs on every AC where researchType=grep, regardless of verifiedCount.
-// Phase B uses --include filters that can silently exclude test files (*.test.js etc).
-// Running 3 broader variants on every grep AC catches those misses before Phase D sizes the ticket.
+// Phase C runs broader pattern variants to catch files missed by the initial grep.
 //
 // Audit trail: every grep AC gets suspiciousZeroRetried=true after this phase.
 // The structural validator will FAIL with PHASE_C_NOT_RUN if any grep AC has
@@ -513,7 +526,7 @@ SELECTION RULES (apply in order):
 - If all three = 0: retriedCount = 0, retriedPattern = "phase-b-confirmed"
 rawOutput = the actual file paths from the highest-count command (first 5 lines).
 Return SUSPICIOUS_ZERO_SCHEMA.`,
-      { label: `phase-c:${ac.grepPattern.slice(0, 25).replace(/\s+/g, '-')}`, phase: 'Triage', model: haikuModel, schema: SUSPICIOUS_ZERO_SCHEMA }
+      { label: `phase-c:${ac.grepPattern.slice(0, 25).replace(/\s+/g, '-')}`, phase: 'Triage', model: haikuModel, effort: 'low', schema: SUSPICIOUS_ZERO_SCHEMA }
     )
   }))
   phaseCResults.push(...batchResults)
@@ -575,7 +588,7 @@ CONFLICT RESOLUTION RULES:
 - migrationPattern stays as classified unless verification proves it wrong` : ''}
 
 Assemble the final WORK_INTEL_SCHEMA. Use the REPO LAYERS above for the repoLayers field. The acList must be the AC LIST WITH VERIFICATION above (preserve all fields including verifiedCount and claimConflict). The size, splitRequired, and reasoning must${hasConflicts ? ' be RE-DERIVED from verified counts' : ' match the classify result'}.`,
-  { label: 'work-intel-merge', phase: 'Triage', model: mergeModel, schema: WORK_INTEL_SCHEMA }
+  { label: 'work-intel-merge', phase: 'Triage', model: mergeModel, effort: 'medium', schema: WORK_INTEL_SCHEMA }
 )
 
 if (!workIntelResult) throw new Error('Work Intelligence merge failed — cannot proceed')
@@ -602,8 +615,8 @@ if (migrationPattern && workIntelResult.workType === 'migration') {
   for (const candidate of candidates) {
     const escaped = candidate.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
     const checkResult = await trackedAgent(
-      `Run: timeout 15 grep -rl --include="*.ts" --include="*.tsx" --include="*.js" --include="*.jsx" "${escaped}" ${verifyRoot}/ 2>/dev/null | wc -l\nReturn { count: <number> }`,
-      { label: 'pattern-lock', phase: 'Triage', model: haikuModel,
+      `Run: timeout 15 grep -rl "${escaped}" ${verifyRoot}/ 2>/dev/null | wc -l\nReturn { count: <number> }`,
+      { label: 'pattern-lock', phase: 'Triage', model: haikuModel, effort: 'low',
         schema: { type: 'object', required: ['count'], properties: { count: { type: 'number' } } } }
     )
     if ((checkResult?.count || 0) > 0) { lockedPattern = candidate; break }
@@ -659,7 +672,7 @@ if (!splitRequired) {
   }
 
   const nextCmd = issueKey
-    ? `/harness-plan --intake docs/plans/${args.today || 'today'}-${issueKey}-intake-manifest.json`
+    ? `/harness-plan --intake <path-to-intake-manifest>`
     : `/harness-plan --intake <intake-manifest-path>`
 
   const skipSummary = `
@@ -724,7 +737,7 @@ ${ac.searchScope ? `SEARCH SCOPE: ${repoPath}/${ac.searchScope}` : `SEARCH SCOPE
 ${ac.shellCommand ? `SHELL COMMAND: ${ac.shellCommand}` : ''}
 
 REQUIRED (pick by researchType):
-  grep:  timeout 15 grep -rl --include="*.ts" --include="*.tsx" --include="*.js" --include="*.jsx" "${ac.grepPattern || '.'}" ${ac.searchScope ? repoPath + '/' + ac.searchScope : searchRoot}/ 2>/dev/null
+  grep:  timeout 15 grep -rl "${ac.grepPattern || '.'}" ${ac.searchScope ? repoPath + '/' + ac.searchScope : searchRoot}/ 2>/dev/null
          Capture ALL paths. Then wc -l for count.
   find:  ${ac.shellCommand || `find ${ac.searchScope ? repoPath + '/' + ac.searchScope : searchRoot} -type f 2>/dev/null`}
   read:  ${ac.shellCommand || `cat ${repoPath}/package.json`}
@@ -736,7 +749,7 @@ RULES:
 - findings: one line summarising what you found (e.g. "found 26 files with fetch(")
 
 Return AC_RESEARCH_SCHEMA.`,
-      { label: `ac-research:${ac.bullet.slice(0, 40).replace(/\s+/g, '-')}`, phase: 'Research', model: haikuModel, schema: AC_RESEARCH_SCHEMA }
+      { label: `ac-research:${ac.bullet.slice(0, 40).replace(/\s+/g, '-')}`, phase: 'Research', model: haikuModel, effort: 'low', schema: AC_RESEARCH_SCHEMA }
     ))
   )
   acResearchResultsAll.push(...batchResults)
@@ -767,13 +780,13 @@ SEARCH ROOT: ${searchRoot}${layer ? '/' + layer : ''}
 ${patternGrepArg ? `PATTERN: ${patternGrepArg}` : 'TICKET TYPE: non-migration — enumerate all source files by directory'}
 
 REQUIRED COMMANDS (run ALL of these in order):
-${patternGrepArg ? `1. timeout 15 grep -rl --include="*.ts" --include="*.tsx" --include="*.js" --include="*.jsx" "${patternGrepArg}" ${searchRoot}${layer ? '/' + layer : ''}/ 2>/dev/null
+${patternGrepArg ? `1. timeout 15 grep -rl "${patternGrepArg}" ${searchRoot}${layer ? '/' + layer : ''}/ 2>/dev/null
    → capture the full list of matching paths (ALL paths, not just head -5)
    → if command times out or returns nothing, return files=[] fileCount=0
 2. echo above output | wc -l → for fileCount
 3. if fileCount > 8:
    ls ${searchRoot}${layer ? '/' + layer : ''}/ → enumerate subdirectories
-   then timeout 10 grep -rl --include="*.ts" --include="*.tsx" --include="*.js" --include="*.jsx" "${patternGrepArg}" ${searchRoot}${layer ? '/' + layer : ''}/<subdir>/ 2>/dev/null for each subdir` : `1. find ${searchRoot}${layer ? '/' + layer : ''} -type f \\( -name "*.ts" -o -name "*.tsx" -o -name "*.js" -o -name "*.jsx" \\) 2>/dev/null
+   then timeout 10 grep -rl "${patternGrepArg}" ${searchRoot}${layer ? '/' + layer : ''}/<subdir>/ 2>/dev/null for each subdir` : `1. find ${searchRoot}${layer ? '/' + layer : ''} -type f 2>/dev/null
    → capture ALL paths
 2. echo above output | wc -l → for fileCount
 3. if fileCount > 8:
@@ -787,7 +800,7 @@ RULES:
 - dependsOnLayers: list layer names this one must come after (empty for most)
 
 Return LAYER_SCHEMA.`,
-      { label: `research:${layer || 'root'}`, phase: 'Research', model: sonnetModel, schema: LAYER_SCHEMA }
+      { label: `research:${layer || 'root'}`, phase: 'Research', model: sonnetModel, effort: 'medium', schema: LAYER_SCHEMA }
     ))
   )
   layerResultsAll.push(...batchResults)
@@ -928,7 +941,7 @@ RULES:
 
 Do NOT assign groupId — that is handled deterministically after all groupers finish.
 Return LAYER_SUBTASKS_SCHEMA.`,
-      { label: `design:grouper:${r.acBullet.slice(0, 30).replace(/\s+/g, '-')}`, phase: 'Split Design', model: haikuModel, schema: LAYER_SUBTASKS_SCHEMA }
+      { label: `design:grouper:${r.acBullet.slice(0, 30).replace(/\s+/g, '-')}`, phase: 'Split Design', model: haikuModel, effort: 'low', schema: LAYER_SUBTASKS_SCHEMA }
     )
   }))
   grouperResultsAll.push(...batchResults)
@@ -1019,7 +1032,7 @@ ${JSON.stringify(allGrouperDrafts.map(s => ({
 })))}
 
 Return COORDINATOR_SCHEMA.`,
-  { label: 'design:coordinator', phase: 'Split Design', model: opusModel, schema: COORDINATOR_SCHEMA }
+  { label: 'design:coordinator', phase: 'Split Design', model: opusModel, effort: 'high', schema: COORDINATOR_SCHEMA }
 )
 
 // Re-attach descriptions stripped from coordinator input — coordinator preserves titles
@@ -1198,7 +1211,7 @@ For each AC bullet, determine:
 - missing: the AC bullet text if no subtask addresses it at all
 
 Return AC_VERIFY_SCHEMA.`,
-    { label: 'ac-verify', phase: 'Split Design', model: sonnetModel, schema: AC_VERIFY_SCHEMA }
+    { label: 'ac-verify', phase: 'Split Design', model: sonnetModel, effort: 'medium', schema: AC_VERIFY_SCHEMA }
   )
 
 // Post-verify stub injection — for ACs that had files in research but no subtask covered them.
@@ -1307,7 +1320,7 @@ TASKS:
 
 verdict=PASS if all ACs covered and counts plausible. PASS_WITH_NOTES if minor gaps. FAIL if >2 ACs uncovered.
 Return VERIFY_SCHEMA.`,
-  { label: 'verify-manifest', phase: 'Verify', model: sonnetModel, schema: VERIFY_SCHEMA }
+  { label: 'verify-manifest', phase: 'Verify', model: sonnetModel, effort: 'medium', schema: VERIFY_SCHEMA }
 )
 
 if (verifyResult) {
