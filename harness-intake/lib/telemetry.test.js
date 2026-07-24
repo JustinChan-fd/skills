@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { repoNameFromPath, slugFromInput, buildTelemetryPath, buildAppendCmd } from './telemetry.js'
+import { repoNameFromPath, slugFromInput, buildTelemetryPath, buildAppendCmd, ejectTestFiles } from './telemetry.js'
 
 test('repoNameFromPath extracts last segment', () => {
   assert.equal(repoNameFromPath('/Users/foo/Desktop/Repos/webtarsthree'), 'webtarsthree')
@@ -81,4 +81,51 @@ test('buildAppendCmd escapes single quotes and ensures dir exists', () => {
   assert.ok(cmd.includes('mkdir -p'))
   assert.ok(cmd.includes('>>'))
   assert.ok(!cmd.match(/'[^'\\]*'[^'\\]*it's/), 'raw single quote should be escaped')
+})
+
+test('ejectTestFiles removes test files from migration subtasks', () => {
+  const subtasks = [
+    { isMigration: true,  files: ['src/a.js', 'src/a.test.js', 'src/b.spec.ts'], estimatedFileCount: 3 },
+    { isMigration: false, files: ['src/c.test.js'], estimatedFileCount: 1 },
+  ]
+  const injected = ejectTestFiles(subtasks, 'TARS-1271', 'src')
+  assert.deepEqual(subtasks[0].files, ['src/a.js'])
+  assert.equal(subtasks[0].estimatedFileCount, 1)
+  // non-migration subtask untouched
+  assert.deepEqual(subtasks[1].files, ['src/c.test.js'])
+  assert.equal(injected.length, 1)
+  assert.ok(injected[0].title.includes('TARS-1271'))
+  assert.ok(injected[0].isCleanup)
+  assert.equal(injected[0].isMigration, false)
+  assert.ok(injected[0].files.includes('src/a.test.js'))
+  assert.ok(injected[0].files.includes('src/b.spec.ts'))
+})
+
+test('ejectTestFiles deduplicates test files across subtasks', () => {
+  const subtasks = [
+    { isMigration: true, files: ['src/a.test.js', 'src/b.js'], estimatedFileCount: 2 },
+    { isMigration: true, files: ['src/a.test.js', 'src/c.js'], estimatedFileCount: 2 },
+  ]
+  const injected = ejectTestFiles(subtasks, '', '')
+  // a.test.js appears only once in the injected subtask
+  assert.equal(injected[0].files.filter(f => f === 'src/a.test.js').length, 1)
+})
+
+test('ejectTestFiles returns empty array when no test files in migration batches', () => {
+  const subtasks = [
+    { isMigration: true,  files: ['src/a.js', 'src/b.jsx'], estimatedFileCount: 2 },
+    { isMigration: false, files: ['src/a.test.js'],          estimatedFileCount: 1 },
+  ]
+  const injected = ejectTestFiles(subtasks, 'TARS-99', 'src')
+  assert.equal(injected.length, 0)
+  assert.deepEqual(subtasks[0].files, ['src/a.js', 'src/b.jsx'])
+})
+
+test('ejectTestFiles chunks at 8 files', () => {
+  const testFiles = Array.from({ length: 10 }, (_, i) => `src/f${i}.test.js`)
+  const subtasks = [{ isMigration: true, files: ['src/prod.js', ...testFiles], estimatedFileCount: 11 }]
+  const injected = ejectTestFiles(subtasks, 'TARS-1', 'src')
+  assert.equal(injected.length, 2)
+  assert.equal(injected[0].files.length, 8)
+  assert.equal(injected[1].files.length, 2)
 })

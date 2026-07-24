@@ -54,3 +54,46 @@ export function buildAppendCmd(telemetryPath, jsonLine) {
   const escaped = jsonLine.replace(/'/g, "'\\''")
   return `mkdir -p "$(dirname '${telemetryPath}')" && echo '${escaped}' >> '${telemetryPath}'`
 }
+
+const TEST_FILE_RE = /\.(test|spec)\.[jt]sx?$/
+
+/**
+ * Eject test files from isMigration:true subtasks into a separate test-mock batch.
+ *
+ * Mutates `subtasks` in place (removes test files from migration batches, updates
+ * estimatedFileCount). Returns new test-mock subtask(s) to inject (may be empty).
+ *
+ * @param {Array}  subtasks  - coordinator subtask drafts (mutated)
+ * @param {string} issueKey  - Jira key prefix (e.g. 'TARS-1271') or ''
+ * @param {string} scopePath - fallback scopePath for the test-mock subtask
+ * @returns {Array} new subtasks to push (zero or more test-mock subtasks)
+ */
+export function ejectTestFiles(subtasks, issueKey, scopePath) {
+  const ejected = []
+  for (const s of subtasks) {
+    if (!s.isMigration) continue
+    const testFiles = (s.files || []).filter(f => TEST_FILE_RE.test(f))
+    if (testFiles.length === 0) continue
+    s.files = s.files.filter(f => !TEST_FILE_RE.test(f))
+    s.estimatedFileCount = s.files.length
+    ejected.push(...testFiles)
+  }
+  const unique = [...new Set(ejected)]
+  if (unique.length === 0) return []
+  const chunks = unique.length > 8
+    ? Array.from({ length: Math.ceil(unique.length / 8) }, (_, i) => unique.slice(i * 8, (i + 1) * 8))
+    : [unique]
+  return chunks.map((chunk, i) => ({
+    title: `${issueKey ? issueKey + ': ' : ''}Update test mocks for migration${chunks.length > 1 ? ` (part ${i + 1}/${chunks.length})` : ''}`,
+    description: 'Update test file mocks to reflect the migration pattern change. These files were ejected from production migration batches.',
+    scopePath: scopePath || '',
+    files: chunk,
+    estimatedFileCount: chunk.length,
+    targetSize: chunk.length <= 4 ? 'XS' : 'S',
+    isMigration: false,
+    isCleanup: true,
+    isValidation: false,
+    isDeferred: false,
+    needsReview: false,
+  }))
+}

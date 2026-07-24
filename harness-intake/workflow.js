@@ -93,6 +93,36 @@ function _buildAppendCmd(path, jsonLine) {
   const escaped = jsonLine.replace(/'/g, "'\\''")
   return `mkdir -p "$(dirname '${path}')" && echo '${escaped}' >> '${path}'`
 }
+const _TEST_FILE_RE = /\.(test|spec)\.[jt]sx?$/
+function _ejectTestFiles(subtasks, issueKey, scopePath) {
+  const ejected = []
+  for (const s of subtasks) {
+    if (!s.isMigration) continue
+    const testFiles = (s.files || []).filter(f => _TEST_FILE_RE.test(f))
+    if (testFiles.length === 0) continue
+    s.files = s.files.filter(f => !_TEST_FILE_RE.test(f))
+    s.estimatedFileCount = s.files.length
+    ejected.push(...testFiles)
+  }
+  const unique = [...new Set(ejected)]
+  if (unique.length === 0) return []
+  const chunks = unique.length > 8
+    ? Array.from({ length: Math.ceil(unique.length / 8) }, (_, i) => unique.slice(i * 8, (i + 1) * 8))
+    : [unique]
+  return chunks.map((chunk, i) => ({
+    title: `${issueKey ? issueKey + ': ' : ''}Update test mocks for migration${chunks.length > 1 ? ` (part ${i + 1}/${chunks.length})` : ''}`,
+    description: 'Update test file mocks to reflect the migration pattern change. These files were ejected from production migration batches.',
+    scopePath: scopePath || '',
+    files: chunk,
+    estimatedFileCount: chunk.length,
+    targetSize: chunk.length <= 4 ? 'XS' : 'S',
+    isMigration: false,
+    isCleanup: true,
+    isValidation: false,
+    isDeferred: false,
+    needsReview: false,
+  }))
+}
 // ===== END PURE =====
 
 // telemetryPath is set on first writeAuditRecord call (needs a timestamp agent),
@@ -1094,7 +1124,16 @@ if (coordinatorResult?.subtasks) {
   }
 }
 
+// ── Deterministic test file ejection ────────────────────────────────────────
+// The coordinator flags test files in migration batches but does not move them.
+// _ejectTestFiles enforces the rule in code so LLM variance cannot re-introduce it.
 const rawProposed = coordinatorResult?.subtasks || allGrouperDrafts
+const testMockSubtasks = _ejectTestFiles(rawProposed, issueKey, scopePath)
+if (testMockSubtasks.length > 0) {
+  const ejectedCount = testMockSubtasks.reduce((n, s) => n + s.files.length, 0)
+  log(`test-file ejection: moved ${ejectedCount} test file(s) out of migration batches → ${testMockSubtasks.length} test-mock subtask(s)`)
+  rawProposed.push(...testMockSubtasks)
+}
 
 // Dedup by file set — parent layers contain child layer files, so parallel designers
 // produce overlapping subtasks. Keep the subtask whose scopePath is most specific
@@ -1392,9 +1431,17 @@ if (coordinatorResult?.misclassifications?.length > 0) {
   for (const m of coordinatorResult.misclassifications) qualityIssues.push(`misclassification: ${m}`)
 }
 
-// Carry forward any verify issues
+// Carry forward verify issues — but filter out ticket-vs-reality corrections that are
+// already captured in groundedReality.ticketClaimsToIgnore. Those are expected harness
+// behavior (COMPLETE_FRAMING_CORRECTED), not defects. Only structural problems remain.
+const TICKET_CORRECTION_RE = /^(FILE COUNT MISMATCH|TICKET NUMBER WRONG|ticket claim)/i
 if (verifyResult?.issues?.length > 0) {
-  for (const issue of verifyResult.issues) qualityIssues.push(`verify: ${issue}`)
+  const ticketCorrections = verifyResult.groundedReality?.ticketClaimsToIgnore || []
+  for (const issue of verifyResult.issues) {
+    // If it's a ticket-number complaint AND groundedReality already documents it, skip
+    if (TICKET_CORRECTION_RE.test(issue) && ticketCorrections.length > 0) continue
+    qualityIssues.push(`verify: ${issue}`)
+  }
 }
 if (verifyResult?.stubsNeedReview?.length > 0) {
   for (const stub of verifyResult.stubsNeedReview) qualityIssues.push(`stub needs review: "${stub}"`)
@@ -1557,6 +1604,21 @@ const agentMetricsLines = Object.entries(agentCountByModel)
     return `    ${label}  (×${c})  ${tok} tok`
   }).join('\n')
 
+// groundedReality block — shows what research overrode vs. what the ticket claimed
+const groundedRealityLines = (() => {
+  const gr = verifyResult?.groundedReality
+  if (!gr) return ''
+  const lines = [`\n  research findings (overrides ticket):`, `    · ${gr.summary}`]
+  if (gr.actualFileCount != null) lines.push(`    · actual file count: ${gr.actualFileCount} (research-verified)`)
+  if (gr.actualScope) lines.push(`    · actual scope: ${gr.actualScope}`)
+  if (gr.ticketClaimsToIgnore?.length > 0) {
+    lines.push(`    · ticket claims overridden:`)
+    for (const c of gr.ticketClaimsToIgnore) lines.push(`        ✗ ${c}`)
+  }
+  if (gr.migrationNotes) lines.push(`    · migration notes: ${gr.migrationNotes}`)
+  return lines.join('\n')
+})()
+
 const cliSummary = `
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 harness-intake
@@ -1567,7 +1629,8 @@ harness-intake
   agents:  ${totalAgents}
 ${agentMetricsLines}
   cost:    ~$${estimatedCostUsd}
-${conflictLines}
+${conflictLines}${groundedRealityLines}
+
   subtasks: ${mergeResult.subtasks.length} proposed    execution: ${mergeResult.execution}
 ${groupLines}
 ${doneConditionAcs.length > 0 ? `\n  done-conditions (add to predecessor AC criteria, not separate subtasks):\n${doneConditionAcs.map(ac => `    · ${ac.slice(0, 80)}`).join('\n')}\n` : ''}
