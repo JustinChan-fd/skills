@@ -147,7 +147,7 @@ async function writeAuditRecord(status, extra = {}) {
           `Run: python3 -c "import time; print(int(time.time()*1000) - ${args.startTs})"\nReturn { ms: <number> }`,
           { label: 'duration-ms', phase: 'Debrief', model: haikuModel, effort: 'low',
             schema: { type: 'object', required: ['ms'], properties: { ms: { type: 'number' } } } }
-        ).then(r => r?.ms || null).catch(() => null)
+        ).then(r => { const v = r?.ms; return (v != null && v > 0 && v < 36_000_000) ? v : null }).catch(() => null)
       : Promise.resolve(null),
     agent(
       `Run: git -C ~/Desktop/Repos/skills rev-parse HEAD 2>/dev/null || git -C ~/.claude/skills rev-parse HEAD 2>/dev/null || echo unknown\nReturn { sha: "<40-char hex or unknown>" }`,
