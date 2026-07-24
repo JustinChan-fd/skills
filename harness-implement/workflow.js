@@ -41,7 +41,7 @@ async function writeAuditRecord(status, extra = {}) {
   const durationMs = args.startTs
     ? await agent(
         `Run: python3 -c "import time; print(int(time.time()*1000) - ${args.startTs})"\nReturn { ms: <number> }`,
-        { label: 'duration-ms', phase: 'Debrief', model: 'haiku',
+        { label: 'duration-ms', phase: 'Debrief', model: 'haiku', effort: 'low',
           schema: { type: 'object', required: ['ms'], properties: { ms: { type: 'number' } } } }
       ).then(r => r?.ms || null).catch(() => null)
     : null
@@ -51,12 +51,14 @@ async function writeAuditRecord(status, extra = {}) {
     status,
     planPath: args.planPath || 'unknown',
     durationMs,
+    outputTokensByModel: tokensByModel,
+    agentCountByModel,
     outputTokensTotal,
     ...extra,
   })
   await agent(
     `Append exactly one line to a JSONL file. Use the Bash tool only.\nRun: echo '${record.replace(/'/g, "'\\''")}' >> ~/.claude/harness-implement-runs.jsonl\nReturn { appended: true }.`,
-    { label: 'audit-write', phase: 'Debrief', model: 'haiku',
+    { label: 'audit-write', phase: 'Debrief', model: 'haiku', effort: 'low',
       schema: { type: 'object', required: ['appended'], properties: { appended: { type: 'boolean' } } },
     }
   )
@@ -307,7 +309,7 @@ const [planData, toolbelt] = await parallel([
    e. constraints: named constraints listed in the document (empty array if absent)
 
 Return the structured plan data as JSON.`,
-    { label: 'load-plan', phase: 'Load', model: 'haiku', schema: PLAN_EXTRACT_SCHEMA }
+    { label: 'load-plan', phase: 'Load', model: 'haiku', effort: 'low', schema: PLAN_EXTRACT_SCHEMA }
   ),
   () => (async () => {
     // 4 parallel concern agents — each discovers its own files via find, no hardcoded paths
@@ -323,7 +325,7 @@ Find and read instruction/rule files. Run:
   find ${args.repoPath} -maxdepth 3 -type f \\( -iname "CLAUDE.md" -o -iname "AGENTS.md" -o -iname ".cursorrules" -o -iname "CONTRIBUTING.md" -o -iname "CONVENTIONS.md" \\) 2>/dev/null
 Read each file found (skip if none). Extract ONLY: forbidden patterns, required patterns, naming rules.
 Return compact arrays — rules not prose.`,
-        { label: 'toolbelt:rules', phase: 'Load', model: 'haiku', schema: RULES_SCHEMA }
+        { label: 'toolbelt:rules', phase: 'Load', model: 'haiku', effort: 'low', schema: RULES_SCHEMA }
       ),
       () => agent(
         `REPO: ${args.repoPath}
@@ -331,7 +333,7 @@ Find and read styling/design files. Run:
   find ${args.repoPath} -maxdepth 4 -type f \\( -iname "*STYLING*" -o -iname "*DESIGN*" -o -iname "*TOKEN*" -o -iname "*COMPONENT*" -o -name "tailwind.config.*" -o -name "postcss.config.*" \\) 2>/dev/null
 Read each file found (skip if none). Extract ONLY: forbidden CSS/class patterns, required patterns, naming rules for components/tokens.
 Return compact arrays — rules not prose.`,
-        { label: 'toolbelt:styling', phase: 'Load', model: 'haiku', schema: STYLING_SCHEMA }
+        { label: 'toolbelt:styling', phase: 'Load', model: 'haiku', effort: 'low', schema: STYLING_SCHEMA }
       ),
       () => agent(
         `REPO: ${args.repoPath}
@@ -344,7 +346,7 @@ IMPORTANT: If vi.mock or jest.mock is used to mock a module (e.g. vi.mock('../ut
 "In tests that vi.mock a module, assert on the MOCKED module directly (e.g. expect(clientFetch).toHaveBeenCalledWith(...)).
 NEVER assert on underlying globals (e.g. global.fetch) — those are never called when the module is mocked."
 Return compact array of actionable rules.`,
-        { label: 'toolbelt:testing', phase: 'Load', model: 'haiku', schema: TESTING_SCHEMA }
+        { label: 'toolbelt:testing', phase: 'Load', model: 'haiku', effort: 'low', schema: TESTING_SCHEMA }
       ),
       () => agent(
         `REPO: ${args.repoPath}
@@ -356,7 +358,7 @@ Read package.json scripts section and any template/script files found. Extract:
 - generators: trigger condition → command to run
 - templates: what it's for → file path to copy from
 Return compact structured arrays.`,
-        { label: 'toolbelt:tooling', phase: 'Load', model: 'haiku', schema: TOOLING_SCHEMA }
+        { label: 'toolbelt:tooling', phase: 'Load', model: 'haiku', effort: 'low', schema: TOOLING_SCHEMA }
       ),
     ])
 
@@ -426,7 +428,7 @@ echo "{\"worktreePath\":\"$WORKTREE_PATH\",\"branch\":\"${branchName}\",\"baseBr
 \`\`\`
 
 Return the JSON object printed by the last echo.`,
-  { label: 'worktree-setup', phase: 'Worktree', model: 'haiku',
+  { label: 'worktree-setup', phase: 'Worktree', model: 'haiku', effort: 'low',
     schema: {
       type: 'object',
       required: ['worktreePath', 'branch', 'baseBranch'],
@@ -497,7 +499,7 @@ At the end of your work, your return value must be a structured handoff JSON:
 
   const handoff = await trackedAgent(
     devPrompt,
-    { label: `dev-${label}`, phase: 'Implement', model: 'sonnet', agentType: 'hi-developer', schema: HANDOFF_SCHEMA }
+    { label: `dev-${label}`, phase: 'Implement', model: 'sonnet', effort: 'high', agentType: 'hi-developer', schema: HANDOFF_SCHEMA }
   )
 
   if (!handoff) return { task, handoff: null, diffText: null, label, needsContext: false }
@@ -511,7 +513,7 @@ At the end of your work, your return value must be a structured handoff JSON:
   if (task.tddRequired) {
     tddGreenOutput = await agent(
       `Run: cd ${workDir} && npm test -- --run 2>&1 | tail -20\nReturn ONLY the raw output.`,
-      { label: `tdd-green-${task.id}`, phase: 'Implement', model: 'haiku' }
+      { label: `tdd-green-${task.id}`, phase: 'Implement', model: 'haiku', effort: 'low' }
     )
     const tddPassed = tddGreenOutput && !tddGreenOutput.includes('failed') && !tddGreenOutput.includes('FAIL')
     if (!tddPassed) {
@@ -521,7 +523,7 @@ At the end of your work, your return value must be a structured handoff JSON:
 
   const diffText = await trackedAgent(
     `Run: git -C ${workDir} diff HEAD -- ${task.files.join(' ')}\nReturn ONLY the raw diff output (max 300 lines).`,
-    { label: `diff-${label}`, phase: 'Implement', model: 'haiku' }
+    { label: `diff-${label}`, phase: 'Implement', model: 'haiku', effort: 'low' }
   ) || 'diff unavailable'
 
   return { task, handoff, diffText, label, needsContext: false, tddGreenOutput }
@@ -550,7 +552,7 @@ FILES: ${dr.task.files.join(', ')}
 
 DIFF:
 ${dr.diffText}`,
-      { label: `cr-${dr.label}`, phase: 'Implement', model: 'haiku', schema: CODE_REVIEW_SCHEMA }
+      { label: `cr-${dr.label}`, phase: 'Implement', model: 'haiku', effort: 'low', schema: CODE_REVIEW_SCHEMA }
     )
     return { ...dr, codeReview }
   }))
@@ -584,7 +586,7 @@ for (const group of taskGroups) {
     const titles = group.tasks.map(t => t.title.slice(0, 25)).join(', ')
     await trackedAgent(
       `Commit all staged changes.\nREPO: ${workDir}\n1. git -C ${workDir} add -A\n2. git -C ${workDir} commit -m "${planKey} ${group.groupId}: ${titles.slice(0, 60)}"\nReturn commit hash or "NOTHING_TO_COMMIT".`,
-      { label: `commit-${group.groupId}`, phase: 'Implement', model: 'haiku' }
+      { label: `commit-${group.groupId}`, phase: 'Implement', model: 'haiku', effort: 'low' }
     )
   } else {
     for (const report of implementationReports.filter(r => group.tasks.some(t => t.id === r.task.id))) {
@@ -592,7 +594,7 @@ for (const group of taskGroups) {
       if (s === 'PASS') {
         await trackedAgent(
           `Commit completed task.\nREPO: ${workDir}\n1. git -C ${workDir} add -A\n2. git -C ${workDir} commit -m "${planKey} ${report.task.id}: ${report.task.title.slice(0, 55)}"\nReturn commit hash or "NOTHING_TO_COMMIT".`,
-          { label: `commit-${report.task.id}`, phase: 'Implement', model: 'haiku' }
+          { label: `commit-${report.task.id}`, phase: 'Implement', model: 'haiku', effort: 'low' }
         )
       }
     }
@@ -609,7 +611,7 @@ Run:
 1. npm test -- --run
 2. npx tsc --noEmit
 Return JSON: testsPassed, testsOutput (last 20 lines), typeCheckPassed, typeCheckOutput, summary.`,
-  { label: 'verify', phase: 'Verify', model: 'haiku', schema: VERIFY_SCHEMA }
+  { label: 'verify', phase: 'Verify', model: 'haiku', effort: 'low', schema: VERIFY_SCHEMA }
 )
 
 // ─── Stage 5: Review (per-file Haiku + spec-compliance Sonnet + security Sonnet) ──
@@ -622,19 +624,19 @@ trackPhase('Review')
 const [accumulatedDiff, diffSummary, commitLog, changedFilesList] = await parallel([
   () => agent(
     `Run: git -C ${workDir} diff origin/${worktreeResult.baseBranch}...HEAD\nReturn ONLY the raw diff output. No line limit.`,
-    { label: 'review-diff', phase: 'Review', model: 'haiku' }
+    { label: 'review-diff', phase: 'Review', model: 'haiku', effort: 'low' }
   ),
   () => agent(
     `Run: git -C ${workDir} diff --stat origin/${worktreeResult.baseBranch}...HEAD\nReturn ONLY the raw output.`,
-    { label: 'diff-stat', phase: 'Review', model: 'haiku' }
+    { label: 'diff-stat', phase: 'Review', model: 'haiku', effort: 'low' }
   ),
   () => agent(
     `Run: git -C ${workDir} log --oneline origin/${worktreeResult.baseBranch}...HEAD\nReturn ONLY the raw output.`,
-    { label: 'commit-log', phase: 'Review', model: 'haiku' }
+    { label: 'commit-log', phase: 'Review', model: 'haiku', effort: 'low' }
   ),
   () => agent(
     `Run: git -C ${workDir} diff --name-only origin/${worktreeResult.baseBranch}...HEAD\nReturn ONLY the raw output (one file path per line, no extra text).`,
-    { label: 'changed-files', phase: 'Review', model: 'haiku' }
+    { label: 'changed-files', phase: 'Review', model: 'haiku', effort: 'low' }
   ),
 ])
 const reviewDiff = accumulatedDiff || 'diff unavailable'
@@ -670,7 +672,7 @@ Flag only real issues. Include exact file and line for each finding.
 ${toolbeltReviewRules ? `REPO CONVENTIONS:\n${toolbeltReviewRules}\n` : ''}
 DIFF CHUNK ${i + batchIdx + 1}/${reviewChunks.length}:
 ${chunk}`,
-        { label: `file-review-${i + batchIdx + 1}`, phase: 'Review', model: 'haiku', schema: CODE_REVIEW_SCHEMA }
+        { label: `file-review-${i + batchIdx + 1}`, phase: 'Review', model: 'haiku', effort: 'low', schema: CODE_REVIEW_SCHEMA }
       )
     ))
     allChunkResults.push(...batchResults)
@@ -700,7 +702,7 @@ COMMIT LOG:
 ${commitLog || 'unavailable'}
 
 Flag only genuine spec gaps — tasks that appear unaddressed or implemented differently than described.`,
-    { label: 'spec-compliance', phase: 'Review', model: 'sonnet', schema: CODE_REVIEW_SCHEMA }
+    { label: 'spec-compliance', phase: 'Review', model: 'sonnet', effort: 'high', schema: CODE_REVIEW_SCHEMA }
   ),
   () => agent(
     `REPO: ${workDir}
@@ -710,7 +712,7 @@ ${allTasks.flatMap(t => t.files).join('\n')}
 
 DIFF:
 ${securityDiff}`,
-    { label: 'security-review', phase: 'Review', model: 'sonnet', schema: SECURITY_SCHEMA, agentType: 'hp-security' }
+    { label: 'security-review', phase: 'Review', model: 'sonnet', effort: 'high', schema: SECURITY_SCHEMA, agentType: 'hp-security' }
   ),
   () => {
     if (unplannedFiles.length === 0) {
@@ -748,7 +750,7 @@ verdict:
   FOLLOW_UP  — at least one file is "follow-up" (new work surfaced during implementation)
 
 Return SCOPE_DRIFT_SCHEMA.`,
-      { label: 'scope-drift', phase: 'Review', model: 'sonnet', schema: SCOPE_DRIFT_SCHEMA }
+      { label: 'scope-drift', phase: 'Review', model: 'sonnet', effort: 'medium', schema: SCOPE_DRIFT_SCHEMA }
     )
   },
 ])
@@ -775,7 +777,7 @@ FILE: ${item.file}
 ISSUE: ${item.issue}
 CHANGE: ${item.suggestion}
 Touch ONLY this file. Minimal change. Return under 100 words with file:line.`,
-      { label: `fix-${(item.file || '').replace(/[^a-z0-9]/gi, '-').slice(-20)}`, phase: 'Review', model: 'sonnet', agentType: 'hi-developer' }
+      { label: `fix-${(item.file || '').replace(/[^a-z0-9]/gi, '-').slice(-20)}`, phase: 'Review', model: 'sonnet', effort: 'high', agentType: 'hi-developer' }
     )
   ))).filter(Boolean)
   tokensByModel.sonnet += budget.spent() - fixBlockStart
@@ -783,7 +785,7 @@ Touch ONLY this file. Minimal change. Return under 100 words with file:line.`,
   if (fixReports.length > 0) {
     await trackedAgent(
       `Commit fixes.\nREPO: ${workDir}\n1. git -C ${workDir} add -A\n2. git -C ${workDir} commit -m "${planKey} fix: apply ${fixReports.length} code review correction(s)"\nReturn commit hash or "NOTHING_TO_COMMIT".`,
-      { label: 'fix-commit', phase: 'Review', model: 'haiku' }
+      { label: 'fix-commit', phase: 'Review', model: 'haiku', effort: 'low' }
     )
     codeReviewFixes.push(...criticalFindings.map((f, i) => ({ ...f, report: fixReports[i] || null })))
 
@@ -796,7 +798,7 @@ Touch ONLY this file. Minimal change. Return under 100 words with file:line.`,
       const batchResults = await parallel(batch.map(file => async () => {
         const fileDiff = await agent(
           `Run: git -C ${workDir} diff HEAD~1 -- ${file}\nReturn ONLY the raw diff output.`,
-          { label: `recheck-diff-${file.replace(/[^a-z0-9]/gi, '-').slice(-20)}`, phase: 'Review', model: 'haiku' }
+          { label: `recheck-diff-${file.replace(/[^a-z0-9]/gi, '-').slice(-20)}`, phase: 'Review', model: 'haiku', effort: 'low' }
         )
         if (!fileDiff) return null
         const chunks = splitFileIntoChunks(fileDiff, 300)
@@ -807,7 +809,7 @@ FILE: ${file}
 ${toolbeltReviewRules ? `REPO CONVENTIONS:\n${toolbeltReviewRules}\n` : ''}
 DIFF:
 ${chunk}`,
-            { label: `recheck-${file.replace(/[^a-z0-9]/gi, '-').slice(-20)}-${idx}`, phase: 'Review', model: 'haiku', schema: CODE_REVIEW_SCHEMA }
+            { label: `recheck-${file.replace(/[^a-z0-9]/gi, '-').slice(-20)}-${idx}`, phase: 'Review', model: 'haiku', effort: 'low', schema: CODE_REVIEW_SCHEMA }
           )
         ))
         return chunkResults.filter(Boolean).flatMap(r => r.findings || [])
@@ -827,7 +829,7 @@ ${chunk}`,
 // Post-commit verification — confirm changes are actually committed
 const postCommitCheck = await agent(
   `Run: git -C ${workDir} show --stat HEAD\nReturn ONLY the raw output.`,
-  { label: 'verify-commit', phase: 'Review', model: 'haiku' }
+  { label: 'verify-commit', phase: 'Review', model: 'haiku', effort: 'low' }
 )
 if (postCommitCheck) {
   log(`Commit verified: ${postCommitCheck.split('\n').slice(-2).join(' ').trim()}`)
@@ -850,7 +852,7 @@ SECURITY: ${securityResult?.status || 'not run'}
 DIFF:
 ${diffSummary || 'unavailable'}
 Format: one paragraph + bullet list of key changes. No headers.`,
-  { label: 'pr-body', phase: 'Return', model: 'haiku' }
+  { label: 'pr-body', phase: 'Return', model: 'haiku', effort: 'low' }
 )
 
 // ─── Debrief ──────────────────────────────────────────────────────────────────
@@ -1022,7 +1024,7 @@ Run this exact command:
 echo '${auditRecord.replace(/'/g, "'\\''")}' >> ~/.claude/harness-implement-runs.jsonl
 
 Return { appended: true }.`,
-  { label: 'audit-write', phase: 'Debrief', model: 'haiku',
+  { label: 'audit-write', phase: 'Debrief', model: 'haiku', effort: 'low',
     schema: { type: 'object', required: ['appended'], properties: { appended: { type: 'boolean' } } },
   }
 )

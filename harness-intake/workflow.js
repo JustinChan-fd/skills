@@ -77,7 +77,7 @@ async function writeAuditRecord(status, extra = {}) {
   const durationMs = args.startTs
     ? await agent(
         `Run: python3 -c "import time; print(int(time.time()*1000) - ${args.startTs})"\nReturn { ms: <number> }`,
-        { label: 'duration-ms', phase: 'Debrief', model: haikuModel,
+        { label: 'duration-ms', phase: 'Debrief', model: haikuModel, effort: 'low',
           schema: { type: 'object', required: ['ms'], properties: { ms: { type: 'number' } } } }
       ).then(r => r?.ms || null).catch(() => null)
     : null
@@ -88,6 +88,7 @@ async function writeAuditRecord(status, extra = {}) {
     sourceIssue: issueKey || 'unknown',
     durationMs,
     outputTokensByModel: tokensByModel,
+    agentCountByModel,
     outputTokensTotal,
     estimatedCostUsd,
     ...extra,
@@ -100,6 +101,7 @@ Return { appended: true }.`,
       label: 'audit-write',
       phase: 'Debrief',
       model: haikuModel,
+      effort: 'low',
       schema: { type: 'object', required: ['appended'], properties: { appended: { type: 'boolean' } } },
     }
   )
@@ -332,7 +334,7 @@ const [layerDiscoverResult, classifyResult, acSynthResult] = await parallel([
     `You are a repo layer discoverer for harness-intake. Run exactly ONE shell command and return.
 Run: ls ${repoPath}/src 2>/dev/null || ls ${repoPath}/app 2>/dev/null || ls ${repoPath}/lib 2>/dev/null
 Return the directory names as repoLayers[]. Do not read any files or run any other commands.`,
-    { label: 'layer-discover', phase: 'Triage', model: haikuModel, schema: LAYER_DISCOVER_SCHEMA }
+    { label: 'layer-discover', phase: 'Triage', model: haikuModel, effort: 'low', schema: LAYER_DISCOVER_SCHEMA }
   ),
   () => trackedAgent(
     `You are a work classifier for harness-intake. Do NOT use any tools or run any shell commands.
@@ -357,7 +359,7 @@ SOURCE TITLE: first line of ticket text, max 80 chars.
 
 INPUT:
 ${input}`,
-    { label: 'classify', phase: 'Triage', model: sonnetModel, schema: CLASSIFY_SCHEMA }
+    { label: 'classify', phase: 'Triage', model: sonnetModel, effort: 'high', schema: CLASSIFY_SCHEMA }
   ),
   () => trackedAgent(
     `You are an AC synthesizer for harness-intake. Do NOT use any tools or run any shell commands.
@@ -398,7 +400,7 @@ CRITICAL rules for AC strategies:
 
 INPUT:
 ${input}`,
-    { label: 'ac-synth', phase: 'Triage', model: sonnetModel, schema: AC_SYNTH_SCHEMA }
+    { label: 'ac-synth', phase: 'Triage', model: sonnetModel, effort: 'medium', schema: AC_SYNTH_SCHEMA }
   ),
 ])
 
@@ -437,7 +439,7 @@ RULES:
 - rawOutput = first 20 lines of what the command produced (for traceability)
 
 Return AC_VERIFY_ITEM_SCHEMA.`,
-    { label: `ac-verify:${i + batchIdx}`, phase: 'Triage', model: haikuModel, schema: AC_VERIFY_ITEM_SCHEMA }
+    { label: `ac-verify:${i + batchIdx}`, phase: 'Triage', model: haikuModel, effort: 'low', schema: AC_VERIFY_ITEM_SCHEMA }
   )))
   acVerifyItems.push(...batchResults)
 }
@@ -512,7 +514,7 @@ SELECTION RULES (apply in order):
 - If all three = 0: retriedCount = 0, retriedPattern = "phase-b-confirmed"
 rawOutput = the actual file paths from the highest-count command (first 5 lines).
 Return SUSPICIOUS_ZERO_SCHEMA.`,
-      { label: `phase-c:${ac.grepPattern.slice(0, 25).replace(/\s+/g, '-')}`, phase: 'Triage', model: haikuModel, schema: SUSPICIOUS_ZERO_SCHEMA }
+      { label: `phase-c:${ac.grepPattern.slice(0, 25).replace(/\s+/g, '-')}`, phase: 'Triage', model: haikuModel, effort: 'low', schema: SUSPICIOUS_ZERO_SCHEMA }
     )
   }))
   phaseCResults.push(...batchResults)
@@ -574,7 +576,7 @@ CONFLICT RESOLUTION RULES:
 - migrationPattern stays as classified unless verification proves it wrong` : ''}
 
 Assemble the final WORK_INTEL_SCHEMA. Use the REPO LAYERS above for the repoLayers field. The acList must be the AC LIST WITH VERIFICATION above (preserve all fields including verifiedCount and claimConflict). The size, splitRequired, and reasoning must${hasConflicts ? ' be RE-DERIVED from verified counts' : ' match the classify result'}.`,
-  { label: 'work-intel-merge', phase: 'Triage', model: mergeModel, schema: WORK_INTEL_SCHEMA }
+  { label: 'work-intel-merge', phase: 'Triage', model: mergeModel, effort: 'medium', schema: WORK_INTEL_SCHEMA }
 )
 
 if (!workIntelResult) throw new Error('Work Intelligence merge failed — cannot proceed')
@@ -602,7 +604,7 @@ if (migrationPattern && workIntelResult.workType === 'migration') {
     const escaped = candidate.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
     const checkResult = await trackedAgent(
       `Run: timeout 15 grep -rl "${escaped}" ${verifyRoot}/ 2>/dev/null | wc -l\nReturn { count: <number> }`,
-      { label: 'pattern-lock', phase: 'Triage', model: haikuModel,
+      { label: 'pattern-lock', phase: 'Triage', model: haikuModel, effort: 'low',
         schema: { type: 'object', required: ['count'], properties: { count: { type: 'number' } } } }
     )
     if ((checkResult?.count || 0) > 0) { lockedPattern = candidate; break }
@@ -735,7 +737,7 @@ RULES:
 - findings: one line summarising what you found (e.g. "found 26 files with fetch(")
 
 Return AC_RESEARCH_SCHEMA.`,
-      { label: `ac-research:${ac.bullet.slice(0, 40).replace(/\s+/g, '-')}`, phase: 'Research', model: haikuModel, schema: AC_RESEARCH_SCHEMA }
+      { label: `ac-research:${ac.bullet.slice(0, 40).replace(/\s+/g, '-')}`, phase: 'Research', model: haikuModel, effort: 'low', schema: AC_RESEARCH_SCHEMA }
     ))
   )
   acResearchResultsAll.push(...batchResults)
@@ -786,7 +788,7 @@ RULES:
 - dependsOnLayers: list layer names this one must come after (empty for most)
 
 Return LAYER_SCHEMA.`,
-      { label: `research:${layer || 'root'}`, phase: 'Research', model: sonnetModel, schema: LAYER_SCHEMA }
+      { label: `research:${layer || 'root'}`, phase: 'Research', model: sonnetModel, effort: 'medium', schema: LAYER_SCHEMA }
     ))
   )
   layerResultsAll.push(...batchResults)
@@ -927,7 +929,7 @@ RULES:
 
 Do NOT assign groupId — that is handled deterministically after all groupers finish.
 Return LAYER_SUBTASKS_SCHEMA.`,
-      { label: `design:grouper:${r.acBullet.slice(0, 30).replace(/\s+/g, '-')}`, phase: 'Split Design', model: haikuModel, schema: LAYER_SUBTASKS_SCHEMA }
+      { label: `design:grouper:${r.acBullet.slice(0, 30).replace(/\s+/g, '-')}`, phase: 'Split Design', model: haikuModel, effort: 'low', schema: LAYER_SUBTASKS_SCHEMA }
     )
   }))
   grouperResultsAll.push(...batchResults)
@@ -1018,7 +1020,7 @@ ${JSON.stringify(allGrouperDrafts.map(s => ({
 })))}
 
 Return COORDINATOR_SCHEMA.`,
-  { label: 'design:coordinator', phase: 'Split Design', model: opusModel, schema: COORDINATOR_SCHEMA }
+  { label: 'design:coordinator', phase: 'Split Design', model: opusModel, effort: 'high', schema: COORDINATOR_SCHEMA }
 )
 
 // Re-attach descriptions stripped from coordinator input — coordinator preserves titles
@@ -1197,7 +1199,7 @@ For each AC bullet, determine:
 - missing: the AC bullet text if no subtask addresses it at all
 
 Return AC_VERIFY_SCHEMA.`,
-    { label: 'ac-verify', phase: 'Split Design', model: sonnetModel, schema: AC_VERIFY_SCHEMA }
+    { label: 'ac-verify', phase: 'Split Design', model: sonnetModel, effort: 'medium', schema: AC_VERIFY_SCHEMA }
   )
 
 // Post-verify stub injection — for ACs that had files in research but no subtask covered them.
@@ -1306,7 +1308,7 @@ TASKS:
 
 verdict=PASS if all ACs covered and counts plausible. PASS_WITH_NOTES if minor gaps. FAIL if >2 ACs uncovered.
 Return VERIFY_SCHEMA.`,
-  { label: 'verify-manifest', phase: 'Verify', model: sonnetModel, schema: VERIFY_SCHEMA }
+  { label: 'verify-manifest', phase: 'Verify', model: sonnetModel, effort: 'medium', schema: VERIFY_SCHEMA }
 )
 
 if (verifyResult) {

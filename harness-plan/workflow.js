@@ -54,7 +54,7 @@ async function writeAuditRecord(status, extra = {}) {
   const durationMs = args.startTs
     ? await agent(
         `Run: python3 -c "import time; print(int(time.time()*1000) - ${args.startTs})"\nReturn { ms: <number> }`,
-        { label: 'duration-ms', phase: 'Debrief', model: haikuModel,
+        { label: 'duration-ms', phase: 'Debrief', model: haikuModel, effort: 'low',
           schema: { type: 'object', required: ['ms'], properties: { ms: { type: 'number' } } } }
       ).then(r => r?.ms || null).catch(() => null)
     : null
@@ -64,6 +64,7 @@ async function writeAuditRecord(status, extra = {}) {
     status,
     durationMs,
     outputTokensByModel: tokensByModel,
+    agentCountByModel,
     outputTokensTotal,
     estimatedCostUsd,
     ...extra,
@@ -72,7 +73,7 @@ async function writeAuditRecord(status, extra = {}) {
     `Append exactly one line to a JSONL file. Use the Bash tool only.
 Run: echo '${record.replace(/'/g, "'\\''")}' >> ~/.claude/harness-plan-runs.jsonl
 Return { appended: true }.`,
-    { label: 'audit-write', phase: 'Debrief', model: haikuModel,
+    { label: 'audit-write', phase: 'Debrief', model: haikuModel, effort: 'low',
       schema: { type: 'object', required: ['appended'], properties: { appended: { type: 'boolean' } } },
     }
   )
@@ -356,7 +357,7 @@ INPUT:
 ${input}
 
 Return your sizing decision with a one-sentence reasoning and the repo layer list.`,
-    { label: 'intake', phase: 'Intake', model: researcherModel, schema: INTAKE_SCHEMA }
+    { label: 'intake', phase: 'Intake', model: researcherModel, effort: 'medium', schema: INTAKE_SCHEMA }
   )
 
   if (!intakeResult) throw new Error('Intake sizing failed — cannot proceed')
@@ -437,7 +438,7 @@ CONTENT:
 ${JSON.stringify(manifestObj, null, 2)}
 
 Return { written: true }`,
-    { label: 'write-xs-plan', phase: 'Return', model: haikuModel,
+    { label: 'write-xs-plan', phase: 'Return', model: haikuModel, effort: 'low',
       schema: { type: 'object', required: ['written'], properties: { written: { type: 'boolean' } } } }
   )
 
@@ -592,7 +593,7 @@ The architect produces one task per file being modified. This is non-negotiable 
 - A task that requires the developer to discover files or call sites will stall with NEEDS_CONTEXT.
 - More tasks is always better. A task too small = one extra developer dispatch. A task too large = stall.
 - Concerns exist to gather information, not to group tasks. One concern can produce many tasks.`,
-    { label: 'decompose', phase: 'Decompose', model: decomposeModel, schema: DECOMPOSE_SCHEMA }
+    { label: 'decompose', phase: 'Decompose', model: decomposeModel, effort: 'high', schema: DECOMPOSE_SCHEMA }
   )
   decomposeConcerns = decomposeResult?.concerns || [{ label: 'researcher', filesToRead: [], questions: [input] }]
 
@@ -702,8 +703,8 @@ You MUST populate:
 - answeredQuestions: one entry per question above (every question, every answer)
 - keyFindings: 3-7 single-line bullets — the most important facts for the architect: exact paths, pattern names, critical constraints, any "could not determine" blockers. This is all the architect will see; make it complete.`,
     isValidationConcern
-      ? { label: `hp-researcher:${concern.label}`, phase: 'Research', model: researcherModel, schema: RESEARCHER_SCHEMA }
-      : { label: `hp-researcher:${concern.label}`, phase: 'Research', model: researcherModel, schema: RESEARCHER_SCHEMA, agentType: 'hp-researcher' }
+      ? { label: `hp-researcher:${concern.label}`, phase: 'Research', model: researcherModel, effort: 'medium', schema: RESEARCHER_SCHEMA }
+      : { label: `hp-researcher:${concern.label}`, phase: 'Research', model: researcherModel, effort: 'medium', schema: RESEARCHER_SCHEMA, agentType: 'hp-researcher' }
   )
 }
 
@@ -723,7 +724,7 @@ ${securityConcern ? `FILES TO READ: ${securityConcern.filesToRead.join(', ')}` :
 
 INPUT:
 ${input}`,
-        { label: 'hp-security', phase: 'Research', model: researcherModel, schema: SECURITY_SCHEMA, agentType: 'hp-security' }
+        { label: 'hp-security', phase: 'Research', model: researcherModel, effort: 'medium', schema: SECURITY_SCHEMA, agentType: 'hp-security' }
       ),
       ...thunks,
     ])
@@ -829,7 +830,7 @@ ${JSON.stringify(architectResearch, null, 2)}
 ${securityNewSurface.length > 0 ? `NEW SECURITY SURFACE (address in tasks where relevant):
 ${securityNewSurface.map(s => `• ${s}`).join('\n')}` : ''}
 ${qaAnswers ? `\nQA_ANSWERS:\n${qaAnswers}` : ''}`,
-      { label: `hp-architect:${concern.label}`, phase: 'Architect', model: architectModel, schema: ARCHITECT_SCHEMA, agentType: 'hp-architect' }
+      { label: `hp-architect:${concern.label}`, phase: 'Architect', model: architectModel, effort: 'high', schema: ARCHITECT_SCHEMA, agentType: 'hp-architect' }
     )
 
     if (!architectResult) {
@@ -881,7 +882,7 @@ TASKS TO FIX:
 ${JSON.stringify(failingTasks, null, 2)}
 
 Return ONLY the revised tasks array (same schema, same ids).`,
-        { label: `architect-revision:${concern.label}-${revisionRound}`, phase: 'Architect', model: researcherModel,
+        { label: `architect-revision:${concern.label}-${revisionRound}`, phase: 'Architect', model: researcherModel, effort: 'medium',
           schema: { type: 'object', required: ['tasks'], properties: { tasks: { type: 'array', items: ARCHITECT_SCHEMA.properties.tasks.items } } }
         }
       )
@@ -929,7 +930,7 @@ ${(securityResult?.alreadyHandled || []).map(s => `• ${s}`).join('\n') || 'non
 SECURITY_NEW_SURFACE:
 ${(securityResult?.newSurface || []).map(s => `• ${s}`).join('\n') || 'none'}
 ${qaAnswers ? `\nQA_ANSWERS:\n${qaAnswers}` : ''}`,
-      { label: `hp-synthesizer:${concern.label}`, phase: 'Synthesize', model: synthModel, agentType: 'hp-synthesizer' }
+      { label: `hp-synthesizer:${concern.label}`, phase: 'Synthesize', model: synthModel, effort: 'medium', agentType: 'hp-synthesizer' }
     )
 
     if (!planText) {
@@ -999,7 +1000,9 @@ ${planFileContent.slice(-2000)}`
       const coverageResult = await trackedAgent(
         coveragePrompt,
         { label: `coverage:${concern.label}-round-${coverageRound}`, phase: 'Coverage',
-          model: coverageRound === 1 ? researcherModel : haikuModel, schema: COVERAGE_SCHEMA }
+          model: coverageRound === 1 ? researcherModel : haikuModel,
+          effort: coverageRound === 1 ? 'medium' : 'low',
+          schema: COVERAGE_SCHEMA }
       )
 
       if (!coverageResult || coverageResult.covered || !coverageResult.gaps?.length) {
@@ -1022,19 +1025,21 @@ GAP: ${gap.missingRequirement}
 QUESTION: ${gap.question}
 KEY FINDINGS: ${(research.keyFindings || []).map(f => `• ${f}`).join('\n') || 'none'}`,
             { label: `coverage-patch:${concern.label}-${gap.section}`, phase: 'Coverage',
-              model: coverageRound === 1 ? researcherModel : haikuModel }
+              model: coverageRound === 1 ? researcherModel : haikuModel,
+              effort: coverageRound === 1 ? 'medium' : 'low' }
           )
         } else {
           const gapResearch = await agent(
             `REPO: ${repoPath}\nFILES TO READ: ${gap.filesToRead.join(', ')}\nQUESTION: ${gap.question}\nCONCERN: ${concern.label}`,
-            { label: `gap-fill:${concern.label}-${gap.section}`, phase: 'Coverage', model: researcherModel, schema: RESEARCHER_SCHEMA, agentType: 'hp-researcher' }
+            { label: `gap-fill:${concern.label}-${gap.section}`, phase: 'Coverage', model: researcherModel, effort: 'medium', schema: RESEARCHER_SCHEMA, agentType: 'hp-researcher' }
           )
           patch = await trackedAgent(
             `Patch the "${gap.section}" section to address this gap. Return ONLY the patched section (markdown).
 GAP: ${gap.missingRequirement}
 NEW RESEARCH: ${JSON.stringify(gapResearch || {}, null, 2)}`,
             { label: `coverage-patch:${concern.label}-${gap.section}`, phase: 'Coverage',
-              model: coverageRound === 1 ? researcherModel : haikuModel }
+              model: coverageRound === 1 ? researcherModel : haikuModel,
+              effort: coverageRound === 1 ? 'medium' : 'low' }
           )
         }
         gapFillResults.push(patch)
@@ -1053,7 +1058,7 @@ NEW RESEARCH: ${JSON.stringify(gapResearch || {}, null, 2)}`,
           `Integrate patches into the plan by merging each into the correct section in place.
 Do NOT append as addendums. Keep the Tasks JSON block exactly as-is.
 PATCHES:\n${patchBundle}\n\nPLAN:\n${planForIntegrate}`,
-          { label: `coverage-integrate:${concern.label}-round-${coverageRound}`, phase: 'Coverage', model: haikuModel }
+          { label: `coverage-integrate:${concern.label}-round-${coverageRound}`, phase: 'Coverage', model: haikuModel, effort: 'low' }
         )
         if (integrated) planFileContent = integrated
       }
@@ -1146,7 +1151,7 @@ CONTENT:
 ${e.planJson}
 
 Return JSON: { written: true }`,
-  { label: `write-plan:${e.concern.label}`, phase: 'Return', model: haikuModel,
+  { label: `write-plan:${e.concern.label}`, phase: 'Return', model: haikuModel, effort: 'low',
     schema: { type: 'object', required: ['written'], properties: { written: { type: 'boolean' } } },
   }
 )))
@@ -1168,7 +1173,7 @@ CONTENT:
 ${JSON.stringify(manifestObj, null, 2)}
 
 Return JSON: { written: true, committed: false, planCount: ${planEntries.length} }`,
-  { label: 'write-manifest', phase: 'Return', model: haikuModel,
+  { label: 'write-manifest', phase: 'Return', model: haikuModel, effort: 'low',
     schema: {
       type: 'object',
       required: ['written', 'committed', 'planCount'],
@@ -1187,7 +1192,7 @@ Run these commands:
 2. Validate each JSON: ${planEntries.map(e => `node -e "JSON.parse(require('fs').readFileSync('${repoPath}/docs/plans/${e.jsonName}','utf8'))" && echo "valid: ${e.jsonName}" || echo "invalid: ${e.jsonName}"`).join('\n')}
 
 Return JSON: { allFilesPresent: boolean, allJsonValid: boolean, commitStat: "n/a — plans are local only, not committed", issues: string[] }`,
-  { label: 'verify-files', phase: 'Return', model: haikuModel,
+  { label: 'verify-files', phase: 'Return', model: haikuModel, effort: 'low',
     schema: {
       type: 'object',
       required: ['allFilesPresent', 'allJsonValid', 'commitStat', 'issues'],
