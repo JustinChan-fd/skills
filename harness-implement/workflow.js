@@ -46,9 +46,16 @@ function _repoNameFromPath(p) {
   if (!p) return 'unknown-repo'
   return String(p).replace(/\/$/, '').split('/').pop() || 'unknown-repo'
 }
-function _buildImplTelemetryPath({ repoPath, issueKey, timestamp }) {
+function _slugFromInput(text) {
+  if (!text) return 'greenfield'
+  const first = String(text).split('\n').map(l => l.trim()).find(l => l.length > 0) || ''
+  const slug = first.toLowerCase().replace(/[^a-z0-9\s-]/g, '').trim()
+    .replace(/\s+/g, '-').replace(/-{2,}/g, '-').slice(0, 40).replace(/-+$/, '')
+  return slug || 'greenfield'
+}
+function _buildImplTelemetryPath({ repoPath, issueKey, rawText, timestamp }) {
   const repo = _repoNameFromPath(repoPath)
-  const key  = issueKey || 'no-ticket'
+  const key  = issueKey || _slugFromInput(rawText)
   const ts   = timestamp || 'unknown-ts'
   return `${_HARNESS_TELEMETRY_DIR}/${repo}-harness-implement-${key}-${ts}.jsonl`
 }
@@ -81,8 +88,8 @@ async function writeAuditRecord(status, extra = {}) {
         ).then(r => r?.ts || null).catch(() => null),
   ])
   if (!_telemetryPath) {
-    const issueKey = (args.planPath || '').match(/\b([A-Z]+-\d+)\b/i)?.[1] || 'no-ticket'
-    _telemetryPath = _buildImplTelemetryPath({ repoPath: args.repoPath, issueKey, timestamp: runTs })
+    const issueKey = (args.planPath || '').match(/\b([A-Z]+-\d+)\b/i)?.[1] || null
+    _telemetryPath = _buildImplTelemetryPath({ repoPath: args.repoPath, issueKey, rawText: args.planPath, timestamp: runTs })
   }
   const record = JSON.stringify({
     ts: args.today || 'unknown',
@@ -1068,8 +1075,8 @@ const auditRecord = JSON.stringify({
 
 // If crash handler already set _telemetryPath, reuse it; otherwise build from planPath
 if (!_telemetryPath) {
-  const issueKey = (args.planPath || '').match(/\b([A-Z]+-\d+)\b/i)?.[1] || 'no-ticket'
-  _telemetryPath = _buildImplTelemetryPath({ repoPath: args.repoPath, issueKey, timestamp: null })
+  const issueKey = (args.planPath || '').match(/\b([A-Z]+-\d+)\b/i)?.[1] || null
+  _telemetryPath = _buildImplTelemetryPath({ repoPath: args.repoPath, issueKey, rawText: args.planPath, timestamp: null })
 }
 const _legacyCmd    = `echo '${auditRecord.replace(/'/g, "'\\''")}' >> ~/.claude/harness-implement-runs.jsonl`
 const _telemetryCmd = `mkdir -p "$(dirname '${_telemetryPath}')" && echo '${auditRecord.replace(/'/g, "'\\''")}' >> '${_telemetryPath}'`

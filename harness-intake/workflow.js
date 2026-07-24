@@ -74,9 +74,16 @@ function _repoNameFromPath(p) {
   if (!p) return 'unknown-repo'
   return String(p).replace(/\/$/, '').split('/').pop() || 'unknown-repo'
 }
-function _buildTelemetryPath({ repoPath, skill, issueKey, timestamp }) {
+function _slugFromInput(text) {
+  if (!text) return 'greenfield'
+  const first = String(text).split('\n').map(l => l.trim()).find(l => l.length > 0) || ''
+  const slug = first.toLowerCase().replace(/[^a-z0-9\s-]/g, '').trim()
+    .replace(/\s+/g, '-').replace(/-{2,}/g, '-').slice(0, 40).replace(/-+$/, '')
+  return slug || 'greenfield'
+}
+function _buildTelemetryPath({ repoPath, skill, issueKey, rawText, timestamp }) {
   const repo = _repoNameFromPath(repoPath)
-  const key  = issueKey || 'no-ticket'
+  const key  = issueKey || _slugFromInput(rawText)
   const ts   = timestamp || 'unknown-ts'
   return `${HARNESS_TELEMETRY_DIR}/${repo}-${skill}-${key}-${ts}.jsonl`
 }
@@ -122,7 +129,7 @@ async function writeAuditRecord(status, extra = {}) {
         ).then(r => r?.ts || null).catch(() => null),
   ])
   if (!_telemetryPath) {
-    _telemetryPath = _buildTelemetryPath({ repoPath, skill: 'harness-intake', issueKey, timestamp: runTs })
+    _telemetryPath = _buildTelemetryPath({ repoPath, skill: 'harness-intake', issueKey, rawText: input, timestamp: runTs })
   }
   const record = JSON.stringify({
     ts: args.today || 'unknown',

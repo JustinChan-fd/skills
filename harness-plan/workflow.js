@@ -82,7 +82,8 @@ async function writeAuditRecord(status, extra = {}) {
   if (!_telemetryPath) {
     const repo = (repoPath || '').replace(/\/$/, '').split('/').pop() || 'unknown-repo'
     const issueKey = (input || '').match(/\b([A-Z]+-\d+)\b/)?.[1]
-      || manifestEntry?.jiraKey || 'no-ticket'
+      || manifestEntry?.jiraKey
+      || _slugFromInput(input)
     _telemetryPath = `${process.env.HOME}/Desktop/Repos/harness-telemetry/${repo}-harness-plan-${issueKey}-${runTs || 'unknown-ts'}.jsonl`
   }
   const record = JSON.stringify({
@@ -134,7 +135,14 @@ const opusModel       = 'claude-opus-4-8'
 
 // ===== PURE (mirrors lib/) =====
 // lib/telemetry.js — keep identical. import() unavailable in workflow scripts (probe-confirmed).
-// (telemetryPath logic is inlined directly in writeAuditRecord above for harness-plan)
+function _slugFromInput(text) {
+  if (!text) return 'greenfield'
+  const first = String(text).split('\n').map(l => l.trim()).find(l => l.length > 0) || ''
+  const slug = first.toLowerCase().replace(/[^a-z0-9\s-]/g, '').trim()
+    .replace(/\s+/g, '-').replace(/-{2,}/g, '-').slice(0, 40).replace(/-+$/, '')
+  return slug || 'greenfield'
+}
+// (buildTelemetryPath logic is inlined directly in writeAuditRecord above for harness-plan)
 
 // lib/barrier.js — keep identical. import() unavailable in workflow scripts (probe-confirmed).
 const MAX_PROBE_LOOPS = 2
