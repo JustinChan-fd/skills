@@ -84,7 +84,7 @@ async function writeAuditRecord(status, extra = {}) {
     const issueKey = (input || '').match(/\b([A-Z]+-\d+)\b/)?.[1]
       || manifestEntry?.jiraKey
       || _slugFromInput(input)
-    _telemetryPath = `${process.env.HOME}/Desktop/Repos/harness-telemetry/${repo}-harness-plan-${issueKey}-${runTs || 'unknown-ts'}.jsonl`
+    _telemetryPath = `${process.env.HOME}/Desktop/Repos/harness-telemetry/logs/${repo}__harness-plan__${issueKey}__${runTs || 'unknown-ts'}.jsonl`
   }
   const record = JSON.stringify({
     ts: args.today || 'unknown',
@@ -142,7 +142,8 @@ function _slugFromInput(text) {
     .replace(/\s+/g, '-').replace(/-{2,}/g, '-').slice(0, 40).replace(/-+$/, '')
   return slug || 'greenfield'
 }
-// (buildTelemetryPath logic is inlined directly in writeAuditRecord above for harness-plan)
+// Format: {telemetryDir}/logs/{repo}__{skill}__{ticket}__{timestamp}.jsonl
+// (path is assembled inline in writeAuditRecord above)
 
 // lib/barrier.js — keep identical. import() unavailable in workflow scripts (probe-confirmed).
 const MAX_PROBE_LOOPS = 2
@@ -548,7 +549,7 @@ harness-plan
   quality: ✓ clean
   next:    /harness-implement docs/plans/${planJsonName}
   audit:   ~/.claude/harness-plan-runs.jsonl
-           ~/Desktop/Repos/harness-telemetry/  (run-specific file)
+           ~/Desktop/Repos/harness-telemetry/logs/  (run-specific file)
   tokens:  ${xsTokensTotal.toLocaleString()}  (~$${xsCostUsd} estimated)
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`
   log(xsCliSummary)
@@ -1485,7 +1486,7 @@ ${planEntries.map(e => `    • docs/plans/${e.fileName}  (${e.concern.label})`)
   quality: ${qualityIssues.length === 0 ? '✓ clean' : `${qualityIssues.length} issue(s) — see audit log`}
   next:    ${nextCmd}
   audit:   ~/.claude/harness-plan-runs.jsonl
-           ~/Desktop/Repos/harness-telemetry/  (run-specific file)
+           ~/Desktop/Repos/harness-telemetry/logs/  (run-specific file)
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`
 
 log(cliSummary)

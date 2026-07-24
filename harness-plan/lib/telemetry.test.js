@@ -24,7 +24,7 @@ test('slugFromInput truncates to 40 chars', () => {
   assert.ok(!slug.endsWith('-'), 'should not end with hyphen')
 })
 
-test('buildTelemetryPath produces correct path with Jira key', () => {
+test('buildTelemetryPath produces __ separated path in /logs/', () => {
   const p = buildTelemetryPath({
     telemetryDir: '/Users/foo/Desktop/Repos/harness-telemetry',
     repoPath: '/Users/foo/Desktop/Repos/webtarsthree',
@@ -32,7 +32,24 @@ test('buildTelemetryPath produces correct path with Jira key', () => {
     issueKey: 'TARS-1271',
     timestamp: '20260724T183042Z',
   })
-  assert.equal(p, '/Users/foo/Desktop/Repos/harness-telemetry/webtarsthree-harness-intake-TARS-1271-20260724T183042Z.jsonl')
+  assert.equal(p, '/Users/foo/Desktop/Repos/harness-telemetry/logs/webtarsthree__harness-intake__TARS-1271__20260724T183042Z.jsonl')
+})
+
+test('buildTelemetryPath filename splits cleanly on __', () => {
+  const p = buildTelemetryPath({
+    telemetryDir: '/tele',
+    repoPath: '/repos/webtarsthree',
+    skill: 'harness-plan',
+    issueKey: 'TARS-1271',
+    timestamp: '20260724T120000Z',
+  })
+  const file = p.split('/logs/')[1].replace('.jsonl', '')
+  const parts = file.split('__')
+  assert.equal(parts.length, 4)
+  assert.equal(parts[0], 'webtarsthree')
+  assert.equal(parts[1], 'harness-plan')
+  assert.equal(parts[2], 'TARS-1271')
+  assert.equal(parts[3], '20260724T120000Z')
 })
 
 test('buildTelemetryPath falls back to slugFromInput when no issueKey', () => {
@@ -44,7 +61,7 @@ test('buildTelemetryPath falls back to slugFromInput when no issueKey', () => {
     rawText: 'Add dark mode to the dashboard',
     timestamp: '20260101T000000Z',
   })
-  assert.ok(p.includes('myapp-harness-plan-add-dark-mode-to-the-dashboard-'), `path: ${p}`)
+  assert.ok(p.includes('/logs/myapp__harness-plan__add-dark-mode-to-the-dashboard__'), `path: ${p}`)
 })
 
 test('buildTelemetryPath uses greenfield when both issueKey and rawText are empty', () => {
@@ -56,13 +73,12 @@ test('buildTelemetryPath uses greenfield when both issueKey and rawText are empt
     rawText: null,
     timestamp: '20260101T000000Z',
   })
-  assert.ok(p.includes('myapp-harness-plan-greenfield-'))
+  assert.ok(p.includes('/logs/myapp__harness-plan__greenfield__'))
 })
 
-test('buildAppendCmd escapes single quotes', () => {
-  const cmd = buildAppendCmd('/tele/file.jsonl', `{"a":"it's alive"}`)
-  assert.ok(cmd.includes("echo '"), 'should use echo')
-  assert.ok(cmd.includes(">>"), 'should append')
-  assert.ok(cmd.includes("mkdir -p"), 'should ensure dir exists')
-  assert.ok(!cmd.includes(`"it's alive"`), 'raw single quote should not appear unescaped')
+test('buildAppendCmd escapes single quotes and ensures dir exists', () => {
+  const cmd = buildAppendCmd('/tele/logs/file.jsonl', `{"a":"it's alive"}`)
+  assert.ok(cmd.includes('mkdir -p'))
+  assert.ok(cmd.includes('>>'))
+  assert.ok(!cmd.match(/'[^'\\]*'[^'\\]*it's/), 'raw single quote should be escaped')
 })

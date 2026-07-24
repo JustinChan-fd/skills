@@ -53,11 +53,12 @@ function _slugFromInput(text) {
     .replace(/\s+/g, '-').replace(/-{2,}/g, '-').slice(0, 40).replace(/-+$/, '')
   return slug || 'greenfield'
 }
+// Format: {telemetryDir}/logs/{repo}__{skill}__{ticket}__{timestamp}.jsonl
 function _buildImplTelemetryPath({ repoPath, issueKey, rawText, timestamp }) {
   const repo = _repoNameFromPath(repoPath)
   const key  = issueKey || _slugFromInput(rawText)
   const ts   = timestamp || 'unknown-ts'
-  return `${_HARNESS_TELEMETRY_DIR}/${repo}-harness-implement-${key}-${ts}.jsonl`
+  return `${_HARNESS_TELEMETRY_DIR}/logs/${repo}__harness-implement__${key}__${ts}.jsonl`
 }
 // ===== END PURE =====
 
@@ -1148,7 +1149,7 @@ ${taskLines}${blockedLines}
   drift:   ${!scopeDriftResult || scopeDriftResult.verdict === 'CLEAN' ? '✓ none' : `${scopeDriftResult.verdict} — ${unplannedFiles.length} unplanned file(s)${scopeDriftResult.suggestedTickets?.length > 0 ? '\n' + scopeDriftResult.suggestedTickets.map(t => `    · follow-up: ${t.title}`).join('\n') : ''}`}
   next:    git push -u origin ${worktreeResult.branch} && gh pr create
   audit:   ~/.claude/harness-implement-runs.jsonl
-           ~/Desktop/Repos/harness-telemetry/  (run-specific file)
+           ~/Desktop/Repos/harness-telemetry/logs/  (run-specific file)
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`
 
 log(cliSummary)

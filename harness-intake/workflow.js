@@ -81,11 +81,13 @@ function _slugFromInput(text) {
     .replace(/\s+/g, '-').replace(/-{2,}/g, '-').slice(0, 40).replace(/-+$/, '')
   return slug || 'greenfield'
 }
+// Format: {telemetryDir}/logs/{repo}__{skill}__{ticket}__{timestamp}.jsonl
+// Split on __ to get exactly [repo, skill, ticket, timestamp]
 function _buildTelemetryPath({ repoPath, skill, issueKey, rawText, timestamp }) {
   const repo = _repoNameFromPath(repoPath)
   const key  = issueKey || _slugFromInput(rawText)
   const ts   = timestamp || 'unknown-ts'
-  return `${HARNESS_TELEMETRY_DIR}/${repo}-${skill}-${key}-${ts}.jsonl`
+  return `${HARNESS_TELEMETRY_DIR}/logs/${repo}__${skill}__${key}__${ts}.jsonl`
 }
 function _buildAppendCmd(path, jsonLine) {
   const escaped = jsonLine.replace(/'/g, "'\\''")
@@ -733,7 +735,7 @@ harness-intake
   quality: ✓ clean
   next:    ${nextCmd}
   audit:   ~/.claude/harness-intake-runs.jsonl
-           ~/Desktop/Repos/harness-telemetry/  (run-specific file)
+           ~/Desktop/Repos/harness-telemetry/logs/  (run-specific file)
   tokens:  ${outputTokensTotal.toLocaleString()}  (~$${estimatedCostUsd} estimated)
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`
 
@@ -1572,7 +1574,7 @@ ${doneConditionAcs.length > 0 ? `\n  done-conditions (add to predecessor AC crit
   quality: ${qualityLine}
   next:    confirm → create Jira subtasks → /harness-plan each G1 subtask
   audit:   ~/.claude/harness-intake-runs.jsonl
-           ~/Desktop/Repos/harness-telemetry/  (run-specific file)
+           ~/Desktop/Repos/harness-telemetry/logs/  (run-specific file)
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`
 
 log(cliSummary)
