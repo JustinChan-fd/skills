@@ -200,6 +200,50 @@ function capCoordinatorInput(drafts, max = 20) {
     .sort((a, b) => (b.scopePath || '').length - (a.scopePath || '').length)
     .slice(0, max)
 }
+// lib/conflict.js — keep identical.
+function resolveFileConflicts(drafts) {
+  if (drafts.length === 0) return []
+  const stubs = drafts.filter(s => (s.files || []).length === 0)
+  const real  = drafts.filter(s => (s.files || []).length > 0)
+  if (real.length === 0) return stubs
+  const merged = _mergeHighOverlap(real)
+  const sorted = [...merged].sort((a, b) => {
+    const lenDiff = (b.scopePath || '').length - (a.scopePath || '').length
+    if (lenDiff !== 0) return lenDiff
+    return (a.files || []).length - (b.files || []).length
+  })
+  const claimed = new Set()
+  const resolved = sorted.map(s => {
+    const kept = (s.files || []).filter(f => !claimed.has(f))
+    for (const f of kept) claimed.add(f)
+    return { ...s, files: kept, estimatedFileCount: kept.length }
+  })
+  return [...resolved.filter(s => s.files.length > 0), ...stubs]
+}
+function _mergeHighOverlap(subtasks) {
+  const result = []
+  const absorbed = new Set()
+  for (let i = 0; i < subtasks.length; i++) {
+    if (absorbed.has(i)) continue
+    let current = subtasks[i]
+    for (let j = i + 1; j < subtasks.length; j++) {
+      if (absorbed.has(j)) continue
+      const a = new Set(current.files)
+      const b = new Set(subtasks[j].files)
+      const intersection = [...a].filter(f => b.has(f)).length
+      const maxSize = Math.max(a.size, b.size)
+      const overlapRatio = maxSize === 0 ? 0 : intersection / maxSize
+      if (overlapRatio > 0.8) {
+        const unionFiles = [...new Set([...current.files, ...subtasks[j].files])]
+        const title = current.title.length >= subtasks[j].title.length ? current.title : subtasks[j].title
+        current = { ...current, title, files: unionFiles, estimatedFileCount: unionFiles.length }
+        absorbed.add(j)
+      }
+    }
+    result.push(current)
+  }
+  return result
+}
 // lib/status.js — keep identical.
 const _INTAKE_OUTCOME_MAP = {
   COMPLETE:                   'success',
@@ -917,13 +961,23 @@ const searchRoot = scopePath
   ? `${repoPath}/${scopePath}`
   : `${repoPath}/src`
 
-// Stream 1: AC-driven research — one agent per AC strategy, batched at 5 to avoid rate-limit stalls
+// Stream 1: AC-driven research — one agent per AC strategy, batched at 5 to avoid rate-limit stalls.
+// Deferred and validation ACs are short-circuited in JS — they describe done-conditions or
+// feature additions, not file sets to discover. Skipping the Haiku grep agent for these
+// saves ~90s and ~60k tokens per deferred/validation AC (e.g. AbortController, npm install).
 const acResearchResultsAll = []
 for (let i = 0; i < acList.length; i += 5) {
   const batch = acList.slice(i, i + 5)
   const batchResults = await parallel(
-    batch.map(ac => () => trackedAgent(
-      `You are a shell-only AC researcher for harness-intake. Do not read any files.
+    batch.map(ac => () => {
+      const { isDeferred, isValidation } = classifyAcBullet(ac.bullet)
+      if (isDeferred || isValidation) {
+        // Skip research entirely — return empty result inline (no agent call, no tokens)
+        log(`  ac-research skip (${isDeferred ? 'deferred' : 'validation'}): "${ac.bullet.slice(0, 60)}"`)
+        return Promise.resolve({ acBullet: ac.bullet, researchType: ac.researchType, files: [], fileCount: 0, findings: 'skipped — deferred/validation AC does not need file discovery' })
+      }
+      return trackedAgent(
+        `You are a shell-only AC researcher for harness-intake. Do not read any files.
 ${PHILOSOPHY}
 
 YOUR ACCEPTANCE CRITERION: "${ac.bullet}"
@@ -945,8 +999,9 @@ RULES:
 - findings: one line summarising what you found (e.g. "found 26 files with fetch(")
 
 Return AC_RESEARCH_SCHEMA.`,
-      { label: `ac-research:${ac.bullet.slice(0, 40).replace(/\s+/g, '-')}`, phase: 'Research', model: haikuModel, effort: 'low', schema: AC_RESEARCH_SCHEMA }
-    ))
+        { label: `ac-research:${ac.bullet.slice(0, 40).replace(/\s+/g, '-')}`, phase: 'Research', model: haikuModel, effort: 'low', schema: AC_RESEARCH_SCHEMA }
+      )
+    })
   )
   acResearchResultsAll.push(...batchResults)
 }
@@ -1173,118 +1228,35 @@ for (const s of allGrouperDraftsRaw) {
   if (s.files) s.files = s.files.map(f => toRelPath(f, _absPrefix))
 }
 
-// Pre-dedup pipeline: three passes before the coordinator to keep its input lean.
+// Pre-resolution pipeline: three passes to normalize grouper output before conflict resolution.
 // 1. overlap-ratio: drop subtasks whose file set ≥50% overlaps already-seen files
-// 2. collapseDeferred: all isDeferred=true chunks collapse to one stub (files=[])
-//    — fixes AbortController AC generating 69 non-overlapping 8-file batches that
-//    saturate the coordinator (the grouper's "chunk at 8" rule runs on all research
-//    files even for deferred/feature ACs that don't own those files)
-// 3. capCoordinatorInput: hard backstop at 20 drafts — future blowups can't stall Opus
+// 2. collapseDeferred: all isDeferred=true chunks collapse to one stub (defense-in-depth
+//    — the grouper short-circuit above should prevent these, but belt-and-suspenders)
+// 3. cap20: hard backstop — keeps resolveFileConflicts O(N²) merge check fast
 // Files are already normalized to relative paths at this point (_absPrefix applied above).
 const _afterOverlap   = dedupeByOverlapRatio(allGrouperDraftsRaw)
 const _afterCollapse  = collapseDeferred(_afterOverlap)
 const allGrouperDrafts = capCoordinatorInput(_afterCollapse, 20)
-log(`design:grouper: ${validAcResults.length} ACs → ${allGrouperDraftsRaw.length} raw → ${_afterOverlap.length} overlap-dedup → ${_afterCollapse.length} collapse-deferred → ${allGrouperDrafts.length} cap20 (coordinator input)`)
+log(`design:grouper: ${validAcResults.length} ACs → ${allGrouperDraftsRaw.length} raw → ${_afterOverlap.length} overlap-dedup → ${_afterCollapse.length} collapse-deferred → ${allGrouperDrafts.length} cap20`)
 
-// Stage 2: design:coordinator — file conflict resolution and misclassification detection.
-// groupId/canRunInParallel/dependsOn/execution are computed deterministically in JS after it returns.
-// Input is stripped to mechanical fields only — descriptions are prose the coordinator doesn't need.
-// Asking the model to produce groupId caused persistent G1/G2/G3 inversions.
-const COORDINATOR_SCHEMA = {
-  type: 'object',
-  required: ['subtasks', 'misclassifications'],
-  properties: {
-    subtasks: {
-      type: 'array',
-      items: {
-        type: 'object',
-        required: ['title', 'scopePath', 'files', 'estimatedFileCount', 'targetSize', 'isMigration', 'isCleanup', 'isValidation', 'isDeferred', 'needsReview'],
-        properties: {
-          title:              { type: 'string' },
-          description:        { type: 'string' },
-          scopePath:          { type: 'string' },
-          files:              { type: 'array', items: { type: 'string' } },
-          estimatedFileCount: { type: 'number' },
-          targetSize:         { type: 'string', enum: ['XS', 'S', 'M'] },
-          isMigration:        { type: 'boolean' },
-          isCleanup:          { type: 'boolean' },
-          isValidation:       { type: 'boolean' },
-          isDeferred:         { type: 'boolean' },
-          needsReview:        { type: 'boolean' },
-        },
-      },
-    },
-    misclassifications: {
-      type: 'array',
-      items: { type: 'string' },
-      description: 'detected file placement errors, e.g. "useMovieDetails.test.jsx in production migration batch" or "ModalExtraData.jsx in AbortController subtask — wrong target"',
-    },
-  },
-}
 
-const coordinatorResult = allGrouperDrafts.length === 0 ? null : await trackedAgent(
-  `You are the design coordinator for harness-intake. Do not use any tools.
-
-You received ${allGrouperDrafts.length} subtask drafts from ${validAcResults.filter(r => (r.files || []).length > 0).length} parallel Haiku groupers. Each grouper batched files for one AC independently — the same file may appear in multiple drafts.
-
-YOUR RESPONSIBILITIES (do only these two things):
-
-1. FILE CONFLICT RESOLUTION
-   - Each file must appear in exactly ONE subtask.
-   - When a file appears in two drafts: assign it to the subtask whose AC better describes the file's purpose.
-   - Remove it from the other subtask. Adjust estimatedFileCount accordingly.
-   - Never split a subtask to resolve a conflict — assign and remove.
-   - MERGE DUPLICATES: if two drafts share >80% of their files OR have nearly identical titles targeting the same concern, merge them into one subtask (union of files, keep the more descriptive title). Do not emit both.
-
-2. MISCLASSIFICATION DETECTION
-   - Test files (*.test.js, *.test.jsx, *.spec.ts, *.spec.tsx) in a production-migration batch: flag it.
-   - Consumer UI files (e.g. ModalExtraData.jsx) in a wrapper-implementation subtask (e.g. AbortController on clientFetch.js): flag it — the consumer belongs in the migration batch, not the feature-addition subtask.
-   - Add a plain-English description of each misclassification to misclassifications[].
-   - Do NOT move misclassified files yourself — just flag them for human review (needsReview: true on that subtask).
-
-DO NOT assign groupId, canRunInParallel, dependsOn, or execution — those are computed in a separate deterministic step after you return.
-PRESERVE FLAGS exactly: isMigration / isCleanup / isValidation / isDeferred — copy from each grouper draft, do not override.
-
-ALL GROUPER DRAFTS (descriptions stripped — mechanical fields only):
-${JSON.stringify(allGrouperDrafts.map(s => ({
-  title:              s.title,
-  files:              s.files,
-  estimatedFileCount: s.estimatedFileCount,
-  scopePath:          s.scopePath,
-  isMigration:        s.isMigration,
-  isCleanup:          s.isCleanup,
-  isValidation:       s.isValidation,
-  isDeferred:         s.isDeferred,
-  needsReview:        s.needsReview,
-  targetSize:         s.targetSize,
-})))}
-
-Return COORDINATOR_SCHEMA.`,
-  { label: 'design:coordinator', phase: 'Split Design', model: opusModel, effort: 'high', schema: COORDINATOR_SCHEMA }
-)
-
-// Re-attach descriptions stripped from coordinator input — coordinator preserves titles
-const grouperDescByTitle = {}
-for (const s of allGrouperDrafts) grouperDescByTitle[s.title] = s.description || ''
-if (coordinatorResult?.subtasks) {
-  for (const s of coordinatorResult.subtasks) {
-    if (!s.description) s.description = grouperDescByTitle[s.title] || ''
-  }
-}
+// Stage 2 replaced: deterministic resolveFileConflicts instead of Opus coordinator.
+// resolveFileConflicts: merges >80%-overlap pairs, then assigns conflicting files to
+// the most-specific subtask (longest scopePath; tie-break on fewer files).
+// This is fully mechanical — no model judgment needed, no stall risk, no token cost.
+const resolvedDrafts = resolveFileConflicts(allGrouperDrafts)
+log(`design:coordinator (deterministic): ${allGrouperDrafts.length} drafts → ${resolvedDrafts.length} after conflict resolution`)
 
 // ── Deterministic test file ejection ────────────────────────────────────────
-// The coordinator flags test files in migration batches but does not move them.
-// _ejectTestFiles enforces the rule in code so LLM variance cannot re-introduce it.
-const rawProposed = coordinatorResult?.subtasks || allGrouperDrafts
+// _ejectTestFiles moves test files out of production-migration batches into their own subtask.
+const rawProposed = resolvedDrafts.slice()
 const testMockSubtasks = _ejectTestFiles(rawProposed, issueKey, scopePath)
 if (testMockSubtasks.length > 0) {
   const ejectedCount = testMockSubtasks.reduce((n, s) => n + s.files.length, 0)
   log(`test-file ejection: moved ${ejectedCount} test file(s) out of migration batches → ${testMockSubtasks.length} test-mock subtask(s)`)
   rawProposed.push(...testMockSubtasks)
 }
-// After ejection, drop migration subtasks that are now empty (files=[]).
-// These were grouper-created batches whose entire file list was test files — they
-// should not become empty G1 Jira subtasks. The test-mock batch above owns those files.
+// Drop migration subtasks that became empty after test-file ejection.
 const rawProposedNonEmpty = rawProposed.filter(s => !s.isMigration || (s.files || []).length > 0)
 if (rawProposedNonEmpty.length < rawProposed.length) {
   log(`test-file ejection: removed ${rawProposed.length - rawProposedNonEmpty.length} now-empty migration stub(s)`)
@@ -1292,17 +1264,9 @@ if (rawProposedNonEmpty.length < rawProposed.length) {
   rawProposed.push(...rawProposedNonEmpty)
 }
 
-// Post-coordinator dedup: same overlap-ratio logic as pre-coordinator.
-// Pass _absPrefix so coordinator's absolute paths normalize before comparison —
-// this is the root cause of the run 10 subtask explosion (51 subtasks vs 13).
-// Without _absPrefix, relative paths from groupers never match absolute paths from coordinator.
-const deduped = dedupeByOverlapRatio(rawProposed, _absPrefix)
-
-// Secondary dedup: merge any two subtasks sharing identical sorted file arrays.
-// Keeps the subtask with the shorter (broader-scope) title — fixes coordinator
-// emitting both "Remove middleware" and "Remove middleware/auth.js" for the same 2 files.
-const flatProposed = dedupeByFileSet(deduped)
-log(`Split Design: coordinator → ${rawProposed.length} subtasks → ${deduped.length} after overlap-ratio dedup → ${flatProposed.length} after file-key dedup`)
+// Post-resolution dedup: file-key dedup catches any remaining identical-file-list pairs.
+const flatProposed = dedupeByFileSet(rawProposed)
+log(`Split Design: ${resolvedDrafts.length} resolved → ${rawProposed.length} after test-ejection → ${flatProposed.length} after file-key dedup`)
 
 // Build stub(s) for a given AC + file list — chunks at 8 files to enforce the size cap
 function makeStubs(bullet, files, findings, reason) {
