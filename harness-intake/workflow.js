@@ -1537,20 +1537,9 @@ trackPhase('Debrief')
 
 const qualityIssues = []
 
-// Carry forward coordinator misclassification flags — but suppress ones that
-// _ejectTestFiles already resolved. The coordinator flags test files in migration
-// batches; ejection moves them. Surfacing both is redundant noise.
-// A misclassification is ejection-resolved when: the described batch title matches
-// a now-empty (removed) migration subtask, OR the pattern "test file in a migration
-// batch" matches and ejectedCount > 0 for this run.
-const ejectionResolved = testMockSubtasks.length > 0  // ejection ran and produced batches
-const TEST_MISCLASS_RE = /test file.*migration batch|migration batch.*test file|isMigration.*\.test\.|\.test\..*isMigration|only \*\.test\./i
-if (coordinatorResult?.misclassifications?.length > 0) {
-  for (const m of coordinatorResult.misclassifications) {
-    if (ejectionResolved && TEST_MISCLASS_RE.test(m)) continue  // handled by ejection
-    qualityIssues.push(`misclassification: ${m}`)
-  }
-}
+// Misclassification detection: previously done by the Opus coordinator agent;
+// now handled entirely by _ejectTestFiles (test files in migration batches) and
+// resolveFileConflicts (file assignment). No separate misclassification pass needed.
 
 // Carry forward verify issues — but filter out ticket-vs-reality corrections that are
 // already captured in groundedReality.ticketClaimsToIgnore. Those are expected harness
