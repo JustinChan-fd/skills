@@ -74,10 +74,28 @@ Build `input` as `${summary}\n\n${description}`. For freeform prompts, use the p
 
 ### 4. Run the workflow
 
-Run the workflow and patch `subagentTokens` in a single try/catch block. The patch uses `usage.subagent_tokens` from the Workflow completion — that value is only available when the workflow succeeds, so the catch branch skips it.
+Run the workflow and patch `subagentTokens` in a single try/catch block. `usage.subagent_tokens` is in the `<usage>` block of the Workflow completion notification — it is the combined input+output token count for all subagents.
 
 ```js
 const startTs = await Bash('python3 -c "import time; print(int(time.time()*1000))"').then(r => r.trim())
+
+// Helper: patch subagentTokens into the last line of a JSONL file.
+// Wrapped in its own try/catch — if the file doesn't exist yet (early crash
+// before audit-write ran) this is a no-op, not a fatal error.
+const patchSubagentTokens = async (path, subagentTokens) => {
+  try {
+    await Bash(`python3 -c "
+import json, sys
+path = sys.argv[1]
+lines = open(path).readlines()
+if lines:
+    last = json.loads(lines[-1])
+    last['subagentTokens'] = ${subagentTokens}
+    lines[-1] = json.dumps(last)
+    open(path, 'w').writelines([l + ('\\\n' if not l.endswith('\\\n') else '') for l in lines])
+" "${path}"`)
+  } catch (_) {}
+}
 
 let result
 try {
@@ -93,28 +111,22 @@ try {
     },
   })
 
-  // Patch subagentTokens immediately after workflow returns.
-  // usage.subagent_tokens is in the Workflow completion notification — read it from
-  // the <usage><subagent_tokens>NNNN</subagent_tokens></usage> block that appears
-  // alongside the result. Patch both JSONL files before doing anything else.
+  // Read subagent_tokens from the <usage> block in the completion notification above.
   const subagentTokens = <usage.subagent_tokens from completion notification>
-  const patchScript = `
-import json, sys
-path = sys.argv[1]
-lines = open(path).readlines()
-if lines:
-    last = json.loads(lines[-1])
-    last['subagentTokens'] = ${subagentTokens}
-    lines[-1] = json.dumps(last)
-    open(path, 'w').writelines([l + ('\\n' if not l.endswith('\\n') else '') for l in lines])
-`
-  await Bash(`python3 -c "${patchScript}" ~/.claude/harness-intake-runs.jsonl`)
+  await patchSubagentTokens('~/.claude/harness-intake-runs.jsonl', subagentTokens)
   if (result.telemetryPath) {
-    await Bash(`python3 -c "${patchScript}" "${result.telemetryPath}"`)
+    await patchSubagentTokens(result.telemetryPath, subagentTokens)
   }
+
 } catch (err) {
-  // Workflow failed or was cancelled — subagentTokens unavailable, skip patch.
-  // Surface the error so the user knows the run didn't complete.
+  // Workflow failed or was cancelled. The workflow's internal catch already wrote
+  // a CRASHED/FAILED audit record. Patch subagentTokens into it if available —
+  // on cancellation the <usage> block still appears in the notification.
+  const subagentTokens = <usage.subagent_tokens from completion notification, or null if absent>
+  if (subagentTokens) {
+    await patchSubagentTokens('~/.claude/harness-intake-runs.jsonl', subagentTokens)
+    // telemetryPath is unavailable on crash (result is undefined) — skip telemetry patch
+  }
   throw err
 }
 ```
