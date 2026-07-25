@@ -114,6 +114,7 @@ async function writeAuditRecord(status, extra = {}) {
     branch: null,
     durationMs,
     subagentTokens: null,   // patched by skill after Workflow() returns
+    estimatedCostUsd,       // approximate — tokensByModel racing on parallel runs; use as rough signal only
     agentCountByModel,
     agentCountByPhase,
     avgTokensPerAgent: outputTokensTotal > 0 ? Math.round(outputTokensTotal / Math.max(1, Object.values(agentCountByModel).reduce((a,b)=>a+b,0))) : null,

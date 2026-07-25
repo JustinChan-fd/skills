@@ -87,6 +87,12 @@ let _telemetryPath = null
 
 async function writeAuditRecord(status, extra = {}) {
   const outputTokensTotal = budget.spent() - workflowStartTokens
+  const estimatedCostUsd = parseFloat(
+    Object.entries(tokensByModel).reduce((sum, [model, tokens]) => {
+      const rate = model.includes('opus') ? 75 : model.includes('haiku') ? 1.25 : 15
+      return sum + (tokens / 1_000_000) * rate
+    }, 0).toFixed(4)
+  )
   await _startTsPromise  // ensure start timestamp resolved before computing delta
   const [durationMs, skillsCommit, runTs] = await Promise.all([
     agent(
@@ -126,6 +132,7 @@ async function writeAuditRecord(status, extra = {}) {
     planPath: args.planPath || 'unknown',
     durationMs,
     subagentTokens: null,   // patched by skill after Workflow() returns
+    estimatedCostUsd,       // approximate — tokensByModel racing on parallel runs; use as rough signal only
     agentCountByModel,
     agentCountByPhase,
     avgTokensPerAgent: outputTokensTotal > 0 ? Math.round(outputTokensTotal / Math.max(1, Object.values(agentCountByModel).reduce((a,b)=>a+b,0))) : null,
