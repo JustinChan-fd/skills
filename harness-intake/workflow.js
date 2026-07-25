@@ -68,6 +68,15 @@ async function trackedAgent(prompt, opts) {
 const SKILLS_SCHEMA_VERSION = 'spec-v8'
 
 // ===== PURE (mirrors lib/) =====
+// lib/verify.js — keep identical.
+function _computeClaimConflict(verifiedCount, ticketClaimedCount) {
+  if (!ticketClaimedCount || ticketClaimedCount <= 0) return false
+  return Math.abs(verifiedCount - ticketClaimedCount) / ticketClaimedCount > 0.20
+}
+function _recomputeClaimConflicts(acList) {
+  return acList.map(ac => ({ ...ac, claimConflict: _computeClaimConflict(ac.verifiedCount ?? 0, ac.ticketClaimedCount) }))
+}
+
 // lib/telemetry.js — keep identical. import() unavailable in workflow scripts (probe-confirmed).
 // NOTE: process.env is unavailable in the workflow runtime — home dir is derived from repoPath.
 function _repoNameFromPath(p) {
@@ -767,15 +776,16 @@ Return AC_VERIFY_ITEM_SCHEMA.`,
   acVerifyItems.push(...batchResults)
 }
 
-// Merge verify results back into the AC list
-const acListWithVerify = acSynthList.map((ac, idx) => {
+// Merge verify results back into the AC list, then recompute claimConflict from
+// verified numbers — Haiku occasionally miscalculates or echoes the ticket value.
+const acListWithVerify = _recomputeClaimConflicts(acSynthList.map((ac, idx) => {
   const verify = acVerifyItems[idx]
   return {
     ...ac,
     verifiedCount: verify?.verifiedCount ?? 0,
-    claimConflict: verify?.claimConflict ?? false,
+    claimConflict: verify?.claimConflict ?? false,  // overwritten by _recomputeClaimConflicts
   }
-})
+}))
 
 // Phase C — broader-pattern retry for ALL grep ACs (un-skippable)
 // Runs on every AC where researchType=grep, regardless of verifiedCount.
