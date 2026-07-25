@@ -59,7 +59,8 @@ export function dedupeByOverlapRatio(subtasks, absPrefix) {
     const sf = new Set(files)
     const overlap = [...sf].filter(f => seen.has(f)).length / sf.size
     if (overlap < 0.5) {
-      result.push(s)
+      // Write normalized paths back so downstream dedup sees consistent relative paths
+      result.push(absPrefix ? { ...s, files } : s)
       for (const f of sf) seen.add(f)
     }
   }

@@ -186,6 +186,20 @@ describe('dedupeByOverlapRatio', () => {
     assert.equal(result.length, 1)
     assert.equal(result[0].title, 'Grouper (relative)')
   })
+
+  it('output files are normalized to relative paths when absPrefix given', () => {
+    const prefix = '/Users/foo/Desktop/Repos/webtarsthree/'
+    // Only one subtask — check its files come out relative even if input was absolute
+    const subtasks = [
+      { title: 'A', scopePath: 'src/client', files: [
+          '/Users/foo/Desktop/Repos/webtarsthree/src/client/auth.js',
+          '/Users/foo/Desktop/Repos/webtarsthree/src/client/index.js',
+        ]},
+    ]
+    const result = dedupeByOverlapRatio(subtasks, prefix)
+    assert.equal(result.length, 1)
+    assert.deepEqual(result[0].files, ['src/client/auth.js', 'src/client/index.js'])
+  })
 })
 
 describe('categorizeVerifyIssue', () => {

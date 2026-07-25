@@ -145,7 +145,7 @@ function dedupeByOverlapRatio(subtasks, absPrefix) {
     const sf = new Set(files)
     const overlap = [...sf].filter(f => seen.has(f)).length / sf.size
     if (overlap < 0.5) {
-      result.push(s)
+      result.push(absPrefix ? { ...s, files } : s)
       for (const f of sf) seen.add(f)
     }
   }
@@ -924,6 +924,12 @@ Return AC_RESEARCH_SCHEMA.`,
 for (let i = 0; i < acResearchResultsAll.length; i++) {
   if (acResearchResultsAll[i] && acList[i]) acResearchResultsAll[i].acBullet = acList[i].bullet
 }
+// Normalize AC research file paths to repo-relative — grep returns absolute paths.
+// Done once here so every downstream consumer (groupers, injection loops, stubs) sees clean paths.
+const _absPrefix = makeAbsPrefix(repoPath)
+for (const r of acResearchResultsAll) {
+  if (r && r.files) r.files = r.files.map(f => toRelPath(f, _absPrefix))
+}
 const acResearchResults = acResearchResultsAll
 
 // Stream 2: layer structure research — one agent per repo layer (existing behavior)
@@ -1107,10 +1113,8 @@ Return LAYER_SUBTASKS_SCHEMA.`,
 
 const allGrouperDraftsRaw = grouperResultsAll.filter(Boolean).flatMap(d => d.subtasks || [])
 
-// Pre-normalize: strip absolute path prefix so all file refs are repo-relative.
-// Groupers sometimes emit absolute paths (the grep returns full paths); the coordinator
-// cannot detect conflicts between "/Users/.../src/client/foo.js" and "src/client/foo.js".
-const _absPrefix = makeAbsPrefix(repoPath)
+// Pre-normalize grouper drafts: _absPrefix is already set above (after AC research).
+// Groupers sometimes emit absolute paths; normalize before coordinator sees them.
 for (const s of allGrouperDraftsRaw) {
   if (s.files) s.files = s.files.map(f => toRelPath(f, _absPrefix))
 }
