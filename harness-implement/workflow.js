@@ -113,6 +113,7 @@ async function writeAuditRecord(status, extra = {}) {
     ts: tsDate,
     skill: 'harness-implement',
     skillsSchemaVersion: SKILLS_SCHEMA_VERSION,
+    telemetryVersion: 'v2',
     skillsCommit,
     status,
     outcome: toOutcome(status),
@@ -121,7 +122,7 @@ async function writeAuditRecord(status, extra = {}) {
     branch: null,
     planPath: args.planPath || 'unknown',
     durationMs,
-    outputTokensByModel: tokensByModel,
+    subagentTokens: null,   // patched by skill after Workflow() returns
     agentCountByModel,
     outputTokensTotal,
     ...extra,
