@@ -186,6 +186,16 @@ function classifyAcBullet(bullet) {
   const isMigration  = !isCleanup && !isValidationFinal && !isDeferred
   return { isCleanup, isValidation: isValidationFinal, isDeferred, isMigration }
 }
+// lib/status.js — keep identical.
+const _INTAKE_OUTCOME_MAP = {
+  COMPLETE:                   'success',
+  COMPLETE_FRAMING_CORRECTED: 'success',
+  COMPLETE_WITH_STUBS:        'partial',
+  PROPOSED_WITH_GAPS:         'partial',
+  CRASHED:                    'failed',
+  FAILED:                     'failed',
+}
+function toOutcome(status) { return _INTAKE_OUTCOME_MAP[status] ?? 'failed' }
 // ===== END PURE =====
 
 // telemetryPath is set on first writeAuditRecord call (needs a timestamp agent),
@@ -232,6 +242,7 @@ async function writeAuditRecord(status, extra = {}) {
     skillsSchemaVersion: SKILLS_SCHEMA_VERSION,
     skillsCommit,
     status,
+    outcome: toOutcome(status),
     sourceIssue: issueKey || 'unknown',
     repo: _repoNameFromPath(repoPath),
     repoPath: repoPath || null,
@@ -476,7 +487,14 @@ const AC_VERIFY_ITEM_SCHEMA = {
   },
 }
 
-phase('Triage')
+let currentPhase = 'init'
+let auditWritten = false
+const partialState = {}
+function trackPhase(name) { currentPhase = name; phase(name) }
+
+try {
+
+trackPhase('Triage')
 
 // Phase A: layer-discover + classify + ac-synth in parallel (3 agents, all no-tools except layer-discover)
 const [layerDiscoverResult, classifyResult, acSynthResult] = await parallel([
@@ -855,6 +873,7 @@ harness-intake
   tokens:  ${outputTokensTotal.toLocaleString()}  (~$${estimatedCostUsd} estimated)
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`
 
+  auditWritten = true
   await writeAuditRecord('COMPLETE', {
     size,
     workType,
@@ -878,7 +897,7 @@ harness-intake
 // Stream 2: one agent per repo layer — finds ALL in-scope files by structural layer
 // Both run in parallel. Fan-in merges results; AC-covered files get acCoverage metadata.
 
-phase('Research')
+trackPhase('Research')
 
 const searchRoot = scopePath
   ? `${repoPath}/${scopePath}`
@@ -1060,7 +1079,7 @@ if (validLayers.length === 0 && validAcResults.every(r => r.fileCount === 0)) {
 // Replaces the single design:root agent that was stalling at ~180s on large tickets
 // because it held 120k+ tokens of file enumeration while also doing coordination.
 
-phase('Split Design')
+trackPhase('Split Design')
 
 // Normalise file lists: layer files are now objects {path, acCoverage[]}
 // Extract plain paths for verify/debrief prompts, keep acCoverage for context
@@ -1435,7 +1454,7 @@ if (acResult?.missing?.length > 0) {
 // Single no-tools agent reads the assembled manifest against acList + totalFilesFound.
 // Catches: AC gaps the AC verify missed, stub quality, file count plausibility.
 
-phase('Verify')
+trackPhase('Verify')
 
 const VERIFY_SCHEMA = {
   type: 'object',
@@ -1509,7 +1528,7 @@ if (verifyResult) {
 
 // ─── Phase 4: Debrief ─────────────────────────────────────────────────────────
 
-phase('Debrief')
+trackPhase('Debrief')
 
 const qualityIssues = []
 
@@ -1647,6 +1666,7 @@ const planStatus =
   : qualityIssues.length > 0  ? 'PROPOSED_WITH_GAPS'
   : 'COMPLETE'
 
+auditWritten = true
 await writeAuditRecord(planStatus, {
   size,
   ticketType: workType,
@@ -1776,4 +1796,22 @@ return {
   qualityIssues,
   status: planStatus,
   cliSummary,
+}
+
+} catch (err) {
+  if (!auditWritten) {
+    const isKilled = err.message?.includes('abort') || err.message?.includes('cancel') || err.message?.includes('interrupt')
+    const crashStatus = isKilled
+      ? 'CRASHED'
+      : ['Research', 'Split Design', 'Verify', 'Debrief'].includes(currentPhase) ? 'PROPOSED_WITH_GAPS' : 'FAILED'
+    await writeAuditRecord(crashStatus, {
+      sourceIssue: issueKey || null,
+      failedAtPhase: currentPhase,
+      error: err.message || String(err),
+      size: partialState.size || null,
+      qualityIssues: [],
+      subtaskCount: 0,
+    }).catch(() => {})
+  }
+  throw err
 }

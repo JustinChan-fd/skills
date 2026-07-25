@@ -69,6 +69,14 @@ function _buildImplTelemetryPath({ repoPath, issueKey, rawText, timestamp }) {
   const homeDir = (repoPath || '').replace(/\/Desktop\/Repos\/[^/]+\/?$/, '') || '/tmp'
   return `${homeDir}/Desktop/Repos/harness-telemetry/logs/${repo}__harness-implement__${key}__${ts}.jsonl`
 }
+// lib/status.js — keep identical.
+const _IMPL_OUTCOME_MAP = {
+  COMPLETE: 'success',
+  PARTIAL:  'partial',
+  CRASHED:  'failed',
+  FAILED:   'failed',
+}
+function toOutcome(status) { return _IMPL_OUTCOME_MAP[status] ?? 'failed' }
 // ===== END PURE =====
 
 // telemetryPath is set on first writeAuditRecord call, then reused for the Debrief write.
@@ -107,6 +115,7 @@ async function writeAuditRecord(status, extra = {}) {
     skillsSchemaVersion: SKILLS_SCHEMA_VERSION,
     skillsCommit,
     status,
+    outcome: toOutcome(status),
     repo: _repoNameFromPath(args.repoPath),
     repoPath: args.repoPath || null,
     branch: null,
@@ -1180,7 +1189,7 @@ return {
   if (!auditWritten) {
     const isKilled = err.message?.includes('abort') || err.message?.includes('cancel') || err.message?.includes('interrupt')
     const crashStatus = isKilled
-      ? 'KILLED'
+      ? 'CRASHED'
       : ['Implement', 'Verify', 'Review', 'Return', 'Debrief'].includes(currentPhase) ? 'PARTIAL' : 'FAILED'
     await writeAuditRecord(crashStatus, {
       planKey: partialState.planKey || 'unknown',

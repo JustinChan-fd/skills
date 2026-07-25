@@ -104,6 +104,7 @@ async function writeAuditRecord(status, extra = {}) {
     skillsSchemaVersion: SKILLS_SCHEMA_VERSION,
     skillsCommit,
     status,
+    outcome: toOutcome(status),
     repo: (repoPath || '').replace(/\/$/, '').split('/').pop() || null,
     repoPath: repoPath || null,
     branch: null,
@@ -182,6 +183,14 @@ function validateBarrierRecord(r) {
   if (typeof r?.blocking !== 'boolean') errors.push('blocking must be boolean')
   return { valid: errors.length === 0, errors }
 }
+// lib/status.js — keep identical.
+const _PLAN_OUTCOME_MAP = {
+  COMPLETE:           'success',
+  PROPOSED_WITH_GAPS: 'partial',
+  CRASHED:            'failed',
+  FAILED:             'failed',
+}
+function toOutcome(status) { return _PLAN_OUTCOME_MAP[status] ?? 'failed' }
 // ===== END PURE =====
 
 // ─── Manifest contract ────────────────────────────────────────────────────────
@@ -1517,7 +1526,7 @@ return {
   if (!auditWritten) {
     const isKilled = err.message?.includes('abort') || err.message?.includes('cancel') || err.message?.includes('interrupt')
     const crashStatus = isKilled
-      ? 'KILLED'
+      ? 'CRASHED'
       : ['Research', 'Architect', 'Synthesize', 'Coverage', 'Return', 'Debrief'].includes(currentPhase) ? 'PROPOSED_WITH_GAPS' : 'FAILED'
     await writeAuditRecord(crashStatus, {
       planSlug: (args.slug || (input || '').match(/\b([A-Z]+-\d+)\b/)?.[1]?.toLowerCase() || 'unknown'),
