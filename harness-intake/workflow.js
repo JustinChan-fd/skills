@@ -751,7 +751,7 @@ ${ac.searchScope  ? `SEARCH SCOPE: ${repoPath}/${ac.searchScope}` : `SEARCH SCOP
 ${ac.shellCommand ? `SHELL COMMAND: ${ac.shellCommand}` : ''}
 
 EXECUTE one command (pick by researchType):
-  grep:  timeout 15 grep -rl "${ac.grepPattern || '.'}" ${ac.searchScope ? repoPath + '/' + ac.searchScope : acSearchRoot}/ 2>/dev/null | wc -l
+  grep:  timeout 15 grep -rlF "${ac.grepPattern || '.'}" ${ac.searchScope ? repoPath + '/' + ac.searchScope : acSearchRoot}/ 2>/dev/null | wc -l
   find:  ${ac.shellCommand || `find ${ac.searchScope ? repoPath + '/' + ac.searchScope : acSearchRoot} -type f 2>/dev/null | wc -l`}
   read:  ${ac.shellCommand || `cat ${repoPath}/package.json`} (count relevant lines)
   shell: ${ac.shellCommand || 'echo 0'}
@@ -816,18 +816,18 @@ for (let i = 0; i < grepAcs.length; i += 5) {
   const batchResults = await parallel(batch.map(ac => () => {
     // AC already found files in Phase B — run the same 3 variants to get the broader count,
     // but we expect them to agree (or find more). Either way we stamp retried=true.
-    const base      = (ac.grepPattern || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
-    const firstWord = base.split(/\s+/)[0]
+    const base      = ac.grepPattern || ''
+    const firstWord = base.split(/[\s(]/)[0]  // word before any space or paren — safe for -F
     return trackedAgent(
       `You are a grep re-verifier for harness-intake. Run 3 broader grep variants on this AC to confirm the file count is not under-counted by the Phase B include filters.
 AC: "${ac.bullet}"
 PHASE B COUNT: ${ac.verifiedCount} (may be under-counted if test files were excluded)
 SEARCH ROOT: ${retrySearchRoot}
 
-Run ALL THREE commands:
-1. timeout 15 grep -rl "${base}" ${retrySearchRoot}/ 2>/dev/null | wc -l
-2. timeout 15 grep -irl "${base}" ${retrySearchRoot}/ 2>/dev/null | wc -l
-3. timeout 15 grep -rl "${firstWord}" ${retrySearchRoot}/ 2>/dev/null | wc -l
+Run ALL THREE commands (use -F for fixed-string matching — patterns may contain parens or dots):
+1. timeout 15 grep -rlF "${base}" ${retrySearchRoot}/ 2>/dev/null | wc -l
+2. timeout 15 grep -irlF "${base}" ${retrySearchRoot}/ 2>/dev/null | wc -l
+3. timeout 15 grep -rlF "${firstWord}" ${retrySearchRoot}/ 2>/dev/null | wc -l
 
 SELECTION RULES (apply in order):
 - retriedCount = highest of commands 1 and 2 only (full-pattern variants)
@@ -875,6 +875,25 @@ const hasSuspiciousZeroResolved = acListWithVerify.some(ac => ac.suspiciousZeroR
 const hasConflicts = acListWithVerify.some(ac => ac.claimConflict === true)
 const conflictingAcList = acListWithVerify.filter(ac => ac.claimConflict === true)
 
+// Unresolved-zero gate: if any non-deferred, non-validation migration AC has
+// suspiciousZeroConfirmed=true AND ticketClaimedCount > 0, Phase C found nothing but the
+// ticket insists files exist. The grep pattern is likely wrong or the L-path Research
+// (which does directory traversal, not just grep) would find them. Force size=L so the
+// L-path runs and surfaces the real file list instead of silently classifying as M/XS.
+const unresolvedZeroAcs = acListWithVerify.filter(ac => {
+  if (!ac.suspiciousZeroConfirmed) return false
+  if (!ac.ticketClaimedCount || ac.ticketClaimedCount <= 0) return false
+  const { isDeferred, isValidation } = classifyAcBullet(ac.bullet)
+  return !isDeferred && !isValidation
+})
+const forceL_unresolvedZeros = unresolvedZeroAcs.length > 0
+if (forceL_unresolvedZeros) {
+  log(`⚠️  UNRESOLVED-ZERO GATE: ${unresolvedZeroAcs.length} AC(s) have suspiciousZeroConfirmed=true but ticketClaimedCount > 0 — forcing size=L so Research phase can find the real files`)
+  for (const ac of unresolvedZeroAcs) {
+    log(`   AC: "${ac.bullet.slice(0, 70)}"  ticketClaimedCount: ${ac.ticketClaimedCount}`)
+  }
+}
+
 // Phase D: merge — always Sonnet (WORK_INTEL_SCHEMA is complex; Haiku retry risk outweighs savings)
 // Speed gain comes from Phase A/B/C parallelism, not from downgrading the merge tier
 const mergeModel = sonnetModel
@@ -912,7 +931,12 @@ Assemble the final WORK_INTEL_SCHEMA. Use the REPO LAYERS above for the repoLaye
 
 if (!workIntelResult) throw new Error('Work Intelligence merge failed — cannot proceed')
 
-const { workType, size, splitRequired, repoLayers, scopePath, acList } = workIntelResult
+const { workType, repoLayers, scopePath, acList } = workIntelResult
+// Unresolved-zero gate overrides size/splitRequired: merge may have classified M/XS because
+// it trusted the zero grep counts, but the gate determined those zeros are suspicious.
+// Force L so the Research phase runs and finds the real files.
+const size = forceL_unresolvedZeros ? 'L' : workIntelResult.size
+const splitRequired = forceL_unresolvedZeros ? true : workIntelResult.splitRequired
 const ticketType = workType  // preserve compatibility with downstream references
 const sourceTitle = workIntelResult.sourceTitle || input.split('\n')[0].slice(0, 80)
 
@@ -921,7 +945,7 @@ const sourceTitle = workIntelResult.sourceTitle || input.split('\n')[0].slice(0,
 // size = research-verified final size
 const triageSize = classifyResult.size
 const triageSizeOverride = (triageSize && triageSize !== size)
-  ? { triageSize, groundedSize: size, reason: 'Work Intelligence re-derived from verified grep counts' }
+  ? { triageSize, groundedSize: size, reason: forceL_unresolvedZeros ? 'unresolved-zero gate forced L — suspicious zeros with nonzero ticket claims' : 'Work Intelligence re-derived from verified grep counts' }
   : null
 if (triageSizeOverride) {
   log(`⚠️  Size override: triage estimated ${triageSize} → research verified ${size} (ticket claims corrected)`)
@@ -943,9 +967,8 @@ if (migrationPattern && workIntelResult.workType === 'migration') {
 
   let lockedPattern = ''
   for (const candidate of candidates) {
-    const escaped = candidate.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
     const checkResult = await trackedAgent(
-      `Run: timeout 15 grep -rl "${escaped}" ${verifyRoot}/ 2>/dev/null | wc -l\nReturn { count: <number> }`,
+      `Run: timeout 15 grep -rlF "${candidate}" ${verifyRoot}/ 2>/dev/null | wc -l\nReturn { count: <number> }`,
       { label: 'pattern-lock', phase: 'Triage', model: haikuModel, effort: 'low',
         schema: { type: 'object', required: ['count'], properties: { count: { type: 'number' } } } }
     )
