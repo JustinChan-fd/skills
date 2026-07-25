@@ -74,60 +74,52 @@ Build `input` as `${summary}\n\n${description}`. For freeform prompts, use the p
 
 ### 4. Run the workflow
 
+Run the workflow and patch `subagentTokens` in a single try/catch block. The patch uses `usage.subagent_tokens` from the Workflow completion — that value is only available when the workflow succeeds, so the catch branch skips it.
+
 ```js
 const startTs = await Bash('python3 -c "import time; print(int(time.time()*1000))"').then(r => r.trim())
 
-const result = await Workflow({
-  scriptPath: '/Users/206618626@bwt3.com/.claude/skills/harness-intake/workflow.js',
-  args: {
-    input,
-    cloudId: cloudId || null,
-    issueKey: issueKey || null,
-    repoPath,
-    today: currentDate,
-    startTs,
-  },
-})
-```
+let result
+try {
+  result = await Workflow({
+    scriptPath: '/Users/206618626@bwt3.com/.claude/skills/harness-intake/workflow.js',
+    args: {
+      input,
+      cloudId: cloudId || null,
+      issueKey: issueKey || null,
+      repoPath,
+      today: currentDate,
+      startTs,
+    },
+  })
 
-**After launching the workflow: stop. Do not search the codebase, read files, grep patterns, or investigate the ticket independently while the workflow runs. Wait for `result` to return.**
-
-After `result` returns, patch `subagentTokens` into the last audit record in both JSONL files.
-
-**How to get the value:** the Workflow completion notification includes a `<usage>` block — read `subagent_tokens` from it directly. Example notification tail:
-```
-<usage><agent_count>22</agent_count>...<subagent_tokens>883242</subagent_tokens>...</usage>
-```
-
-**How to get the telemetry path:** the workflow writes it to `result.telemetryPath` (or derive it from `~/Desktop/Repos/harness-telemetry/logs/` — list the directory, take the newest file matching `{repo}__harness-intake__{issueKey}__*.jsonl`).
-
-Run both patches immediately after capturing the value — before printing cliSummary or writing the manifest:
-
-```bash
-# Replace 883242 with the actual subagent_tokens value from the completion notification
-python3 -c "
+  // Patch subagentTokens immediately after workflow returns.
+  // usage.subagent_tokens is in the Workflow completion notification — read it from
+  // the <usage><subagent_tokens>NNNN</subagent_tokens></usage> block that appears
+  // alongside the result. Patch both JSONL files before doing anything else.
+  const subagentTokens = <usage.subagent_tokens from completion notification>
+  const patchScript = `
 import json, sys
 path = sys.argv[1]
 lines = open(path).readlines()
 if lines:
     last = json.loads(lines[-1])
-    last['subagentTokens'] = 883242
+    last['subagentTokens'] = ${subagentTokens}
     lines[-1] = json.dumps(last)
-    open(path, 'w').writelines([l + ('\n' if not l.endswith('\n') else '') for l in lines])
-" ~/.claude/harness-intake-runs.jsonl
-
-# Same patch on the telemetry file (newest matching file in harness-telemetry/logs/)
-python3 -c "
-import json, sys
-path = sys.argv[1]
-lines = open(path).readlines()
-if lines:
-    last = json.loads(lines[-1])
-    last['subagentTokens'] = 883242
-    lines[-1] = json.dumps(last)
-    open(path, 'w').writelines([l + ('\n' if not l.endswith('\n') else '') for l in lines])
-" ~/Desktop/Repos/harness-telemetry/logs/<newest-matching-file>
+    open(path, 'w').writelines([l + ('\\n' if not l.endswith('\\n') else '') for l in lines])
+`
+  await Bash(`python3 -c "${patchScript}" ~/.claude/harness-intake-runs.jsonl`)
+  if (result.telemetryPath) {
+    await Bash(`python3 -c "${patchScript}" "${result.telemetryPath}"`)
+  }
+} catch (err) {
+  // Workflow failed or was cancelled — subagentTokens unavailable, skip patch.
+  // Surface the error so the user knows the run didn't complete.
+  throw err
+}
 ```
+
+**Do not search the codebase, read files, grep patterns, or investigate the ticket independently while the workflow runs. Wait for `result` to return.**
 
 ### 5. Print cliSummary
 
