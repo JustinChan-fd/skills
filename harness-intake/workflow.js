@@ -1062,6 +1062,7 @@ harness-intake
     size,
     intakeManifest,
     cliSummary: skipSummary,
+    telemetryPath: _telemetryPath,
   }
 }
 
@@ -1824,6 +1825,7 @@ return {
   qualityIssues,
   status: planStatus,
   cliSummary,
+  telemetryPath: _telemetryPath,
 }
 
 } catch (err) {

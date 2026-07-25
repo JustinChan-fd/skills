@@ -92,24 +92,41 @@ const result = await Workflow({
 
 **After launching the workflow: stop. Do not search the codebase, read files, grep patterns, or investigate the ticket independently while the workflow runs. Wait for `result` to return.**
 
-After `result` returns, patch `subagentTokens` into the last audit record in both JSONL files. The `subagentTokens` value comes from the Workflow tool's `usage.subagent_tokens` field in the completion notification — capture it before calling any other tools.
+After `result` returns, patch `subagentTokens` into the last audit record in both JSONL files.
 
-```js
-// subagentTokens — from Workflow completion usage.subagent_tokens (input+output combined, harness-internal)
-const subagentTokens = <value from Workflow usage.subagent_tokens>
-const patchCmd = `
+**How to get the value:** the Workflow completion notification includes a `<usage>` block — read `subagent_tokens` from it directly. Example notification tail:
+```
+<usage><agent_count>22</agent_count>...<subagent_tokens>883242</subagent_tokens>...</usage>
+```
+
+**How to get the telemetry path:** the workflow writes it to `result.telemetryPath` (or derive it from `~/Desktop/Repos/harness-telemetry/logs/` — list the directory, take the newest file matching `{repo}__harness-intake__{issueKey}__*.jsonl`).
+
+Run both patches immediately after capturing the value — before printing cliSummary or writing the manifest:
+
+```bash
+# Replace 883242 with the actual subagent_tokens value from the completion notification
 python3 -c "
 import json, sys
 path = sys.argv[1]
 lines = open(path).readlines()
 if lines:
     last = json.loads(lines[-1])
-    last['subagentTokens'] = ${subagentTokens}
+    last['subagentTokens'] = 883242
     lines[-1] = json.dumps(last)
-    open(path, 'w').writelines([l + ('\\n' if not l.endswith('\\n') else '') for l in lines])
-" `
-await Bash(patchCmd + ' ~/.claude/harness-intake-runs.jsonl')
-await Bash(patchCmd + ' <telemetryPath>')  // same path used by the workflow's audit-write
+    open(path, 'w').writelines([l + ('\n' if not l.endswith('\n') else '') for l in lines])
+" ~/.claude/harness-intake-runs.jsonl
+
+# Same patch on the telemetry file (newest matching file in harness-telemetry/logs/)
+python3 -c "
+import json, sys
+path = sys.argv[1]
+lines = open(path).readlines()
+if lines:
+    last = json.loads(lines[-1])
+    last['subagentTokens'] = 883242
+    lines[-1] = json.dumps(last)
+    open(path, 'w').writelines([l + ('\n' if not l.endswith('\n') else '') for l in lines])
+" ~/Desktop/Repos/harness-telemetry/logs/<newest-matching-file>
 ```
 
 ### 5. Print cliSummary
