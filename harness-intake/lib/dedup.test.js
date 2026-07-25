@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
-import { dedupeByFileSet, categorizeVerifyIssue, toRelPath, makeAbsPrefix, dedupeByOverlapRatio } from './dedup.js'
+import { dedupeByFileSet, categorizeVerifyIssue, toRelPath, makeAbsPrefix, dedupeByOverlapRatio, collapseDeferred, capCoordinatorInput } from './dedup.js'
 
 describe('makeAbsPrefix', () => {
   it('appends trailing slash to repoPath', () => {
@@ -199,6 +199,93 @@ describe('dedupeByOverlapRatio', () => {
     const result = dedupeByOverlapRatio(subtasks, prefix)
     assert.equal(result.length, 1)
     assert.deepEqual(result[0].files, ['src/client/auth.js', 'src/client/index.js'])
+  })
+})
+
+describe('collapseDeferred', () => {
+  it('collapses multiple isDeferred drafts into a single stub with files=[]', () => {
+    const drafts = [
+      { title: 'Add AbortController to EMS modal (8 files)',  files: ['a.js','b.js'], isDeferred: true, scopePath: 'src/ems/modal', isMigration: false, isCleanup: false, isValidation: false },
+      { title: 'Add AbortController to EMS field (8 files)',  files: ['c.js','d.js'], isDeferred: true, scopePath: 'src/ems/field', isMigration: false, isCleanup: false, isValidation: false },
+      { title: 'Add AbortController to placements (8 files)', files: ['e.js','f.js'], isDeferred: true, scopePath: 'src/placements', isMigration: false, isCleanup: false, isValidation: false },
+    ]
+    const result = collapseDeferred(drafts)
+    assert.equal(result.length, 1)
+    assert.equal(result[0].isDeferred, true)
+    assert.deepEqual(result[0].files, [])
+    assert.equal(result[0].estimatedFileCount, 0)
+  })
+
+  it('keeps a single isDeferred draft unchanged (no chunked siblings to collapse)', () => {
+    const drafts = [
+      { title: 'Add AbortController to clientFetch.js', files: ['src/client/clientFetch.js'], isDeferred: true, scopePath: 'src/client', isMigration: false, isCleanup: false, isValidation: false },
+    ]
+    const result = collapseDeferred(drafts)
+    assert.equal(result.length, 1)
+  })
+
+  it('preserves non-deferred drafts untouched', () => {
+    const drafts = [
+      { title: 'Migrate axios in src/client (8 files)', files: ['src/client/a.js'], isDeferred: false, isMigration: true, isCleanup: false, isValidation: false, scopePath: 'src/client' },
+      { title: 'Add AbortController batch 1 (8 files)',  files: ['x.js'], isDeferred: true, isMigration: false, isCleanup: false, isValidation: false, scopePath: 'src' },
+      { title: 'Add AbortController batch 2 (8 files)',  files: ['y.js'], isDeferred: true, isMigration: false, isCleanup: false, isValidation: false, scopePath: 'src' },
+    ]
+    const result = collapseDeferred(drafts)
+    assert.equal(result.length, 2)  // 1 migration + 1 collapsed deferred
+    const migration = result.find(s => !s.isDeferred)
+    const deferred  = result.find(s => s.isDeferred)
+    assert.ok(migration)
+    assert.ok(deferred)
+    assert.deepEqual(deferred.files, [])
+  })
+
+  it('uses the shortest title among collapsed deferred drafts', () => {
+    const drafts = [
+      { title: 'Add AbortController timeout to EMS modal components (8 files)', files: ['a.js'], isDeferred: true, scopePath: 'src', isMigration: false, isCleanup: false, isValidation: false },
+      { title: 'Add AbortController (8 files)',                                  files: ['b.js'], isDeferred: true, scopePath: 'src', isMigration: false, isCleanup: false, isValidation: false },
+    ]
+    const result = collapseDeferred(drafts)
+    assert.equal(result[0].title, 'Add AbortController (8 files)')
+  })
+
+  it('passes through empty input', () => {
+    assert.deepEqual(collapseDeferred([]), [])
+  })
+})
+
+describe('capCoordinatorInput', () => {
+  it('passes through when under the cap', () => {
+    const drafts = Array.from({ length: 10 }, (_, i) => ({
+      title: `Draft ${i}`, files: [`src/a${i}.js`], scopePath: `src/dir${i}`,
+    }))
+    const result = capCoordinatorInput(drafts, 20)
+    assert.equal(result.length, 10)
+  })
+
+  it('trims to cap when over limit', () => {
+    const drafts = Array.from({ length: 30 }, (_, i) => ({
+      title: `Draft ${i}`, files: [`src/a${i}.js`], scopePath: 'src/dir',
+    }))
+    const result = capCoordinatorInput(drafts, 20)
+    assert.equal(result.length, 20)
+  })
+
+  it('prefers longer scopePath subtasks when trimming', () => {
+    const drafts = [
+      { title: 'Narrow', files: ['src/client/middleware/auth.js'], scopePath: 'src/client/middleware' },
+      { title: 'Broad',  files: ['src/a.js'],                       scopePath: 'src' },
+    ]
+    const result = capCoordinatorInput(drafts, 1)
+    assert.equal(result.length, 1)
+    assert.equal(result[0].title, 'Narrow')
+  })
+
+  it('uses default cap of 20 when no cap argument given', () => {
+    const drafts = Array.from({ length: 25 }, (_, i) => ({
+      title: `Draft ${i}`, files: [`src/a${i}.js`], scopePath: 'src',
+    }))
+    const result = capCoordinatorInput(drafts)
+    assert.equal(result.length, 20)
   })
 })
 

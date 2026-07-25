@@ -68,6 +68,35 @@ export function dedupeByOverlapRatio(subtasks, absPrefix) {
 }
 
 /**
+ * collapseDeferred — collapse multiple isDeferred grouper chunks into one stub.
+ * The grouper's "chunk at 8" rule turns a deferred AC (e.g. AbortController) with many
+ * research-found files into dozens of non-overlapping 8-file batches that saturate the
+ * coordinator. Deferred ACs describe feature additions, not file-by-file migrations —
+ * they need one stub (files=[], needsReview=true) not N chunked batches.
+ */
+export function collapseDeferred(drafts) {
+  const nonDeferred = drafts.filter(s => !s.isDeferred)
+  const deferred    = drafts.filter(s => s.isDeferred)
+  if (deferred.length === 0) return nonDeferred
+  // Pick representative: shortest title (broadest description), preserve all other flags
+  const rep = deferred.reduce((a, b) => a.title.length <= b.title.length ? a : b)
+  return [...nonDeferred, { ...rep, files: [], estimatedFileCount: 0 }]
+}
+
+/**
+ * capCoordinatorInput — hard backstop: trim to at most `max` drafts.
+ * Sorts by scopePath length desc (most-specific wins) before trimming so the
+ * narrowest, highest-confidence subtasks survive.
+ * Default cap: 20.
+ */
+export function capCoordinatorInput(drafts, max = 20) {
+  if (drafts.length <= max) return drafts
+  return [...drafts]
+    .sort((a, b) => (b.scopePath || '').length - (a.scopePath || '').length)
+    .slice(0, max)
+}
+
+/**
  * categorizeVerifyIssue — reclassify AC UNCOVERED verify issues as ac-gap:
  * so they're clearly ticket-writing gaps, not harness defects.
  */

@@ -186,6 +186,20 @@ function classifyAcBullet(bullet) {
   const isMigration  = !isCleanup && !isValidationFinal && !isDeferred
   return { isCleanup, isValidation: isValidationFinal, isDeferred, isMigration }
 }
+// lib/dedup.js (continued) — collapseDeferred + capCoordinatorInput — keep identical.
+function collapseDeferred(drafts) {
+  const nonDeferred = drafts.filter(s => !s.isDeferred)
+  const deferred    = drafts.filter(s => s.isDeferred)
+  if (deferred.length === 0) return nonDeferred
+  const rep = deferred.reduce((a, b) => a.title.length <= b.title.length ? a : b)
+  return [...nonDeferred, { ...rep, files: [], estimatedFileCount: 0 }]
+}
+function capCoordinatorInput(drafts, max = 20) {
+  if (drafts.length <= max) return drafts
+  return [...drafts]
+    .sort((a, b) => (b.scopePath || '').length - (a.scopePath || '').length)
+    .slice(0, max)
+}
 // lib/status.js — keep identical.
 const _INTAKE_OUTCOME_MAP = {
   COMPLETE:                   'success',
@@ -1093,10 +1107,28 @@ for (let i = 0; i < validAcResults.length; i += 5) {
   const batch = validAcResults.slice(i, i + 5)
   const batchResults = await parallel(batch.map(r => () => {
     const { isCleanup, isValidation, isDeferred, isMigration } = classifyAcBullet(r.acBullet)
-    // Validation ACs are shell checks — they never own files, even if research found matches
-    // (e.g. "npm install completes cleanly" grep matched package.json — those files belong elsewhere)
+    // Validation ACs: shell checks — never own files. Skip grouper entirely.
     if ((r.files || []).length === 0 || isValidation) {
       return Promise.resolve({ layer: r.acBullet.slice(0, 30), subtasks: [] })
+    }
+    // Deferred ACs: feature additions (e.g. AbortController) — produce one empty stub
+    // directly in JS rather than sending hundreds of research files to a grouper.
+    // collapseDeferred() would catch any that slip through, but this avoids the agent call.
+    if (isDeferred) {
+      const { isCleanup: iC, isValidation: iV, isDeferred: iD, isMigration: iM } = { isCleanup, isValidation, isDeferred, isMigration }
+      return Promise.resolve({ layer: r.acBullet.slice(0, 30), subtasks: [{
+        title: `${issueKey ? issueKey + ': ' : ''}${r.acBullet.slice(0, 60)}`,
+        description: r.acBullet,
+        scopePath: scopePath || '',
+        files: [],
+        estimatedFileCount: 0,
+        targetSize: 'XS',
+        isMigration: iM,
+        isCleanup: iC,
+        isValidation: iV,
+        isDeferred: iD,
+        needsReview: true,
+      }]})
     }
     return trackedAgent(
       `You are a subtask grouper for harness-intake. Do not use any tools.
@@ -1114,8 +1146,11 @@ PRE-CLASSIFIED FLAGS (use exactly as given, do not override):
   isDeferred:   ${isDeferred}
 
 RULES:
-- max 8 files per subtask — hard cap
-- when files.length > 8: chunk into groups of 8 (alphabetical), one subtask per chunk
+- If isDeferred=true: emit EXACTLY ONE subtask with files=[] and estimatedFileCount=0.
+  Deferred ACs describe a feature addition (e.g. "add AbortController to clientFetch").
+  They are NOT file migrations — do not list consumer files, do not chunk. One stub only.
+- max 8 files per subtask — hard cap (migration/cleanup ACs only)
+- when files.length > 8 (and NOT isDeferred): chunk into groups of 8 (alphabetical), one subtask per chunk
 - TITLE FORMAT: "${issueKey ? issueKey + ': ' : ''}[verb] [directory] ([N] files)"
 - DESCRIPTION: one paragraph — what changes, what pattern, list files explicitly by path
 - scopePath: longest common directory prefix of files in this subtask
@@ -1138,12 +1173,18 @@ for (const s of allGrouperDraftsRaw) {
   if (s.files) s.files = s.files.map(f => toRelPath(f, _absPrefix))
 }
 
-// Pre-dedup: run overlap-ratio dedup BEFORE the coordinator so it receives a lean set.
-// The same dedup runs again post-coordinator to catch any stubs the coordinator re-introduces.
-// This is the primary fix for coordinator stalls — 41 drafts → typically 10-18 after dedup.
+// Pre-dedup pipeline: three passes before the coordinator to keep its input lean.
+// 1. overlap-ratio: drop subtasks whose file set ≥50% overlaps already-seen files
+// 2. collapseDeferred: all isDeferred=true chunks collapse to one stub (files=[])
+//    — fixes AbortController AC generating 69 non-overlapping 8-file batches that
+//    saturate the coordinator (the grouper's "chunk at 8" rule runs on all research
+//    files even for deferred/feature ACs that don't own those files)
+// 3. capCoordinatorInput: hard backstop at 20 drafts — future blowups can't stall Opus
 // Files are already normalized to relative paths at this point (_absPrefix applied above).
-const allGrouperDrafts = dedupeByOverlapRatio(allGrouperDraftsRaw)
-log(`design:grouper: ${validAcResults.length} ACs → ${allGrouperDraftsRaw.length} raw drafts → ${allGrouperDrafts.length} after pre-dedup (coordinator input)`)
+const _afterOverlap   = dedupeByOverlapRatio(allGrouperDraftsRaw)
+const _afterCollapse  = collapseDeferred(_afterOverlap)
+const allGrouperDrafts = capCoordinatorInput(_afterCollapse, 20)
+log(`design:grouper: ${validAcResults.length} ACs → ${allGrouperDraftsRaw.length} raw → ${_afterOverlap.length} overlap-dedup → ${_afterCollapse.length} collapse-deferred → ${allGrouperDrafts.length} cap20 (coordinator input)`)
 
 // Stage 2: design:coordinator — file conflict resolution and misclassification detection.
 // groupId/canRunInParallel/dependsOn/execution are computed deterministically in JS after it returns.
