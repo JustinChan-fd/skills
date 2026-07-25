@@ -305,6 +305,57 @@ function _computeCost(agentCountByModel, outputTokensTotal) {
   const blendedRate = entries.reduce((s, [m, c]) => s + _rateFor(m).out * (c / totalAgents), 0)
   return parseFloat(((outputTokensTotal / 1_000_000) * blendedRate).toFixed(4))
 }
+// lib/grouper.js — keep identical.
+const _CHUNK_SIZE = 8
+function _longestCommonPrefix(files) {
+  if (!files.length) return ''
+  const dirs = files.map(f => { const p = f.split('/'); return p.length > 1 ? p.slice(0, -1) : [] })
+  if (!dirs[0].length) return ''
+  const minLen = Math.min(...dirs.map(d => d.length))
+  let i = 0
+  while (i < minLen && dirs.every(d => d[i] === dirs[0][i])) i++
+  return dirs[0].slice(0, i).join('/') || ''
+}
+function _dirLabel(files) {
+  const prefix = _longestCommonPrefix(files)
+  if (prefix) return prefix
+  const parts = files[0].split('/')
+  return parts.length > 1 ? parts.slice(0, -1).join('/') : '.'
+}
+function _verbFromAc(acBullet) {
+  const skip = new Set(['all', 'the', 'a', 'an', 'in', 'for', 'of', 'and', 'or', 'to'])
+  const words = String(acBullet).trim().toLowerCase().split(/\s+/).filter(w => w.length > 0)
+  for (const w of words) { if (!skip.has(w)) return w.charAt(0).toUpperCase() + w.slice(1) }
+  return 'Migrate'
+}
+function _chunkAcFilesIntoSubtasks(acResult, issueKey, migrationPattern) {
+  const { acBullet, files = [], isMigration, isCleanup, isValidation, isDeferred } = acResult
+  if (!files.length) return []
+  const sorted = [...files].sort()
+  const chunks = []
+  for (let i = 0; i < sorted.length; i += _CHUNK_SIZE) chunks.push(sorted.slice(i, i + _CHUNK_SIZE))
+  const prefix = issueKey ? `${issueKey}: ` : ''
+  const verb = _verbFromAc(acBullet)
+  const isMulti = chunks.length > 1
+  return chunks.map((chunk, idx) => {
+    const dir = _dirLabel(chunk)
+    const partSuffix = isMulti ? ` (${idx + 1}/${chunks.length})` : ''
+    const patternNote = migrationPattern ? ` using ${migrationPattern}` : ''
+    return {
+      title: `${prefix}${verb} ${dir} (${chunk.length} files)${partSuffix}`,
+      description: `${acBullet}. Migrate ${chunk.length} file(s) in ${dir}${patternNote}: ${chunk.join(', ')}`,
+      scopePath: _longestCommonPrefix(chunk) || dir,
+      files: chunk,
+      estimatedFileCount: chunk.length,
+      targetSize: chunk.length <= 4 ? 'XS' : 'S',
+      isMigration: !!isMigration,
+      isCleanup: !!isCleanup,
+      isValidation: !!isValidation,
+      isDeferred: !!isDeferred,
+      needsReview: false,
+    }
+  })
+}
 // ===== END PURE =====
 
 // telemetryPath is set on first writeAuditRecord call (needs a timestamp agent),
@@ -1162,81 +1213,33 @@ if (validLayers.length === 0 && validAcResults.every(r => r.fileCount === 0)) {
   throw new Error(`Research found 0 files in all streams under ${searchRoot} — check scopePath or migrationPattern`)
 }
 
-// ─── Phase 2: Split Design — AC-driven grouper fan-out + coordinator ──────────
-// Stage 1: design:grouper (Haiku, parallel, one per AC) — mechanical batching only
-// Stage 2: design:coordinator (Opus, single) — file conflict resolution across groupers
-// Replaces the single design:root agent that was stalling at ~180s on large tickets
-// because it held 120k+ tokens of file enumeration while also doing coordination.
+// ─── Phase 2: Split Design ────────────────────────────────────────────────────
+// Stage 1: _chunkAcFilesIntoSubtasks() — pure JS, no model. Alphabetical chunk-at-8 per AC.
+// Stage 2: resolveFileConflicts() — pure JS, no model. Merge >80%-overlap pairs, assign conflicts.
 
 trackPhase('Split Design')
 
-// Stage 1: design:grouper — one Haiku per AC, mechanical batching only (no cross-AC decisions)
-// Input: a single AC's file list from AC research results (not layer research)
-// Each grouper sees ≤N files for its own AC — tiny context, no stall risk
-const grouperResultsAll = []
-for (let i = 0; i < validAcResults.length; i += 5) {
-  const batch = validAcResults.slice(i, i + 5)
-  const batchResults = await parallel(batch.map(r => () => {
-    const { isCleanup, isValidation, isDeferred, isMigration } = classifyAcBullet(r.acBullet)
-    // Validation ACs: shell checks — never own files. Skip grouper entirely.
-    if ((r.files || []).length === 0 || isValidation) {
-      return Promise.resolve({ layer: r.acBullet.slice(0, 30), subtasks: [] })
-    }
-    // Deferred ACs: feature additions (e.g. AbortController) — produce one empty stub
-    // directly in JS rather than sending hundreds of research files to a grouper.
-    // collapseDeferred() would catch any that slip through, but this avoids the agent call.
-    if (isDeferred) {
-      const { isCleanup: iC, isValidation: iV, isDeferred: iD, isMigration: iM } = { isCleanup, isValidation, isDeferred, isMigration }
-      return Promise.resolve({ layer: r.acBullet.slice(0, 30), subtasks: [{
-        title: `${issueKey ? issueKey + ': ' : ''}${r.acBullet.slice(0, 60)}`,
-        description: r.acBullet,
-        scopePath: scopePath || '',
-        files: [],
-        estimatedFileCount: 0,
-        targetSize: 'XS',
-        isMigration: iM,
-        isCleanup: iC,
-        isValidation: iV,
-        isDeferred: iD,
-        needsReview: true,
-      }]})
-    }
-    return trackedAgent(
-      `You are a subtask grouper for harness-intake. Do not use any tools.
-${PHILOSOPHY}
-
-ACCEPTANCE CRITERION: "${r.acBullet}"
-FILES (${r.files.length} total): ${JSON.stringify(r.files)}
-${migrationPattern ? `MIGRATION PATTERN: ${migrationPattern}` : ''}
-${issueKey ? `ISSUE KEY: ${issueKey}` : ''}
-
-PRE-CLASSIFIED FLAGS (use exactly as given, do not override):
-  isMigration:  ${isMigration}
-  isCleanup:    ${isCleanup}
-  isValidation: ${isValidation}
-  isDeferred:   ${isDeferred}
-
-RULES:
-- If isDeferred=true: emit EXACTLY ONE subtask with files=[] and estimatedFileCount=0.
-  Deferred ACs describe a feature addition (e.g. "add AbortController to clientFetch").
-  They are NOT file migrations — do not list consumer files, do not chunk. One stub only.
-- max 8 files per subtask — hard cap (migration/cleanup ACs only)
-- when files.length > 8 (and NOT isDeferred): chunk into groups of 8 (alphabetical), one subtask per chunk
-- TITLE FORMAT: "${issueKey ? issueKey + ': ' : ''}[verb] [directory] ([N] files)"
-- DESCRIPTION: one paragraph — what changes, what pattern, list files explicitly by path
-- scopePath: longest common directory prefix of files in this subtask
-- targetSize: XS (≤4 files), S (5-8 files)
-- Set isMigration/isCleanup/isValidation/isDeferred exactly as pre-classified above
-
-Do NOT assign groupId — that is handled deterministically after all groupers finish.
-Return LAYER_SUBTASKS_SCHEMA.`,
-      { label: `design:grouper:${r.acBullet.slice(0, 30).replace(/\s+/g, '-')}`, phase: 'Split Design', model: haikuModel, effort: 'low', schema: LAYER_SUBTASKS_SCHEMA }
-    )
-  }))
-  grouperResultsAll.push(...batchResults)
-}
-
-const allGrouperDraftsRaw = grouperResultsAll.filter(Boolean).flatMap(d => d.subtasks || [])
+// Stage 1: design:grouper — deterministic pure function, no model call.
+// All rules were complete and unambiguous — alphabetical chunk-at-8, LCP scopePath, template title.
+// Same move as resolveFileConflicts() replacing the Opus coordinator.
+const allGrouperDraftsRaw = validAcResults.flatMap(r => {
+  const { isCleanup, isValidation, isDeferred, isMigration } = classifyAcBullet(r.acBullet)
+  if ((r.files || []).length === 0 || isValidation) return []
+  if (isDeferred) return [{
+    title: `${issueKey ? issueKey + ': ' : ''}${r.acBullet.slice(0, 60)}`,
+    description: r.acBullet,
+    scopePath: scopePath || '',
+    files: [],
+    estimatedFileCount: 0,
+    targetSize: 'XS',
+    isMigration: !!isMigration,
+    isCleanup: !!isCleanup,
+    isValidation: !!isValidation,
+    isDeferred: true,
+    needsReview: true,
+  }]
+  return _chunkAcFilesIntoSubtasks({ ...r, isMigration, isCleanup, isValidation, isDeferred }, issueKey, migrationPattern)
+})
 
 // Pre-normalize grouper drafts: _absPrefix is already set above (after AC research).
 // Groupers sometimes emit absolute paths; normalize before coordinator sees them.
