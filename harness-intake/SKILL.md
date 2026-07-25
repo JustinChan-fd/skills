@@ -30,9 +30,9 @@ Run `/harness-intake` before every harness-plan invocation. Always.
 | Size | Output | Next step |
 |------|--------|-----------|
 | XS/S/M | `intake-manifest.json` — typed work classification + AC list | `/harness-plan --intake <path>` |
-| L | `intake-manifest.json` + `split-manifest.json` — groups of subtasks | `/harness-plan --intake <path>` on each G1 subtask |
+| L | `intake-manifest.json` (with `groups[]`) — work classification + split subtasks | `/harness-plan --intake <path>` on each G1 subtask |
 
-Both manifests are written to `{repoPath}/docs/plans/`.
+The manifest is written to `{repoPath}/docs/plans/`.
 
 ## Step-by-Step
 
@@ -156,12 +156,13 @@ mcp__atlassian__createJiraIssue({
 
 Collect created keys + URLs.
 
-### 11. L path — write split-manifest.json
+### 11. L path — write intake-manifest.json (with groups)
 
-Inject `jiraKey` + `jiraUrl` per subtask in `result.splitManifest.groups[*].subtasks[*]`, then write:
+Inject `jiraKey` + `jiraUrl` per subtask in `result.intakeManifest.groups[*].subtasks[*]`, then write:
 
 ```js
-const splitManifestPath = `${repoPath}/docs/plans/${today}-${issueKey}-split-manifest.json`
+const intakeManifestPath = `${repoPath}/docs/plans/${today}-${issueKey}-intake-manifest.json`
+// Write result.intakeManifest (already contains groups[]) as prettified JSON
 ```
 
 ### 12. Print next steps
@@ -205,8 +206,8 @@ Subtasks created under {issueKey}.
 
 harness-plan reads this via `--intake` flag and skips its own Intake phase entirely.
 
-### split-manifest.json (L only)
-Same shape as before — `groups[]` with subtasks carrying `scopePath`, `files[]`, `jiraKey`, `jiraUrl`.
+### intake-manifest.json — L path (with groups)
+Same top-level fields as XS/S/M, plus a `groups[]` array with subtasks carrying `scopePath`, `files[]`, `jiraKey`, `jiraUrl`. There is no separate split-manifest file.
 
 ## Getting past a barrier
 

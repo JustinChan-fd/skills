@@ -32,3 +32,20 @@ export const ROUTING = {
   'duration-ms':             { model: 'haiku',  effort: 'low' },
   'audit-write':             { model: 'haiku',  effort: 'low' },
 }
+
+// Size-based Research routing.
+// Returns { concurrency, skipLayerResearch } for the Research phase.
+// effort is NOT here — ac-research agents are Haiku grep (shell-only), always 'low'.
+// XS tickets skip layer research — a 1-3 file change has no structural surface worth mapping.
+const SIZE_ROUTING = {
+  XS: { concurrency: 3, skipLayerResearch: true  },
+  S:  { concurrency: 3, skipLayerResearch: false },
+  M:  { concurrency: 5, skipLayerResearch: false },
+  L:  { concurrency: 5, skipLayerResearch: false },
+}
+
+export function routingFor(size) {
+  const r = SIZE_ROUTING[size]
+  if (!r) throw new Error(`routingFor: unknown size "${size}"`)
+  return r
+}

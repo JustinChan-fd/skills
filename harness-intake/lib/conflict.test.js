@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
-import { resolveFileConflicts } from './conflict.js'
+import { resolveFileConflicts, isAcFilesCoveredByExisting, propagateManifestFields } from './conflict.js'
 
 describe('resolveFileConflicts', () => {
   it('passes through non-overlapping subtasks unchanged', () => {
@@ -127,5 +127,113 @@ describe('resolveFileConflicts', () => {
     const result = resolveFileConflicts(drafts)
     assert.equal(result.length, 1)
     assert.deepEqual(result[0].files, ['a.js', 'b.js'])
+  })
+})
+
+describe('isAcFilesCoveredByExisting', () => {
+  const sub = (files) => ({ files })
+
+  it('returns true when all AC files are in existing subtasks (100% overlap)', () => {
+    const acFiles = ['a.js', 'b.js', 'c.js']
+    const existing = [sub(['a.js', 'b.js']), sub(['c.js', 'd.js'])]
+    assert.equal(isAcFilesCoveredByExisting(acFiles, existing), true)
+  })
+
+  it('returns true when exactly 50% of AC files are covered (at threshold)', () => {
+    const acFiles = ['a.js', 'b.js']
+    const existing = [sub(['a.js', 'x.js'])]
+    assert.equal(isAcFilesCoveredByExisting(acFiles, existing), true)
+  })
+
+  it('returns false when fewer than 50% of AC files are covered', () => {
+    const acFiles = ['a.js', 'b.js', 'c.js', 'd.js']
+    const existing = [sub(['a.js'])]  // 1/4 = 25%
+    assert.equal(isAcFilesCoveredByExisting(acFiles, existing), false)
+  })
+
+  it('returns false for empty acFiles (no files → not covered)', () => {
+    const existing = [sub(['a.js', 'b.js'])]
+    assert.equal(isAcFilesCoveredByExisting([], existing), false)
+  })
+
+  it('returns false for null acFiles', () => {
+    const existing = [sub(['a.js'])]
+    assert.equal(isAcFilesCoveredByExisting(null, existing), false)
+  })
+
+  it('returns false when existing subtasks have no files', () => {
+    const acFiles = ['a.js', 'b.js']
+    const existing = [sub([]), sub([])]
+    assert.equal(isAcFilesCoveredByExisting(acFiles, existing), false)
+  })
+
+  it('returns false when existing subtasks list is empty', () => {
+    const acFiles = ['a.js', 'b.js']
+    assert.equal(isAcFilesCoveredByExisting(acFiles, []), false)
+  })
+
+  it('handles subtasks with missing files field gracefully', () => {
+    const acFiles = ['a.js', 'b.js']
+    const existing = [{ title: 'no files field' }]
+    assert.equal(isAcFilesCoveredByExisting(acFiles, existing), false)
+  })
+
+  it('correctly models the run-14 failure: bare-fetch files titled as axios subtasks', () => {
+    // The grouper titled the subtask "Replace axios with clientFetch" but the files
+    // are actually bare-fetch files. AC verify flags "Replace bare fetch() calls" as
+    // missing. Without the overlap check, 4 duplicate stubs get injected.
+    const bareFetchFiles = ['src/client/hooks/useCelebritySearch.js', 'src/client/pages/ems/_shared/hooks/useEditorArray.js']
+    const existing = [
+      sub(['src/client/hooks/useCelebritySearch.js', 'src/client/pages/ems/_shared/hooks/useEditorArray.js', 'src/client/api.js']),
+    ]
+    // Both bare-fetch files already exist in the mislabeled subtask → covered
+    assert.equal(isAcFilesCoveredByExisting(bareFetchFiles, existing), true)
+  })
+})
+
+describe('propagateManifestFields', () => {
+  it('sets migrationPattern on subtasks that are missing it', () => {
+    const subtasks = [{ groupId: 'G1', targetSize: 'S', isMigration: true }]
+    propagateManifestFields(subtasks, 'axios → clientFetch', 'L')
+    assert.equal(subtasks[0].migrationPattern, 'axios → clientFetch')
+  })
+
+  it('sets size from targetSize when size is missing', () => {
+    const subtasks = [{ groupId: 'G1', targetSize: 'S' }]
+    propagateManifestFields(subtasks, 'axios → clientFetch', 'L')
+    assert.equal(subtasks[0].size, 'S')
+  })
+
+  it('falls back to top-level size when targetSize is also missing', () => {
+    const subtasks = [{ groupId: 'G1' }]
+    propagateManifestFields(subtasks, 'axios → clientFetch', 'L')
+    assert.equal(subtasks[0].size, 'L')
+  })
+
+  it('does not overwrite migrationPattern already set on a subtask', () => {
+    const subtasks = [{ groupId: 'G1', targetSize: 'S', migrationPattern: 'existing' }]
+    propagateManifestFields(subtasks, 'axios → clientFetch', 'L')
+    assert.equal(subtasks[0].migrationPattern, 'existing')
+  })
+
+  it('does not overwrite size already set on a subtask', () => {
+    const subtasks = [{ groupId: 'G1', size: 'XS', targetSize: 'S' }]
+    propagateManifestFields(subtasks, 'axios → clientFetch', 'L')
+    assert.equal(subtasks[0].size, 'XS')
+  })
+
+  it('handles empty subtasks array without error', () => {
+    assert.doesNotThrow(() => propagateManifestFields([], 'axios → clientFetch', 'L'))
+  })
+
+  it('propagates across all subtasks in one call', () => {
+    const subtasks = [
+      { groupId: 'G1', targetSize: 'S' },
+      { groupId: 'G1', targetSize: 'XS' },
+      { groupId: 'G2', targetSize: 'S' },
+    ]
+    propagateManifestFields(subtasks, 'axios → clientFetch', 'L')
+    assert.ok(subtasks.every(s => s.migrationPattern === 'axios → clientFetch'))
+    assert.deepEqual(subtasks.map(s => s.size), ['S', 'XS', 'S'])
   })
 })

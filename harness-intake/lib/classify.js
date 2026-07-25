@@ -9,7 +9,10 @@ export function classifyAcBullet(bullet) {
   // false positives on implementation ACs like "No bare fetch() calls remain standardized"
   // 'ran clean' catches "npm install ran clean with no warnings" — a validation outcome, not a file-touch task
   const isCleanup    = text.includes('remov') || text.includes('delet') || text.includes('package.json') || text.includes('npm install')
-  const isValidation = text.includes('verif') || text.includes('confirm') || text.includes('passing') || text.includes('clean install') || text.includes('ran clean') || text.includes('baseline') || /\bcheck\b/.test(text) || /\bremains?\b/.test(text)
+  // \bcheck\b only signals validation when there is no action verb alongside it —
+  // "check for X and migrate" is a migration, "check that nothing remains" is a validation.
+  const hasActionVerb = text.includes('migrat') || text.includes('replac') || text.includes('updat') || text.includes('add ') || text.includes('remov') || text.includes('delet')
+  const isValidation = text.includes('verif') || text.includes('confirm') || text.includes('passing') || text.includes('clean install') || text.includes('ran clean') || text.includes('baseline') || (!hasActionVerb && /\bcheck\b/.test(text)) || /\bremains?\b/.test(text)
   const isDeferred   = text.includes('abortcontroller') || text.includes('timeout') || text.includes('npm ')
   // isCleanup+isDeferred together always means a package-level validation step (e.g. npm install) —
   // treat as validation (no file list, not a Jira subtask)

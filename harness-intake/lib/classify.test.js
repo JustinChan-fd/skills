@@ -64,4 +64,29 @@ describe('classifyAcBullet', () => {
     assert.equal(r.isValidation, true)
     assert.equal(r.isMigration, false)
   })
+
+  // Real-world AC variants observed in runs 13-15
+  it('"check for X and migrate" is migration — check keyword should not override migrate intent', () => {
+    const r = classifyAcBullet('Check for XMLHttpRequest bypass patterns in src/client/ and migrate to clientFetch')
+    assert.equal(r.isMigration, true)
+    assert.equal(r.isValidation, false)
+  })
+
+  it('"remove ... and all imports of it" is cleanup', () => {
+    const r = classifyAcBullet('Remove auth middleware file src/client/middleware/auth.js and all imports of it')
+    assert.equal(r.isCleanup, true)
+    assert.equal(r.isMigration, false)
+  })
+
+  it('"update test mocks from X to Y" is migration (test mock replacement is real file work)', () => {
+    const r = classifyAcBullet('Update client test mocks from axios-mock-adapter to vi.fn() stubs')
+    assert.equal(r.isMigration, true)
+    assert.equal(r.isValidation, false)
+  })
+
+  it('"verify npm install completes cleanly after X removal" is validation', () => {
+    const r = classifyAcBullet('Verify npm install completes cleanly after axios removal')
+    assert.equal(r.isValidation, true)
+    assert.equal(r.isMigration, false)
+  })
 })

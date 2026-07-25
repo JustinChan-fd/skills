@@ -17,7 +17,7 @@ export const meta = {
 //
 // Returns:
 //   XS/S/M: { splitRequired: false, intakeManifest, size, cliSummary }
-//   L:      { splitRequired: true,  intakeManifest, splitManifest, size, ... }
+//   L:      { splitRequired: true,  intakeManifest (with groups[]), size, ... }
 
 const input = args.input
 const repoPath = args.repoPath
@@ -180,7 +180,8 @@ function categorizeVerifyIssue(issue) {
 function classifyAcBullet(bullet) {
   const text = bullet.toLowerCase()
   const isCleanup    = text.includes('remov') || text.includes('delet') || text.includes('package.json') || text.includes('npm install')
-  const isValidation = text.includes('verif') || text.includes('confirm') || text.includes('passing') || text.includes('clean install') || text.includes('ran clean') || text.includes('baseline') || /\bcheck\b/.test(text) || /\bremains?\b/.test(text)
+  const hasActionVerb = text.includes('migrat') || text.includes('replac') || text.includes('updat') || text.includes('add ') || text.includes('remov') || text.includes('delet')
+  const isValidation = text.includes('verif') || text.includes('confirm') || text.includes('passing') || text.includes('clean install') || text.includes('ran clean') || text.includes('baseline') || (!hasActionVerb && /\bcheck\b/.test(text)) || /\bremains?\b/.test(text)
   const isDeferred   = text.includes('abortcontroller') || text.includes('timeout') || text.includes('npm ')
   const isValidationFinal = isValidation || (isCleanup && isDeferred)
   const isMigration  = !isCleanup && !isValidationFinal && !isDeferred
@@ -244,6 +245,12 @@ function _mergeHighOverlap(subtasks) {
   }
   return result
 }
+function isAcFilesCoveredByExisting(acFiles, existingSubtasks) {
+  if (!acFiles || acFiles.length === 0) return false
+  const existingFileSet = new Set(existingSubtasks.flatMap(s => s.files || []))
+  const covered = acFiles.filter(f => existingFileSet.has(f)).length
+  return covered / acFiles.length >= 0.5
+}
 // lib/status.js — keep identical.
 const _INTAKE_OUTCOME_MAP = {
   COMPLETE:                   'success',
@@ -254,6 +261,25 @@ const _INTAKE_OUTCOME_MAP = {
   FAILED:                     'failed',
 }
 function toOutcome(status) { return _INTAKE_OUTCOME_MAP[status] ?? 'failed' }
+// lib/conflict.js (propagateManifestFields) — keep identical.
+function propagateManifestFields(subtasks, migrationPattern, size) {
+  for (const s of subtasks) {
+    if (!s.migrationPattern && migrationPattern) s.migrationPattern = migrationPattern
+    if (!s.size) s.size = s.targetSize || size
+  }
+}
+// lib/routing.js (routingFor) — keep identical.
+const _SIZE_ROUTING = {
+  XS: { concurrency: 3, skipLayerResearch: true  },
+  S:  { concurrency: 3, skipLayerResearch: false },
+  M:  { concurrency: 5, skipLayerResearch: false },
+  L:  { concurrency: 5, skipLayerResearch: false },
+}
+function routingFor(size) {
+  const r = _SIZE_ROUTING[size]
+  if (!r) throw new Error(`routingFor: unknown size "${size}"`)
+  return r
+}
 // ===== END PURE =====
 
 // telemetryPath is set on first writeAuditRecord call (needs a timestamp agent),
@@ -957,6 +983,9 @@ harness-intake
 
 trackPhase('Research')
 
+const researchRouting = routingFor(size)
+log(`Research routing: size=${size} concurrency=${researchRouting.concurrency} skipLayerResearch=${researchRouting.skipLayerResearch}`)
+
 const searchRoot = scopePath
   ? `${repoPath}/${scopePath}`
   : `${repoPath}/src`
@@ -966,8 +995,8 @@ const searchRoot = scopePath
 // feature additions, not file sets to discover. Skipping the Haiku grep agent for these
 // saves ~90s and ~60k tokens per deferred/validation AC (e.g. AbortController, npm install).
 const acResearchResultsAll = []
-for (let i = 0; i < acList.length; i += 5) {
-  const batch = acList.slice(i, i + 5)
+for (let i = 0; i < acList.length; i += researchRouting.concurrency) {
+  const batch = acList.slice(i, i + researchRouting.concurrency)
   const batchResults = await parallel(
     batch.map(ac => () => {
       const { isDeferred, isValidation } = classifyAcBullet(ac.bullet)
@@ -1033,8 +1062,8 @@ const layersToResearch = scopePath
   : (repoLayers.length ? repoLayers : [''])
 
 const layerResultsAll = []
-for (let i = 0; i < layersToResearch.length; i += 5) {
-  const batch = layersToResearch.slice(i, i + 5)
+for (let i = 0; !researchRouting.skipLayerResearch && i < layersToResearch.length; i += researchRouting.concurrency) {
+  const batch = layersToResearch.slice(i, i + researchRouting.concurrency)
   const batchResults = await parallel(
     batch.map(layer => () => trackedAgent(
       `You are a shell-only layer researcher for harness-intake. Do not read any files.
@@ -1421,33 +1450,40 @@ Return AC_VERIFY_SCHEMA.`,
 if (acResult?.missing?.length > 0) {
   const stubsFromMissing = []
   for (const missingBullet of acResult.missing) {
+    const { isValidation, isCleanup, isDeferred, isMigration } = classifyAcBullet(missingBullet)
+    // Validation ACs and ACs already in doneConditionAcs are shell checks or
+    // done-conditions — never create a separate stub for them.
+    const alreadyDoneCondition = doneConditionAcs.includes(missingBullet)
+    if (isValidation || alreadyDoneCondition) {
+      if (!alreadyDoneCondition) doneConditionAcs.push(missingBullet)
+      continue
+    }
+    const acResearch = validAcResults.find(r => r.acBullet === missingBullet)
+    const acFiles = acResearch?.files || []
+    // Skip if ≥50% of this AC's research files are already assigned to existing subtasks.
+    // The grouper sometimes mislabels subtasks (e.g. bare-fetch files titled as "axios"
+    // subtasks) causing AC verify to flag the AC as missing — but the files are covered.
+    if (isAcFilesCoveredByExisting(acFiles, mergeResult.subtasks)) {
+      log(`Post-verify: skip stub for "${missingBullet.slice(0, 60)}" — files already covered by existing subtasks`)
+      continue
+    }
     const alreadyStubbed = mergeResult.subtasks.some(s =>
       s.title.includes(missingBullet.slice(0, 40)) || s.description.includes(missingBullet.slice(0, 40))
     )
-    if (!alreadyStubbed) {
-      const { isValidation, isCleanup, isDeferred, isMigration } = classifyAcBullet(missingBullet)
-      // Validation ACs and ACs already in doneConditionAcs are shell checks or
-      // done-conditions — never create a separate stub for them.
-      const alreadyDoneCondition = doneConditionAcs.includes(missingBullet)
-      if (isValidation || alreadyDoneCondition) {
-        if (!alreadyDoneCondition) doneConditionAcs.push(missingBullet)
-        continue
-      }
-      const acResearch = validAcResults.find(r => r.acBullet === missingBullet)
-      const stubs = makeStubs(
-        missingBullet,
-        acResearch?.files || [],
-        acResearch?.findings,
-        'Auto-generated stub — AC verify found no subtask covering this criterion.'
-      )
-      for (const stub of stubs) {
-        stub.layer = 'stub'
-        stub.groupId = (isCleanup || isDeferred) ? 'G2' : 'G1'
-        stub.canRunInParallel = stub.groupId === 'G1'
-        stub.dependsOn = stub.groupId === 'G2' ? [...g1Titles] : []
-      }
-      stubsFromMissing.push(...stubs)
+    if (alreadyStubbed) continue
+    const stubs = makeStubs(
+      missingBullet,
+      acFiles,
+      acResearch?.findings,
+      'Auto-generated stub — AC verify found no subtask covering this criterion.'
+    )
+    for (const stub of stubs) {
+      stub.layer = 'stub'
+      stub.groupId = (isCleanup || isDeferred) ? 'G2' : 'G1'
+      stub.canRunInParallel = stub.groupId === 'G1'
+      stub.dependsOn = stub.groupId === 'G2' ? [...g1Titles] : []
     }
+    stubsFromMissing.push(...stubs)
   }
   if (stubsFromMissing.length > 0) {
     mergeResult.subtasks.push(...stubsFromMissing)
@@ -1616,6 +1652,9 @@ if (!structuralPass) {
 }
 
 // Build groups via pure JS (no agent) — G1 first, then G2, then G3
+// Propagate top-level migrationPattern and size down to each subtask so
+// harness-plan's manifestEntry fast path gets them directly.
+propagateManifestFields(mergeResult.subtasks, migrationPattern, size)
 const groupMap = {}
 for (const s of mergeResult.subtasks) {
   if (!groupMap[s.groupId]) groupMap[s.groupId] = []
@@ -1632,16 +1671,21 @@ const groups = Object.entries(groupMap)
 
 const groundedReality = verifyResult?.groundedReality || null
 
-// Build splitManifest — SKILL.md writes this to disk after injecting jiraKey/jiraUrl
-const splitManifest = {
+// intakeManifest for L — same contract as XS/S/M but adds groups[] for harness-plan fan-out.
+// SKILL.md injects jiraKey/jiraUrl per subtask before writing to disk.
+const intakeManifest = {
   skill: 'harness-intake',
-  sourceIssue: issueKey || 'unknown',
+  sourceIssue: issueKey || null,
   sourceTitle,
   size,
+  workType,
   ticketType,
   migrationPattern,
-  groundedReality,   // injected into every downstream harness-plan researcher prompt
+  scopePath,
+  acList,
+  files: [...new Set(validLayers.flatMap(l => layerFilePaths(l.files)))],
   execution: mergeResult.execution,
+  groundedReality,   // downstream workers MUST prefer this over the original ticket text
   groups,
 }
 
@@ -1761,31 +1805,14 @@ ${doneConditionAcs.length > 0 ? `\n  done-conditions (add to predecessor AC crit
 
 log(cliSummary)
 
-// intakeManifest embedded in L return — parent harness can read work classification
-// even when a split occurred; splitManifest carries the groups for harness-plan fan-out
-const intakeManifestL = {
-  skill: 'harness-intake',
-  sourceIssue: issueKey || null,
-  sourceTitle,
-  size,
-  workType,
-  migrationPattern,
-  scopePath,
-  acList,
-  files: [...new Set(validLayers.flatMap(l => layerFilePaths(l.files)))],
-  execution: mergeResult.execution,
-  groundedReality,   // downstream workers MUST prefer this over the original ticket text
-}
-
 return {
   splitRequired: true,
   size,
   workType,
-  ticketType,   // alias — preserved for harness-split compat
+  ticketType,
   migrationPattern,
   splitPlan: mergeResult,
-  splitManifest,
-  intakeManifest: intakeManifestL,
+  intakeManifest,
   totalFilesFound,
   qualityIssues,
   status: planStatus,

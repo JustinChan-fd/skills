@@ -80,3 +80,30 @@ function _mergeHighOverlap(subtasks) {
 
   return result
 }
+
+/**
+ * isAcFilesCoveredByExisting — returns true when ≥50% of acFiles are already
+ * assigned to existing subtasks.
+ *
+ * Used by post-verify stub injection to prevent duplicate-file stubs when the
+ * grouper mislabeled a subtask (e.g. bare-fetch files titled as "axios" subtasks)
+ * and AC verify flags the AC as missing even though its files are already covered.
+ *
+ * Returns false when acFiles is empty (no files → not covered, stub may still be warranted).
+ */
+export function isAcFilesCoveredByExisting(acFiles, existingSubtasks) {
+  if (!acFiles || acFiles.length === 0) return false
+  const existingFileSet = new Set(existingSubtasks.flatMap(s => s.files || []))
+  const covered = acFiles.filter(f => existingFileSet.has(f)).length
+  return covered / acFiles.length >= 0.5
+}
+
+// propagateManifestFields — ensures each subtask carries migrationPattern and size
+// directly, so harness-plan's manifestEntry fast path gets them without reading
+// the top-level splitManifest. Does not overwrite values already set on the subtask.
+export function propagateManifestFields(subtasks, migrationPattern, size) {
+  for (const s of subtasks) {
+    if (!s.migrationPattern && migrationPattern) s.migrationPattern = migrationPattern
+    if (!s.size) s.size = s.targetSize || size
+  }
+}
