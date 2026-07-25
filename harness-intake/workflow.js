@@ -324,6 +324,7 @@ async function writeAuditRecord(status, extra = {}) {
     ts: args.today || 'unknown',
     skill: 'harness-intake',
     skillsSchemaVersion: SKILLS_SCHEMA_VERSION,
+    telemetryVersion: 'v2',
     skillsCommit,
     status,
     outcome: toOutcome(status),
@@ -332,10 +333,9 @@ async function writeAuditRecord(status, extra = {}) {
     repoPath: repoPath || null,
     branch: null,
     durationMs,
-    outputTokensByModel: tokensByModel,
+    subagentTokens: null,   // patched by skill after Workflow() returns
     agentCountByModel,
     outputTokensTotal,
-    estimatedCostUsd,
     ...extra,
   })
   const legacyCmd  = `echo '${record.replace(/'/g, "'\\''")}' >> ~/.claude/harness-intake-runs.jsonl`
