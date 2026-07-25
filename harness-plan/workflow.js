@@ -42,6 +42,7 @@ const _startTsPromise = agent(
 const workflowStartTokens = budget.spent()
 const tokensByModel = {}
 const agentCountByModel = {}
+const agentCountByPhase = {}
 
 async function trackedAgent(prompt, opts) {
   const before = budget.spent()
@@ -49,6 +50,8 @@ async function trackedAgent(prompt, opts) {
   const m = opts.model || researcherModel
   tokensByModel[m] = (tokensByModel[m] || 0) + (budget.spent() - before)
   agentCountByModel[m] = (agentCountByModel[m] || 0) + 1
+  const p = opts.phase || 'unknown'
+  agentCountByPhase[p] = (agentCountByPhase[p] || 0) + 1
   return result
 }
 
@@ -112,6 +115,8 @@ async function writeAuditRecord(status, extra = {}) {
     durationMs,
     subagentTokens: null,   // patched by skill after Workflow() returns
     agentCountByModel,
+    agentCountByPhase,
+    avgTokensPerAgent: outputTokensTotal > 0 ? Math.round(outputTokensTotal / Math.max(1, Object.values(agentCountByModel).reduce((a,b)=>a+b,0))) : null,
     outputTokensTotal,
     ...extra,
   })
