@@ -52,15 +52,12 @@ const PHILOSOPHY = `
 
 // ─── Token tracking ───────────────────────────────────────────────────────────
 const workflowStartTokens = budget.spent()
-const tokensByModel = {}
 const agentCountByModel = {}
 const agentCountByPhase = {}
 
 async function trackedAgent(prompt, opts) {
-  const before = budget.spent()
   const result = await agent(prompt, opts)
   const m = opts.model || sonnetModel
-  tokensByModel[m] = (tokensByModel[m] || 0) + (budget.spent() - before)
   agentCountByModel[m] = (agentCountByModel[m] || 0) + 1
   const p = opts.phase || 'unknown'
   agentCountByPhase[p] = (agentCountByPhase[p] || 0) + 1
@@ -283,6 +280,31 @@ function routingFor(size) {
   if (!r) throw new Error(`routingFor: unknown size "${size}"`)
   return r
 }
+// lib/cost.js — keep identical. Rates from https://platform.claude.com/docs/en/about-claude/pricing (2026-07-24)
+// Haiku 4.5: $1.00/$5.00 per MTok in/out | Sonnet 4.x: $3.00/$15.00 | Opus 4.5+: $5.00/$25.00
+const _COST_RATES = {
+  haiku:  { in: 1.00, out: 5.00  },
+  sonnet: { in: 3.00, out: 15.00 },
+  opus:   { in: 5.00, out: 25.00 },
+}
+function _rateFor(model) {
+  const m = String(model)
+  if (m.includes('opus'))  return _COST_RATES.opus
+  if (m.includes('haiku')) return _COST_RATES.haiku
+  return _COST_RATES.sonnet
+}
+// agentCountByModel: modelId→agent count. outputTokensTotal: total output tokens for the run.
+// Tokens are split proportionally by agent count — immune to parallel() budget.spent() race
+// (per-agent delta tracking overcounts sonnet when agents run concurrently).
+// Output-only — budget.spent() tracks outputs only. Underestimates true cost (~4x) but self-contained.
+function _computeCost(agentCountByModel, outputTokensTotal) {
+  const entries = Object.entries(agentCountByModel)
+  if (!entries.length || !outputTokensTotal) return 0
+  const totalAgents = entries.reduce((s, [, c]) => s + c, 0)
+  if (!totalAgents) return 0
+  const blendedRate = entries.reduce((s, [m, c]) => s + _rateFor(m).out * (c / totalAgents), 0)
+  return parseFloat(((outputTokensTotal / 1_000_000) * blendedRate).toFixed(4))
+}
 // ===== END PURE =====
 
 // telemetryPath is set on first writeAuditRecord call (needs a timestamp agent),
@@ -291,12 +313,6 @@ let _telemetryPath = null
 
 async function writeAuditRecord(status, extra = {}) {
   const outputTokensTotal = budget.spent() - workflowStartTokens
-  const estimatedCostUsd = parseFloat(
-    Object.entries(tokensByModel).reduce((sum, [model, tokens]) => {
-      const rate = model.includes('opus') ? 75 : model.includes('haiku') ? 1.25 : 15
-      return sum + (tokens / 1_000_000) * rate
-    }, 0).toFixed(4)
-  )
   // durationMs: computed via shell since Date.now() is unavailable in workflow scripts
   // startTs is passed as args.startTs (epoch ms string) from SKILL.md before Workflow() call
   const [durationMs, skillsCommit, runTs] = await Promise.all([
@@ -336,11 +352,8 @@ async function writeAuditRecord(status, extra = {}) {
     repoPath: repoPath || null,
     branch: null,
     durationMs,
-    subagentTokens: null,   // patched by skill after Workflow() returns
-    estimatedCostUsd,       // approximate — tokensByModel racing on parallel runs; use as rough signal only
     agentCountByModel,
     agentCountByPhase,
-    avgTokensPerAgent: outputTokensTotal > 0 ? Math.round(outputTokensTotal / Math.max(1, Object.values(agentCountByModel).reduce((a,b)=>a+b,0))) : null,
     outputTokensTotal,
     ...extra,
   })
@@ -401,24 +414,25 @@ const WORK_INTEL_SCHEMA = {
 }
 
 // Per-layer researcher output (one agent per layer)
+// Keep in sync with lib/schemas.js (tests import from there; import() unavailable here).
 const LAYER_SCHEMA = {
   type: 'object',
-  required: ['name', 'path', 'fileCount', 'files', 'sublayers', 'canRunInParallel', 'dependsOnLayers'],
+  required: ['name', 'path', 'fileCount', 'sampleFiles', 'sublayers', 'canRunInParallel', 'dependsOnLayers'],
   properties: {
     name:             { type: 'string' },
     path:             { type: 'string' },
     fileCount:        { type: 'number' },
-    files:            { type: 'array', items: { type: 'string' } },
+    sampleFiles:      { type: 'array', items: { type: 'string' }, maxItems: 5 },
     sublayers: {
       type: 'array',
       items: {
         type: 'object',
-        required: ['name', 'path', 'fileCount', 'files'],
+        required: ['name', 'path', 'fileCount', 'sampleFiles'],
         properties: {
-          name:      { type: 'string' },
-          path:      { type: 'string' },
-          fileCount: { type: 'number' },
-          files:     { type: 'array', items: { type: 'string' } },
+          name:        { type: 'string' },
+          path:        { type: 'string' },
+          fileCount:   { type: 'number' },
+          sampleFiles: { type: 'array', items: { type: 'string' }, maxItems: 5 },
         },
       },
     },
@@ -914,12 +928,7 @@ log(`Work Intelligence: size=${size} splitRequired=${splitRequired} type=${workT
 
 if (!splitRequired) {
   const outputTokensTotal = budget.spent() - workflowStartTokens
-  const estimatedCostUsd = parseFloat(
-    Object.entries(tokensByModel).reduce((sum, [model, tokens]) => {
-      const rate = model.includes('opus') ? 75 : model.includes('haiku') ? 1.25 : 15
-      return sum + (tokens / 1_000_000) * rate
-    }, 0).toFixed(4)
-  )
+  const estimatedCostUsd = _computeCost(agentCountByModel, outputTokensTotal)
 
   // intakeManifest — full typed handoff for harness-plan
   const intakeManifest = {
@@ -1079,22 +1088,23 @@ SEARCH ROOT: ${searchRoot}${layer ? '/' + layer : ''}
 ${patternGrepArg ? `PATTERN: ${patternGrepArg}` : 'TICKET TYPE: non-migration — enumerate all source files by directory'}
 
 REQUIRED COMMANDS (run ALL of these in order):
-${patternGrepArg ? `1. timeout 15 grep -rl "${patternGrepArg}" ${searchRoot}${layer ? '/' + layer : ''}/ 2>/dev/null
-   → capture the full list of matching paths (ALL paths, not just head -5)
-   → if command times out or returns nothing, return files=[] fileCount=0
-2. echo above output | wc -l → for fileCount
+${patternGrepArg ? `1. timeout 15 grep -rl "${patternGrepArg}" ${searchRoot}${layer ? '/' + layer : ''}/ 2>/dev/null | head -5
+   → capture up to 5 paths for sampleFiles (do NOT output the full list)
+   → if command times out or returns nothing, return sampleFiles=[] fileCount=0
+2. timeout 15 grep -rl "${patternGrepArg}" ${searchRoot}${layer ? '/' + layer : ''}/ 2>/dev/null | wc -l → for fileCount
 3. if fileCount > 8:
    ls ${searchRoot}${layer ? '/' + layer : ''}/ → enumerate subdirectories
-   then timeout 10 grep -rl "${patternGrepArg}" ${searchRoot}${layer ? '/' + layer : ''}/<subdir>/ 2>/dev/null for each subdir` : `1. find ${searchRoot}${layer ? '/' + layer : ''} -type f 2>/dev/null
-   → capture ALL paths
-2. echo above output | wc -l → for fileCount
+   then timeout 10 grep -rl "${patternGrepArg}" ${searchRoot}${layer ? '/' + layer : ''}/<subdir>/ 2>/dev/null | wc -l for each subdir → subdir fileCount` : `1. find ${searchRoot}${layer ? '/' + layer : ''} -type f 2>/dev/null | head -5
+   → capture up to 5 paths for sampleFiles (do NOT output the full list)
+2. find ${searchRoot}${layer ? '/' + layer : ''} -type f 2>/dev/null | wc -l → for fileCount
 3. if fileCount > 8:
    ls ${searchRoot}${layer ? '/' + layer : ''}/ → enumerate subdirectories
-   then repeat find per subdir`}
+   then repeat find | wc -l per subdir`}
 
 RULES:
-- files[] must be the COMPLETE list — not a sample, not head -5
-- sublayers[] must list subdirectory breakdowns when fileCount > 8
+- sampleFiles[] must be at most 5 paths — representative samples only, NOT the full list
+- fileCount must be the actual total count from wc -l (not the sample size)
+- sublayers[] must list subdirectory breakdowns when fileCount > 8, with their own fileCount and sampleFiles
 - canRunInParallel: true if this layer has no shared state with other layers
 - dependsOnLayers: list layer names this one must come after (empty for most)
 
@@ -1107,18 +1117,7 @@ Return LAYER_SCHEMA.`,
 const layerResults = layerResultsAll
 
 // Fan-in: merge AC results with layer results
-// Build a set of all AC-covered files for metadata injection into layer results
 const validAcResults = acResearchResults.filter(Boolean)
-const acCoveredFiles = new Set(validAcResults.flatMap(r => r.files || []))
-const acCoverageMap = {}  // file path → AC bullets that cover it
-for (const r of validAcResults) {
-  for (const f of (r.files || [])) {
-    if (!acCoverageMap[f]) acCoverageMap[f] = []
-    acCoverageMap[f].push(r.acBullet)
-  }
-}
-
-// Inject acCoverage metadata into layer files
 let validLayers = layerResults.filter(Boolean).filter(l => l.fileCount > 0)
 
 // Compute AC file total early — needed for fallback check below and log
@@ -1152,20 +1151,6 @@ if (validLayers.length === 0 && totalAcFiles > 0) {
     dependsOnLayers: [],
   }]
 }
-for (const layer of validLayers) {
-  layer.files = layer.files.map(f => {
-    const coverage = acCoverageMap[f]
-    return coverage ? { path: f, acCoverage: coverage } : { path: f, acCoverage: [] }
-  })
-  // Normalise: sublayer files too
-  for (const sub of (layer.sublayers || [])) {
-    sub.files = (sub.files || []).map(f => {
-      const coverage = acCoverageMap[f]
-      return coverage ? { path: f, acCoverage: coverage } : { path: f, acCoverage: [] }
-    })
-  }
-}
-
 // ACs with zero files found from AC research — will need stub subtasks
 const zeroCoverageAcs = validAcResults.filter(r => r.fileCount === 0)
 
@@ -1184,10 +1169,6 @@ if (validLayers.length === 0 && validAcResults.every(r => r.fileCount === 0)) {
 // because it held 120k+ tokens of file enumeration while also doing coordination.
 
 trackPhase('Split Design')
-
-// Normalise file lists: layer files are now objects {path, acCoverage[]}
-// Extract plain paths for verify/debrief prompts, keep acCoverage for context
-const layerFilePaths = (files) => files.map(f => typeof f === 'string' ? f : f.path)
 
 // Stage 1: design:grouper — one Haiku per AC, mechanical batching only (no cross-AC decisions)
 // Input: a single AC's file list from AC research results (not layer research)
@@ -1689,7 +1670,7 @@ const intakeManifest = {
   migrationPattern,
   scopePath,
   acList,
-  files: [...new Set(validLayers.flatMap(l => layerFilePaths(l.files)))],
+  files: [...new Set(validAcResults.flatMap(r => r.files || []))],
   execution: mergeResult.execution,
   groundedReality,   // downstream workers MUST prefer this over the original ticket text
   groups,
@@ -1746,12 +1727,7 @@ const qualityLine = qualityIssues.length === 0
   : `${qualityIssues.length} issue(s) — ${qualityIssues.slice(0, 2).join('; ')}${qualityIssues.length > 2 ? '…' : ''}`
 
 const outputTokensTotal = budget.spent() - workflowStartTokens
-const estimatedCostUsd  = parseFloat(
-  Object.entries(tokensByModel).reduce((sum, [model, tokens]) => {
-    const rate = model.includes('opus') ? 75 : model.includes('haiku') ? 1.25 : 15
-    return sum + (tokens / 1_000_000) * rate
-  }, 0).toFixed(4)
-)
+const estimatedCostUsd  = _computeCost(agentCountByModel, outputTokensTotal)
 
 const statusIcon = planStatus === 'COMPLETE' ? '✅' : planStatus === 'COMPLETE_FRAMING_CORRECTED' ? '✅' : planStatus === 'COMPLETE_WITH_STUBS' ? '⚠️' : '⚠️'
 
@@ -1765,8 +1741,7 @@ const agentMetricsLines = Object.entries(agentCountByModel)
   .filter(([,c]) => c > 0)
   .map(([m, c]) => {
     const label = m.includes('opus') ? 'opus  ' : m.includes('haiku') ? 'haiku ' : 'sonnet'
-    const tok = (tokensByModel[m] || 0).toLocaleString()
-    return `    ${label}  (×${c})  ${tok} tok`
+    return `    ${label}  (×${c})`
   }).join('\n')
 
 // groundedReality block — shows what research overrode vs. what the ticket claimed

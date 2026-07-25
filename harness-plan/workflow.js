@@ -40,15 +40,12 @@ const _startTsPromise = agent(
 ).then(r => { _workflowStartTs = r?.ms || null }).catch(() => {})
 
 const workflowStartTokens = budget.spent()
-const tokensByModel = {}
 const agentCountByModel = {}
 const agentCountByPhase = {}
 
 async function trackedAgent(prompt, opts) {
-  const before = budget.spent()
   const result = await agent(prompt, opts)
   const m = opts.model || researcherModel
-  tokensByModel[m] = (tokensByModel[m] || 0) + (budget.spent() - before)
   agentCountByModel[m] = (agentCountByModel[m] || 0) + 1
   const p = opts.phase || 'unknown'
   agentCountByPhase[p] = (agentCountByPhase[p] || 0) + 1
@@ -64,12 +61,6 @@ let _telemetryPath = null
 
 async function writeAuditRecord(status, extra = {}) {
   const outputTokensTotal = budget.spent() - workflowStartTokens
-  const estimatedCostUsd = parseFloat(
-    Object.entries(tokensByModel).reduce((sum, [model, tokens]) => {
-      const rate = model.includes('opus') ? 75 : model.includes('haiku') ? 1.25 : 15
-      return sum + (tokens / 1_000_000) * rate
-    }, 0).toFixed(4)
-  )
   await _startTsPromise  // ensure start timestamp resolved before computing delta
   const [durationMs, skillsCommit, runTs] = await Promise.all([
     agent(
@@ -113,11 +104,8 @@ async function writeAuditRecord(status, extra = {}) {
     repoPath: repoPath || null,
     branch: null,
     durationMs,
-    subagentTokens: null,   // patched by skill after Workflow() returns
-    estimatedCostUsd,       // approximate — tokensByModel racing on parallel runs; use as rough signal only
     agentCountByModel,
     agentCountByPhase,
-    avgTokensPerAgent: outputTokensTotal > 0 ? Math.round(outputTokensTotal / Math.max(1, Object.values(agentCountByModel).reduce((a,b)=>a+b,0))) : null,
     outputTokensTotal,
     ...extra,
   })
@@ -197,6 +185,27 @@ const _PLAN_OUTCOME_MAP = {
   FAILED:             'failed',
 }
 function toOutcome(status) { return _PLAN_OUTCOME_MAP[status] ?? 'failed' }
+// lib/cost.js — keep identical. Rates from https://platform.claude.com/docs/en/about-claude/pricing (2026-07-24)
+// Haiku 4.5: $1.00/$5.00 per MTok in/out | Sonnet 4.x: $3.00/$15.00 | Opus 4.5+: $5.00/$25.00
+const _COST_RATES = {
+  haiku:  { in: 1.00, out: 5.00  },
+  sonnet: { in: 3.00, out: 15.00 },
+  opus:   { in: 5.00, out: 25.00 },
+}
+function _rateFor(model) {
+  const m = String(model)
+  if (m.includes('opus'))  return _COST_RATES.opus
+  if (m.includes('haiku')) return _COST_RATES.haiku
+  return _COST_RATES.sonnet
+}
+function _computeCost(agentCountByModel, outputTokensTotal) {
+  const entries = Object.entries(agentCountByModel)
+  if (!entries.length || !outputTokensTotal) return 0
+  const totalAgents = entries.reduce((s, [, c]) => s + c, 0)
+  if (!totalAgents) return 0
+  const blendedRate = entries.reduce((s, [m, c]) => s + _rateFor(m).out * (c / totalAgents), 0)
+  return parseFloat(((outputTokensTotal / 1_000_000) * blendedRate).toFixed(4))
+}
 // ===== END PURE =====
 
 // ─── Manifest contract ────────────────────────────────────────────────────────
@@ -543,12 +552,7 @@ Return { written: true }`,
 
   trackPhase('Debrief')
   const xsTokensTotal = budget.spent() - workflowStartTokens
-  const xsCostUsd = parseFloat(
-    Object.entries(tokensByModel).reduce((sum, [model, tokens]) => {
-      const rate = model.includes('opus') ? 75 : model.includes('haiku') ? 1.25 : 15
-      return sum + (tokens / 1_000_000) * rate
-    }, 0).toFixed(4)
-  )
+  const xsCostUsd = _computeCost(agentCountByModel, xsTokensTotal)  // display only — not written to audit log
   await writeAuditRecord('COMPLETE', {
     planSlug,
     manifestPath: `docs/plans/${manifestName}`,
@@ -585,7 +589,6 @@ harness-plan
     planCount: 1,
     taskCount: 1,
     qualityIssues: [],
-    estimatedCostUsd: xsCostUsd,
     status: 'COMPLETE',
     cliSummary: xsCliSummary,
   }
@@ -1393,11 +1396,8 @@ const allConstraints = validConcernResults.flatMap(r => r.research.constraints)
 const totalRevisions = validConcernResults.reduce((s, r) => s + (r.revisionRound || 0), 0)
 const totalCoverageRounds = validConcernResults.reduce((s, r) => s + (r.coverageRound || 0), 0)
 
-const outputCostUsd = Object.entries(tokensByModel).reduce((sum, [model, tokens]) => {
-  const rate = model.includes('opus') ? 75 : model.includes('haiku') ? 1.25 : 15
-  return sum + (tokens / 1_000_000) * rate
-}, 0)
-const estimatedCostUsd = parseFloat((outputCostUsd * 2.5).toFixed(4))
+const outputTokensTotal = budget.spent() - workflowStartTokens
+const estimatedCostUsd = _computeCost(agentCountByModel, outputTokensTotal)
 
 // Quality check — inline, no agent
 const qualityIssues = []
@@ -1467,7 +1467,6 @@ await writeAuditRecord(planStatus, {
   architectRevisions: totalRevisions,
   coverageRounds: totalCoverageRounds,
   size,
-  costNote: 'estimated total: output cost × 2.5 (input tokens not tracked). Verify on Anthropic usage dashboard.',
 })
 auditWritten = true
 
@@ -1492,8 +1491,7 @@ const agentMetricsLines = Object.entries(agentCountByModel)
   .filter(([,c]) => c > 0)
   .map(([m, c]) => {
     const label = m.includes('opus') ? 'opus  ' : m.includes('haiku') ? 'haiku ' : 'sonnet'
-    const tok = (tokensByModel[m] || 0).toLocaleString()
-    return `    ${label}  (×${c})  ${tok} tok`
+    return `    ${label}  (×${c})`
   }).join('\n')
 
 const cliSummary = `

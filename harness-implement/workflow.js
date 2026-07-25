@@ -32,15 +32,12 @@ const _startTsPromise = agent(
 ).then(r => { _workflowStartTs = r?.ms || null }).catch(() => {})
 
 const workflowStartTokens = budget.spent()
-const tokensByModel = { haiku: 0, sonnet: 0, opus: 0 }
-const agentCountByModel = { haiku: 0, sonnet: 0, opus: 0 }
+const agentCountByModel = {}
 const agentCountByPhase = {}
 
 async function trackedAgent(prompt, opts) {
-  const before = budget.spent()
   const result = await agent(prompt, opts)
-  const m = opts.model || 'sonnet'
-  tokensByModel[m] = (tokensByModel[m] || 0) + (budget.spent() - before)
+  const m = opts.model || 'anthropic.claude-sonnet-4-6'
   agentCountByModel[m] = (agentCountByModel[m] || 0) + 1
   const p = opts.phase || 'unknown'
   agentCountByPhase[p] = (agentCountByPhase[p] || 0) + 1
@@ -80,6 +77,27 @@ const _IMPL_OUTCOME_MAP = {
   FAILED:   'failed',
 }
 function toOutcome(status) { return _IMPL_OUTCOME_MAP[status] ?? 'failed' }
+// lib/cost.js — keep identical. Rates from https://platform.claude.com/docs/en/about-claude/pricing (2026-07-24)
+// Haiku 4.5: $1.00/$5.00 per MTok in/out | Sonnet 4.x: $3.00/$15.00 | Opus 4.5+: $5.00/$25.00
+const _COST_RATES = {
+  haiku:  { in: 1.00, out: 5.00  },
+  sonnet: { in: 3.00, out: 15.00 },
+  opus:   { in: 5.00, out: 25.00 },
+}
+function _rateFor(model) {
+  const m = String(model)
+  if (m.includes('opus'))  return _COST_RATES.opus
+  if (m.includes('haiku')) return _COST_RATES.haiku
+  return _COST_RATES.sonnet
+}
+function _computeCost(agentCountByModel, outputTokensTotal) {
+  const entries = Object.entries(agentCountByModel)
+  if (!entries.length || !outputTokensTotal) return 0
+  const totalAgents = entries.reduce((s, [, c]) => s + c, 0)
+  if (!totalAgents) return 0
+  const blendedRate = entries.reduce((s, [m, c]) => s + _rateFor(m).out * (c / totalAgents), 0)
+  return parseFloat(((outputTokensTotal / 1_000_000) * blendedRate).toFixed(4))
+}
 // ===== END PURE =====
 
 // telemetryPath is set on first writeAuditRecord call, then reused for the Debrief write.
@@ -87,12 +105,6 @@ let _telemetryPath = null
 
 async function writeAuditRecord(status, extra = {}) {
   const outputTokensTotal = budget.spent() - workflowStartTokens
-  const estimatedCostUsd = parseFloat(
-    Object.entries(tokensByModel).reduce((sum, [model, tokens]) => {
-      const rate = model.includes('opus') ? 75 : model.includes('haiku') ? 1.25 : 15
-      return sum + (tokens / 1_000_000) * rate
-    }, 0).toFixed(4)
-  )
   await _startTsPromise  // ensure start timestamp resolved before computing delta
   const [durationMs, skillsCommit, runTs] = await Promise.all([
     agent(
@@ -131,11 +143,8 @@ async function writeAuditRecord(status, extra = {}) {
     branch: null,
     planPath: args.planPath || 'unknown',
     durationMs,
-    subagentTokens: null,   // patched by skill after Workflow() returns
-    estimatedCostUsd,       // approximate — tokensByModel racing on parallel runs; use as rough signal only
     agentCountByModel,
     agentCountByPhase,
-    avgTokensPerAgent: outputTokensTotal > 0 ? Math.round(outputTokensTotal / Math.max(1, Object.values(agentCountByModel).reduce((a,b)=>a+b,0))) : null,
     outputTokensTotal,
     ...extra,
   })
@@ -641,7 +650,6 @@ ${dr.diffText}`,
     )
     return { ...dr, codeReview }
   }))
-  tokensByModel.haiku += budget.spent() - reviewBlockStart
 
   // Partition: NEEDS_CONTEXT is blocked; everything else is passed
   const passed = [], needsContext = []
@@ -839,8 +847,6 @@ Return SCOPE_DRIFT_SCHEMA.`,
     )
   },
 ])
-tokensByModel.haiku  += Math.round((budget.spent() - reviewBlockStart) * 0.4)
-tokensByModel.sonnet += Math.round((budget.spent() - reviewBlockStart) * 0.6)
 
 // Merge all chunk findings into one list
 const allChunkFindings = (chunkReviews || []).filter(Boolean).flatMap(r => r.findings || [])
@@ -865,7 +871,6 @@ Touch ONLY this file. Minimal change. Return under 100 words with file:line.`,
       { label: `fix-${(item.file || '').replace(/[^a-z0-9]/gi, '-').slice(-20)}`, phase: 'Review', model: 'sonnet', effort: 'high', agentType: 'hi-developer' }
     )
   ))).filter(Boolean)
-  tokensByModel.sonnet += budget.spent() - fixBlockStart
 
   if (fixReports.length > 0) {
     await trackedAgent(
@@ -1059,13 +1064,7 @@ const runStatus = !allTasksDone && implementationReports.length === 0
     : 'COMPLETE'
 
 const outputTokensTotal = budget.spent() - workflowStartTokens
-const sonnetCost = (tokensByModel.sonnet / 1_000_000) * 15
-const haikuCost  = (tokensByModel.haiku  / 1_000_000) * 1.25
-const opusCost   = (tokensByModel.opus   / 1_000_000) * 75
-const outputCostUsd = sonnetCost + haikuCost + opusCost
-// Input tokens not tracked; apply 2.5x multiplier as mid-range estimate
-// (input rates ~1/5 output rates, typical input volume ~4-6x output tokens)
-const estimatedCostUsd = parseFloat((outputCostUsd * 2.5).toFixed(4))
+const estimatedCostUsd = _computeCost(agentCountByModel, outputTokensTotal)
 
 const auditRecord = JSON.stringify({
   ts: args.today || 'unknown',
@@ -1090,10 +1089,8 @@ const auditRecord = JSON.stringify({
     unplannedFileCount: unplannedFiles.length,
     suggestedTickets: scopeDriftResult?.suggestedTickets || [],
   },
-  outputTokensByModel: tokensByModel,
+  agentCountByModel,
   outputTokensTotal,
-  estimatedCostUsd,
-  costNote: 'estimated total: output cost × 2.5 (input tokens not tracked; input rates ~1/5 of output rates, typical input volume ~4-6x output). Verify on Anthropic usage dashboard.',
   blockedDetails: blocked.map(r => ({ id: r.task.id, reason: r.handoff?.caveats || 'NEEDS_CONTEXT' })),
   recommendations: [
     'plan quality: no redispatches — descriptions are self-contained',
@@ -1141,10 +1138,6 @@ const secIcon   = securityResult?.status === 'PASS' ? '✅' : securityResult?.st
 const crFindings = (codeReviewResult?.findings || []).length
 const crIcon    = criticalFindings.length > 0 ? '❌' : crFindings > 0 ? '⚠️' : '✅'
 
-const tokenSonnet = tokensByModel.sonnet || 0
-const tokenHaiku  = tokensByModel.haiku  || 0
-const tokenOpus   = tokensByModel.opus   || 0
-
 const planSlugForDisplay = (() => {
   const m = (args.planPath || '').match(/\b([A-Z]+-\d+)\b/)
   if (m) return m[1]
@@ -1156,8 +1149,7 @@ const agentMetricsLines = Object.entries(agentCountByModel)
   .filter(([,c]) => c > 0)
   .map(([m, c]) => {
     const label = m.includes('opus') ? 'opus  ' : m.includes('haiku') ? 'haiku ' : 'sonnet'
-    const tok = (tokensByModel[m] || 0).toLocaleString()
-    return `    ${label}  (×${c})  ${tok} tok`
+    return `    ${label}  (×${c})`
   }).join('\n')
 const implSize = planData?.tasks?.length <= 2 ? 'XS' : planData?.tasks?.length <= 5 ? 'S' : planData?.tasks?.length <= 10 ? 'M' : 'L'
 
