@@ -128,7 +128,8 @@ async function writeAuditRecord(status, extra = {}) {
   }
   const record = JSON.stringify(recordObj)
   const b64 = btoa(unescape(encodeURIComponent(record)))
-  const telemetryCmd = `mkdir -p "$(dirname '${_telemetryPath}')" && printf '%s\\n' "$(echo '${b64}' | base64 -d)" >> '${_telemetryPath}'`
+  const tmp = `/tmp/har_audit_${args.runTs || 'plan'}.b64`
+  const telemetryCmd = `printf '%s' '${b64}' > '${tmp}' && mkdir -p "$(dirname '${_telemetryPath}')" && base64 -d '${tmp}' >> '${_telemetryPath}' && printf '\\n' >> '${_telemetryPath}' && rm -f '${tmp}'`
   await agent(
     `Append an audit record to a JSONL file. Use the Bash tool only.\n${telemetryCmd}\nReturn { appended: true }.`,
     { label: 'audit-write', phase: 'Debrief', model: haikuModel, effort: 'low',

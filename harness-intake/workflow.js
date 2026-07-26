@@ -101,8 +101,11 @@ function _buildTelemetryPath({ repoPath, skill, issueKey, rawText, timestamp }) 
   return `${teleDir}/v2/${repo}__${skill}__${key}__${ts}.jsonl`
 }
 function _buildAppendCmd(path, jsonLine) {
+  // Write b64 to a temp file so the payload never passes through agent prompt text.
+  // Passing 20-30k of base64 inline in the prompt causes model truncation/corruption.
   const b64 = btoa(unescape(encodeURIComponent(jsonLine)))
-  return `mkdir -p "$(dirname '${path}')" && printf '%s\\n' "$(echo '${b64}' | base64 -d)" >> '${path}'`
+  const tmp = `/tmp/har_audit_${Date.now()}.b64`
+  return `printf '%s' '${b64}' > '${tmp}' && mkdir -p "$(dirname '${path}')" && base64 -d '${tmp}' >> '${path}' && printf '\\n' >> '${path}' && rm -f '${tmp}'`
 }
 const _TEST_FILE_RE = /\.(test|spec)\.[jt]sx?$/
 function _ejectTestFiles(subtasks, issueKey, scopePath) {
