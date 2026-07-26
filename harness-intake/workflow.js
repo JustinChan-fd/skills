@@ -101,7 +101,7 @@ function _buildTelemetryPath({ repoPath, skill, issueKey, rawText, timestamp }) 
   return `${teleDir}/v2/${repo}__${skill}__${key}__${ts}.jsonl`
 }
 function _buildAppendCmd(path, jsonLine) {
-  const b64 = Buffer.from(jsonLine).toString('base64')
+  const b64 = btoa(unescape(encodeURIComponent(jsonLine)))
   return `mkdir -p "$(dirname '${path}')" && printf '%s\\n' "$(echo '${b64}' | base64 -d)" >> '${path}'`
 }
 const _TEST_FILE_RE = /\.(test|spec)\.[jt]sx?$/

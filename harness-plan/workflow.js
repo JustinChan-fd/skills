@@ -127,7 +127,7 @@ async function writeAuditRecord(status, extra = {}) {
     _telemetryPath = `${homeDir}/Desktop/Repos/harness-telemetry/v2/${repo}__harness-plan__${issueKey}__${runTs}.jsonl`
   }
   const record = JSON.stringify(recordObj)
-  const b64 = Buffer.from(record).toString('base64')
+  const b64 = btoa(unescape(encodeURIComponent(record)))
   const telemetryCmd = `mkdir -p "$(dirname '${_telemetryPath}')" && printf '%s\\n' "$(echo '${b64}' | base64 -d)" >> '${_telemetryPath}'`
   await agent(
     `Append an audit record to a JSONL file. Use the Bash tool only.\n${telemetryCmd}\nReturn { appended: true }.`,
