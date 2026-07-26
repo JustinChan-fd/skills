@@ -100,13 +100,6 @@ function _buildTelemetryPath({ repoPath, skill, issueKey, rawText, timestamp }) 
   const teleDir = `${homeDir}/Desktop/Repos/harness-telemetry`
   return `${teleDir}/v2/${repo}__${skill}__${key}__${ts}.jsonl`
 }
-function _buildAppendCmd(path, jsonLine) {
-  // Write b64 to a temp file so the payload never passes through agent prompt text.
-  // Passing 20-30k of base64 inline in the prompt causes model truncation/corruption.
-  const b64 = btoa(unescape(encodeURIComponent(jsonLine)))
-  const tmp = `/tmp/har_audit_${Date.now()}.b64`
-  return `printf '%s' '${b64}' > '${tmp}' && mkdir -p "$(dirname '${path}')" && base64 -d '${tmp}' >> '${path}' && printf '\\n' >> '${path}' && rm -f '${tmp}'`
-}
 const _TEST_FILE_RE = /\.(test|spec)\.[jt]sx?$/
 function _ejectTestFiles(subtasks, issueKey, scopePath) {
   const ejected = []
@@ -422,24 +415,13 @@ function _computeCostV2({ agentCountByModel, inputTokens, outputTokensTotal }) {
 }
 
 // Record schema: skills/harness-telemetry-schema/telemetry-v2.jsonc
-async function writeAuditRecord(status, extra = {}) {
-  const recordObj = _buildV2Record(status, extra)
+// Returns the record object — writing to disk is done by the SKILL.md wrapper after Workflow() returns.
+function _buildAuditRecord(status, extra = {}) {
   if (!_telemetryPath) {
     const runTs = args.runTs || 'unknown-ts'
     _telemetryPath = _buildTelemetryPath({ repoPath, skill: 'harness-intake', issueKey, rawText: input, timestamp: runTs })
   }
-  const record = JSON.stringify(recordObj)
-  const telemetryCmd = _buildAppendCmd(_telemetryPath, record)
-  await agent(
-    `Append an audit record to a JSONL file. Use the Bash tool only.\n${telemetryCmd}\nReturn { appended: true }.`,
-    {
-      label: 'audit-write',
-      phase: 'Debrief',
-      model: haikuModel,
-      effort: 'low',
-      schema: { type: 'object', required: ['appended'], properties: { appended: { type: 'boolean' } } },
-    }
-  )
+  return _buildV2Record(status, extra)
 }
 
 const opusModel   = 'claude-opus-4-8'
@@ -1067,7 +1049,7 @@ harness-intake
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`
 
   auditWritten = true
-  await writeAuditRecord('COMPLETE', {
+  const auditRecord = _buildAuditRecord('COMPLETE', {
     size,
     workType,
     acCount: acList.length,
@@ -1084,6 +1066,7 @@ harness-intake
     intakeManifest,
     cliSummary: skipSummary,
     telemetryPath: _telemetryPath,
+    auditRecord,
     outputTokensTotal,
     agentCountByModel,
   }
@@ -1742,7 +1725,7 @@ const planStatus =
   : 'COMPLETE'
 
 auditWritten = true
-await writeAuditRecord(planStatus, {
+const auditRecord = _buildAuditRecord(planStatus, {
   size,
   ticketType: workType,
   migrationPattern,
@@ -1849,24 +1832,23 @@ return {
   status: planStatus,
   cliSummary,
   telemetryPath: _telemetryPath,
+  auditRecord,
   outputTokensTotal,
   agentCountByModel,
 }
 
 } catch (err) {
-  if (!auditWritten) {
-    const isKilled = err.message?.includes('abort') || err.message?.includes('cancel') || err.message?.includes('interrupt')
-    const crashStatus = isKilled
-      ? 'CRASHED'
-      : ['Research', 'Split Design', 'Verify', 'Debrief'].includes(currentPhase) ? 'PROPOSED_WITH_GAPS' : 'FAILED'
-    await writeAuditRecord(crashStatus, {
-      sourceIssue: issueKey || null,
-      failedAtPhase: currentPhase,
-      error: err.message || String(err),
-      size: partialState.size || null,
-      qualityIssues: [],
-      subtaskCount: 0,
-    }).catch(() => {})
-  }
-  throw err
+  const isKilled = err.message?.includes('abort') || err.message?.includes('cancel') || err.message?.includes('interrupt')
+  const crashStatus = isKilled
+    ? 'CRASHED'
+    : ['Research', 'Split Design', 'Verify', 'Debrief'].includes(currentPhase) ? 'PROPOSED_WITH_GAPS' : 'FAILED'
+  const crashAuditRecord = auditWritten ? null : _buildAuditRecord(crashStatus, {
+    sourceIssue: issueKey || null,
+    failedAtPhase: currentPhase,
+    error: err.message || String(err),
+    size: partialState.size || null,
+    qualityIssues: [],
+    subtaskCount: 0,
+  })
+  throw Object.assign(err, { telemetryPath: _telemetryPath, auditRecord: crashAuditRecord })
 }

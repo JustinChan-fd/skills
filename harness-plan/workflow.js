@@ -117,8 +117,8 @@ function _computeCostV2({ agentCountByModel, inputTokens, outputTokensTotal }) {
 }
 
 // Record schema: skills/harness-telemetry-schema/telemetry-v2.jsonc
-async function writeAuditRecord(status, extra = {}) {
-  const recordObj = _buildV2Record(status, extra)
+const _pendingAuditRecords = []
+function _buildAuditRecord(status, extra = {}) {
   if (!_telemetryPath) {
     const repo = (repoPath || '').replace(/\/$/, '').split('/').pop() || 'unknown-repo'
     const issueKey = (input || '').match(/\b([A-Z]+-\d+)\b/)?.[1] || manifestEntry?.jiraKey || _slugFromInput(input)
@@ -126,17 +126,12 @@ async function writeAuditRecord(status, extra = {}) {
     const runTs = args.runTs || 'unknown-ts'
     _telemetryPath = `${homeDir}/Desktop/Repos/harness-telemetry/v2/${repo}__harness-plan__${issueKey}__${runTs}.jsonl`
   }
-  const record = JSON.stringify(recordObj)
-  const b64 = btoa(unescape(encodeURIComponent(record)))
-  const tmp = `/tmp/har_audit_${args.runTs || 'plan'}.b64`
-  const telemetryCmd = `printf '%s' '${b64}' > '${tmp}' && mkdir -p "$(dirname '${_telemetryPath}')" && base64 -d '${tmp}' >> '${_telemetryPath}' && printf '\\n' >> '${_telemetryPath}' && rm -f '${tmp}'`
-  await agent(
-    `Append an audit record to a JSONL file. Use the Bash tool only.\n${telemetryCmd}\nReturn { appended: true }.`,
-    { label: 'audit-write', phase: 'Debrief', model: haikuModel, effort: 'low',
-      schema: { type: 'object', required: ['appended'], properties: { appended: { type: 'boolean' } } },
-    }
-  )
+  const record = _buildV2Record(status, extra)
+  _pendingAuditRecords.push(record)
+  return record
 }
+// kept for barrier call-sites that use await syntax — now synchronous
+function writeAuditRecord(status, extra = {}) { return Promise.resolve(_buildAuditRecord(status, extra)) }
 
 // ─── Model tier allocation ────────────────────────────────────────────────────
 //
@@ -559,7 +554,7 @@ Return { written: true }`,
   trackPhase('Debrief')
   const xsTokensTotal = budget.spent() - workflowStartTokens
   const xsCostUsd = _computeCostV2({ agentCountByModel, inputTokens: null, outputTokensTotal: xsTokensTotal }).rateLockedUsd  // display only — not written to audit log
-  await writeAuditRecord('COMPLETE', {
+  _buildAuditRecord('COMPLETE', {
     planSlug,
     manifestPath: `docs/manifests/${manifestName}`,
     planCount: 1,
@@ -597,6 +592,10 @@ harness-plan
     qualityIssues: [],
     status: 'COMPLETE',
     cliSummary: xsCliSummary,
+    telemetryPath: _telemetryPath,
+    auditRecords: [..._pendingAuditRecords],
+    outputTokensTotal: budget.spent() - workflowStartTokens,
+    agentCountByModel,
   }
 }
 
@@ -1461,7 +1460,7 @@ if (planEntries.length < researchConcerns.length) {
 const commitOk = !verifyResult || (verifyResult.allFilesPresent && verifyResult.allJsonValid)
 const planStatus = (qualityIssues.length === 0 && commitOk) ? 'COMPLETE' : 'PROPOSED_WITH_GAPS'
 
-await writeAuditRecord(planStatus, {
+_buildAuditRecord(planStatus, {
   planSlug,
   manifestPath: `docs/manifests/${manifestName}`,
   planCount: planEntries.length,
@@ -1530,6 +1529,7 @@ return {
   status: planStatus,
   cliSummary,
   telemetryPath: _telemetryPath,
+  auditRecords: [..._pendingAuditRecords],
   outputTokensTotal: budget.spent() - workflowStartTokens,
   agentCountByModel,
 }
@@ -1540,7 +1540,7 @@ return {
     const crashStatus = isKilled
       ? 'CRASHED'
       : ['Research', 'Architect', 'Synthesize', 'Coverage', 'Return', 'Debrief'].includes(currentPhase) ? 'PROPOSED_WITH_GAPS' : 'FAILED'
-    await writeAuditRecord(crashStatus, {
+    _buildAuditRecord(crashStatus, {
       planSlug: (args.slug || (input || '').match(/\b([A-Z]+-\d+)\b/)?.[1]?.toLowerCase() || 'unknown'),
       failedAtPhase: currentPhase,
       error: err.message || String(err),
@@ -1549,7 +1549,7 @@ return {
       qualityIssues: [],
       architectRevisions: 0,
       coverageRounds: 0,
-    }).catch(() => {})
+    })
   }
-  throw err
+  throw Object.assign(err, { telemetryPath: _telemetryPath, auditRecords: [..._pendingAuditRecords] })
 }

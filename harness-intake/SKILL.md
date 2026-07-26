@@ -88,7 +88,7 @@ Build `input` as `${summary}\n\n${description}`. For freeform prompts, use the p
 
 ### 4. Run the workflow
 
-Run the workflow. All metadata (runId, skillsCommit, timestamps) is captured here — the workflow receives them as args and emits them verbatim. After completion, patch the telemetry file with `subagentTokens` and `inputTokens` so cost can be computed accurately. `usage.subagent_tokens` is in the `<usage>` block of the Workflow completion notification.
+Run the workflow. All metadata (runId, skillsCommit, timestamps) is captured here — the workflow receives them as args and emits them verbatim. After completion, write the audit record to disk (the workflow returns it as a plain JS object — no shell escaping involved) then patch with subagentTokens/durationMs. `usage.subagent_tokens` is in the `<usage>` block of the Workflow completion notification.
 
 ```js
 // Capture everything before Workflow() — Date.now() is unavailable inside workflow scripts.
@@ -100,9 +100,23 @@ const [startTs, skillsCommit, runTs] = await Promise.all([
 // runId: unique per logical run — shared with harness-plan and harness-implement so all 3 records link together.
 const runId = `${issueKey || 'intake'}-${runTs}`
 
-// Helper: patch fields into the last JSONL line of the telemetry file.
-// Supports dot-notation keys for nested paths (e.g. "tokens.total.input").
-// Wrapped in try/catch — no-op if the file doesn't exist yet (early crash).
+// Write an audit record object (plain JS, from workflow result) as a JSONL line.
+// No shell escaping needed — JSON.stringify goes to Python via sys.argv, not shell interpolation.
+const writeAuditTelemetry = async (path, record) => {
+  if (!path || !record) return
+  try {
+    const line = JSON.stringify(record).replace(/'/g, "'\\''")
+    await Bash(`python3 -c "
+import json, sys, os
+path, line = sys.argv[1], sys.argv[2]
+os.makedirs(os.path.dirname(path), exist_ok=True)
+with open(path, 'a') as f:
+    f.write(line + '\\n')
+" "${path}" '${line}'`)
+  } catch (_) {}
+}
+
+// Patch fields into the last JSONL line (used for subagentTokens/durationMs after Workflow returns).
 const patchTelemetryRecord = async (path, fields) => {
   try {
     const fieldJson = JSON.stringify(fields).replace(/'/g, "'\\''")
@@ -131,7 +145,7 @@ if lines:
         else:
             last[k] = v
     lines[-1] = json.dumps(last)
-    open(path, 'w').writelines([l + ('\\\n' if not l.endswith('\\\n') else '') for l in lines])
+    open(path, 'w').writelines([l + ('\\n' if not l.endswith('\\n') else '') for l in lines])
 " "${path}" '${fieldJson}'`)
   } catch (_) {}
 }
@@ -153,6 +167,9 @@ try {
     },
   })
 
+  // Write audit record — workflow returns it as a plain object, no shell escaping needed.
+  await writeAuditTelemetry(result?.telemetryPath, result?.auditRecord)
+
   // Compute wall-clock duration and token breakdown after Workflow() returns.
   const endTs = parseInt(await Bash('python3 -c "import time; print(int(time.time()*1000))"').then(r => r.trim()), 10)
   const durationMs = endTs - parseInt(startTs, 10)
@@ -166,8 +183,6 @@ try {
     : null
 
   if (result?.telemetryPath) {
-    // Recompute cost with full input+output for accuracy.
-    // Use inline blended-rate formula matching lib/cost.js (import() unavailable in skills).
     let recomputedCost = null
     if (inputTokens != null && outputTokensTotal != null && result?.agentCountByModel) {
       const entries = Object.entries(result.agentCountByModel)
@@ -189,12 +204,12 @@ try {
   }
 
 } catch (err) {
-  // Workflow failed or was cancelled. The workflow's internal catch already wrote
-  // a CRASHED/FAILED audit record. Patch subagentTokens into it if available —
-  // on cancellation the <usage> block still appears in the notification.
+  // Workflow crashed — it attaches telemetryPath + auditRecord to the error object.
+  // Write the crash record before re-throwing so the dashboard always has an entry.
   const subagentTokens = <usage.subagent_tokens from completion notification, or null if absent>
-  if (subagentTokens && result?.telemetryPath) {
-    await patchTelemetryRecord(result.telemetryPath, { subagentTokens })
+  await writeAuditTelemetry(err.telemetryPath, err.auditRecord)
+  if (subagentTokens && err.telemetryPath) {
+    await patchTelemetryRecord(err.telemetryPath, { 'tokens.total.subagentTokens': subagentTokens })
   }
   throw err
 }

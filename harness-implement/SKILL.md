@@ -64,15 +64,21 @@ const [startTs, skillsCommit, runTs] = await Promise.all([
 const issueKey = planPath.match(/[A-Z]+-\d+/)?.[0] || 'impl'
 const runId = `${issueKey}-${runTs}`
 
-const result = await Workflow({
-  scriptPath: '/Users/206618626@bwt3.com/.claude/skills/harness-implement/workflow.js',
-  args: { planPath, repoPath, today: currentDate, baseBranch, startTs, runId, runTs, skillsCommit },
-})
-// currentDate is injected into every session — it is always available, never guess or hardcode it
-// baseBranch: the branch name the user selected (no "origin/" prefix)
+// Write audit record — workflow returns it as a plain object, no shell escaping needed.
+const writeAuditTelemetry = async (path, record) => {
+  if (!path || !record) return
+  try {
+    const line = JSON.stringify(record).replace(/'/g, "'\\''")
+    await Bash(`python3 -c "
+import json, sys, os
+path, line = sys.argv[1], sys.argv[2]
+os.makedirs(os.path.dirname(path), exist_ok=True)
+with open(path, 'a') as f:
+    f.write(line + '\\n')
+" "${path}" '${line}'`)
+  } catch (_) {}
+}
 
-// Patch telemetry file with token counts and duration after Workflow() returns.
-// Supports dot-notation keys for nested v2 paths (e.g. "tokens.total.input").
 const patchTelemetryRecord = async (path, fields) => {
   try {
     const fieldJson = JSON.stringify(fields).replace(/'/g, "'\\''")
@@ -101,36 +107,56 @@ if lines:
         else:
             last[k] = v
     lines[-1] = json.dumps(last)
-    open(path, 'w').writelines([l + ('\\\n' if not l.endswith('\\\n') else '') for l in lines])
+    open(path, 'w').writelines([l + ('\\n' if not l.endswith('\\n') else '') for l in lines])
 " "${path}" '${fieldJson}'`)
   } catch (_) {}
 }
 
-const endTs = parseInt(await Bash('python3 -c "import time; print(int(time.time()*1000))"').then(r => r.trim()), 10)
-const durationMs = endTs - parseInt(startTs, 10)
-const subagentTokens = <usage.subagent_tokens from completion notification>
-const outputTokensTotal = result?.outputTokensTotal ?? null
-const inputTokens = (subagentTokens != null && outputTokensTotal != null) ? subagentTokens - outputTokensTotal : null
-
-let recomputedCost = null
-if (inputTokens != null && outputTokensTotal != null && result?.agentCountByModel) {
-  const entries = Object.entries(result.agentCountByModel)
-  const totalAgents = entries.reduce((s, [, c]) => s + c, 0)
-  if (totalAgents > 0) {
-    const rate = m => m.includes('opus') ? {in:5,out:25} : m.includes('haiku') ? {in:1,out:5} : {in:3,out:15}
-    const bIn  = entries.reduce((s,[m,c]) => s + rate(m).in  * (c/totalAgents), 0)
-    const bOut = entries.reduce((s,[m,c]) => s + rate(m).out * (c/totalAgents), 0)
-    recomputedCost = parseFloat(((inputTokens/1e6)*bIn + (outputTokensTotal/1e6)*bOut).toFixed(4))
-  }
-}
-if (result?.telemetryPath) {
-  await patchTelemetryRecord(result.telemetryPath, {
-    durationMs,
-    'tokens.total.subagentTokens': subagentTokens,
-    'tokens.total.input': inputTokens,
-    ...(recomputedCost != null ? { 'cost.rateLockedUsd': recomputedCost } : {}),
-    ...(inputTokens != null ? { 'cost.nullReasons.tokens.total.input': null } : {}),
+let result
+try {
+  result = await Workflow({
+    scriptPath: '/Users/206618626@bwt3.com/.claude/skills/harness-implement/workflow.js',
+    args: { planPath, repoPath, today: currentDate, baseBranch, startTs, runId, runTs, skillsCommit },
   })
+  // currentDate is injected into every session — it is always available, never guess or hardcode it
+  // baseBranch: the branch name the user selected (no "origin/" prefix)
+
+  await writeAuditTelemetry(result?.telemetryPath, result?.auditRecord)
+
+  const endTs = parseInt(await Bash('python3 -c "import time; print(int(time.time()*1000))"').then(r => r.trim()), 10)
+  const durationMs = endTs - parseInt(startTs, 10)
+  const subagentTokens = <usage.subagent_tokens from completion notification>
+  const outputTokensTotal = result?.outputTokensTotal ?? null
+  const inputTokens = (subagentTokens != null && outputTokensTotal != null) ? subagentTokens - outputTokensTotal : null
+
+  let recomputedCost = null
+  if (inputTokens != null && outputTokensTotal != null && result?.agentCountByModel) {
+    const entries = Object.entries(result.agentCountByModel)
+    const totalAgents = entries.reduce((s, [, c]) => s + c, 0)
+    if (totalAgents > 0) {
+      const rate = m => m.includes('opus') ? {in:5,out:25} : m.includes('haiku') ? {in:1,out:5} : {in:3,out:15}
+      const bIn  = entries.reduce((s,[m,c]) => s + rate(m).in  * (c/totalAgents), 0)
+      const bOut = entries.reduce((s,[m,c]) => s + rate(m).out * (c/totalAgents), 0)
+      recomputedCost = parseFloat(((inputTokens/1e6)*bIn + (outputTokensTotal/1e6)*bOut).toFixed(4))
+    }
+  }
+  if (result?.telemetryPath) {
+    await patchTelemetryRecord(result.telemetryPath, {
+      durationMs,
+      'tokens.total.subagentTokens': subagentTokens,
+      'tokens.total.input': inputTokens,
+      ...(recomputedCost != null ? { 'cost.rateLockedUsd': recomputedCost } : {}),
+      ...(inputTokens != null ? { 'cost.nullReasons.tokens.total.input': null } : {}),
+    })
+  }
+
+} catch (err) {
+  const subagentTokens = <usage.subagent_tokens from completion notification, or null if absent>
+  await writeAuditTelemetry(err.telemetryPath, err.auditRecord)
+  if (subagentTokens && err.telemetryPath) {
+    await patchTelemetryRecord(err.telemetryPath, { 'tokens.total.subagentTokens': subagentTokens })
+  }
+  throw err
 }
 ```
 

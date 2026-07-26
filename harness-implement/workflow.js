@@ -142,22 +142,12 @@ function _buildV2Record(status, extra = {}) {
 }
 
 // Record schema: skills/harness-telemetry-schema/telemetry-v2.jsonc
-async function writeAuditRecord(status, extra = {}) {
-  const recordObj = _buildV2Record(status, extra)
+function _buildAuditRecord(status, extra = {}) {
   if (!_telemetryPath) {
     const issueKey = (args.planPath || '').match(/\b([A-Z]+-\d+)\b/i)?.[1] || null
     _telemetryPath = _buildImplTelemetryPath({ repoPath: args.repoPath, issueKey, rawText: args.planPath, timestamp: args.runTs || 'unknown-ts' })
   }
-  const record = JSON.stringify(recordObj)
-  const b64 = btoa(unescape(encodeURIComponent(record)))
-  const tmp = `/tmp/har_audit_${args.runTs || 'impl'}.b64`
-  const telemetryCmd = `printf '%s' '${b64}' > '${tmp}' && mkdir -p "$(dirname '${_telemetryPath}')" && base64 -d '${tmp}' >> '${_telemetryPath}' && printf '\\n' >> '${_telemetryPath}' && rm -f '${tmp}'`
-  await agent(
-    `Append an audit record to a JSONL file. Use the Bash tool only.\n${telemetryCmd}\nReturn { appended: true }.`,
-    { label: 'audit-write', phase: 'Debrief', model: 'haiku', effort: 'low',
-      schema: { type: 'object', required: ['appended'], properties: { appended: { type: 'boolean' } } },
-    }
-  )
+  return _buildV2Record(status, extra)
 }
 
 // ─── Schemas ──────────────────────────────────────────────────────────────────
@@ -1065,7 +1055,7 @@ const runStatus = !allTasksDone && implementationReports.length === 0
     ? 'PARTIAL'
     : 'COMPLETE'
 
-await writeAuditRecord(runStatus, {
+const auditRecord = _buildAuditRecord(runStatus, {
   branch: worktreeResult.branch,
   planKey,
   tasksTotal: implementationReports.length,
@@ -1161,32 +1151,31 @@ return {
   status: runStatus.toLowerCase(),
   cliSummary,
   telemetryPath: _telemetryPath,
+  auditRecord,
   outputTokensTotal: budget.spent() - workflowStartTokens,
   agentCountByModel,
 }
 
 } catch (err) {
-  if (!auditWritten) {
-    const isKilled = err.message?.includes('abort') || err.message?.includes('cancel') || err.message?.includes('interrupt')
-    const crashStatus = isKilled
-      ? 'CRASHED'
-      : ['Implement', 'Verify', 'Review', 'Return', 'Debrief'].includes(currentPhase) ? 'PARTIAL' : 'FAILED'
-    await writeAuditRecord(crashStatus, {
-      planKey: partialState.planKey || 'unknown',
-      branch: partialState.branch || null,
-      failedAtPhase: currentPhase,
-      error: err.message || String(err),
-      tasksTotal: partialState.tasksTotal || 0,
-      tasksPassed: 0,
-      tasksBlocked: 0,
-      criticalFindings: 0,
-      codeReviewFixesApplied: 0,
-      testsPassed: null,
-      typeCheckPassed: null,
-      securityStatus: null,
-      blockedDetails: [],
-      recommendations: [`failed at phase: ${currentPhase} — ${err.message || String(err)}`],
-    }).catch(() => {})
-  }
-  throw err
+  const isKilled = err.message?.includes('abort') || err.message?.includes('cancel') || err.message?.includes('interrupt')
+  const crashStatus = isKilled
+    ? 'CRASHED'
+    : ['Implement', 'Verify', 'Review', 'Return', 'Debrief'].includes(currentPhase) ? 'PARTIAL' : 'FAILED'
+  const crashAuditRecord = auditWritten ? null : _buildAuditRecord(crashStatus, {
+    planKey: partialState.planKey || 'unknown',
+    branch: partialState.branch || null,
+    failedAtPhase: currentPhase,
+    error: err.message || String(err),
+    tasksTotal: partialState.tasksTotal || 0,
+    tasksPassed: 0,
+    tasksBlocked: 0,
+    criticalFindings: 0,
+    codeReviewFixesApplied: 0,
+    testsPassed: null,
+    typeCheckPassed: null,
+    securityStatus: null,
+    blockedDetails: [],
+    recommendations: [`failed at phase: ${currentPhase} — ${err.message || String(err)}`],
+  })
+  throw Object.assign(err, { telemetryPath: _telemetryPath, auditRecord: crashAuditRecord })
 }
