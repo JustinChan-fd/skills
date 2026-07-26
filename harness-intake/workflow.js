@@ -1032,20 +1032,10 @@ if (!splitRequired) {
 
   const skipSummary = `
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-harness-intake
-  status:  COMPLETE  ✅
+harness-intake  ✅  ${issueKey || 'unknown'}  ${size}  ${workType}${triageSizeLine ? `  ${triageSizeLine.trim()}` : ''}
+  ${acList.length} ACs${migrationPattern ? `  ·  ${migrationPattern}` : ''}  ·  quality: ✓ clean
 
-  ticket:  ${issueKey || 'unknown'}
-  size:    ${size}        cost:  ~$${estimatedCostUsd}
-  type:    ${workType}${triageSizeLine}
-
-  reason:  ${workIntelResult.reasoning}
-  ac:      ${acList.length} criteria synthesized${migrationPattern ? `  pattern: ${migrationPattern}` : ''}
-
-  quality: ✓ clean
-  next:    ${nextCmd}
-           ~/Desktop/Repos/harness-telemetry/v2/   (run-specific file)
-  tokens:  ${outputTokensTotal.toLocaleString()}  (~$${estimatedCostUsd} estimated)
+  next:  ${nextCmd}
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`
 
   auditWritten = true
@@ -1799,22 +1789,11 @@ const triageSizeLineLpath = triageSizeOverride
 
 const cliSummary = `
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-harness-intake
-  status:  ${planStatus}  ${statusIcon}
-
-  ticket:  ${issueKey || 'unknown'}
-  size:    ${size}${triageSizeLineLpath}
-  agents:  ${totalAgents}
-${agentMetricsLines}
-  cost:    ~$${estimatedCostUsd}
-${conflictLines}${groundedRealityLines}
-
-  subtasks: ${mergeResult.subtasks.length} proposed    execution: ${mergeResult.execution}
+harness-intake  ${statusIcon}  ${issueKey || 'unknown'}  ${size}  ${workType}${triageSizeLineLpath ? `  ·  ${triageSizeLineLpath.trim()}` : ''}${conflictLines ? `\n  ⚠ framing corrected — ticket claims overridden by verified counts` : ''}
+  ${mergeResult.subtasks.length} subtasks  ·  ${mergeResult.execution}  ·  quality: ${qualityLine}
 ${groupLines}
-${doneConditionAcs.length > 0 ? `\n  done-conditions (add to predecessor AC criteria, not separate subtasks):\n${doneConditionAcs.map(ac => `    · ${ac.slice(0, 80)}`).join('\n')}\n` : ''}
-  quality: ${qualityLine}
-  next:    confirm → create Jira subtasks → /harness-plan each G1 subtask
-           ~/Desktop/Repos/harness-telemetry/v2/   (run-specific file)
+${doneConditionAcs.length > 0 ? `  done-conditions: ${doneConditionAcs.map(ac => ac.slice(0, 80)).join('; ')}\n` : ''}
+  next:  confirm → create Jira subtasks → /harness-plan each G1 subtask
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`
 
 log(cliSummary)

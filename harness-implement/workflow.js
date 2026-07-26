@@ -1120,21 +1120,11 @@ const implSize = planData?.tasks?.length <= 2 ? 'XS' : planData?.tasks?.length <
 
 const cliSummary = `
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-harness-implement
-  status:  ${runStatus}  ${implIcon}
-
-  ticket:  ${planSlugForDisplay}
-  size:    ${implSize}
-  agents:  ${totalAgents}
-${agentMetricsLines}
-  tasks: ${passed.length}/${implementationReports.length} passed    blocks: ${blocked.length}
-  tests: ${verifyResult?.testsPassed === true ? 'PASS' : verifyResult?.testsPassed === false ? 'FAIL' : 'not run'}    types: ${verifyResult?.typeCheckPassed === true ? 'clean' : verifyResult?.typeCheckPassed === false ? 'errors' : 'not run'}    security: ${securityResult?.status || 'not run'}
-${taskLines}${blockedLines}
-
-  quality: ${criticalFindings.length > 0 ? `${criticalFindings.length} critical finding(s)` : crFindings > 0 ? `${crFindings} finding(s)` : '✓ clean'}${crFindings > 0 ? '\n' + (codeReviewResult?.findings || []).map(f => `    ${f.severity === 'critical' ? '❌' : f.severity === 'major' ? '⚠️' : '·'} ${f.file}:${f.line || '?'}  ${f.issue}`).join('\n') : ''}
-  drift:   ${!scopeDriftResult || scopeDriftResult.verdict === 'CLEAN' ? '✓ none' : `${scopeDriftResult.verdict} — ${unplannedFiles.length} unplanned file(s)${scopeDriftResult.suggestedTickets?.length > 0 ? '\n' + scopeDriftResult.suggestedTickets.map(t => `    · follow-up: ${t.title}`).join('\n') : ''}`}
-  next:    git push -u origin ${worktreeResult.branch} && gh pr create
-  audit:   ~/Desktop/Repos/harness-telemetry/v2/  (run-specific file)
+harness-implement  ${implIcon}  ${planSlugForDisplay}  ${implSize}
+  tasks: ${passed.length}/${implementationReports.length} passed${blocked.length > 0 ? `  ·  ${blocked.length} blocked` : ''}  ·  tests: ${verifyResult?.testsPassed === true ? 'PASS' : verifyResult?.testsPassed === false ? 'FAIL' : '—'}  types: ${verifyResult?.typeCheckPassed === true ? 'clean' : verifyResult?.typeCheckPassed === false ? 'errors' : '—'}  security: ${securityResult?.status || '—'}
+  quality: ${criticalFindings.length > 0 ? `${criticalFindings.length} critical` : crFindings > 0 ? `${crFindings} finding(s)` : '✓ clean'}  ·  drift: ${!scopeDriftResult || scopeDriftResult.verdict === 'CLEAN' ? '✓ none' : `${unplannedFiles.length} unplanned file(s)`}
+${blocked.length > 0 ? blocked.map(r => `  ❌ ${r.task.id}: ${r.handoff?.caveats || 'NEEDS_CONTEXT'}`).join('\n') + '\n' : ''}
+  next:  git push -u origin ${worktreeResult.branch} && gh pr create
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`
 
 log(cliSummary)

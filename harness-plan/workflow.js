@@ -569,20 +569,9 @@ Return { written: true }`,
   auditWritten = true
   const xsCliSummary = `
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-harness-plan
-  status:  COMPLETE  ✅
+harness-plan  ✅  ${planSlug}  XS  ·  1 task  ·  quality: ✓ clean
 
-  ticket:  ${planSlug}
-  size:    XS        cost:  ~$${xsCostUsd}
-
-  plans: 1    tasks: 1    files: 0    concerns: 1
-  (XS fast path — skipped Research through Coverage)
-
-  quality: ✓ clean
-  next:    /harness-implement docs/manifests/${planJsonName}
-  
-           ~/Desktop/Repos/harness-telemetry/v2/  (run-specific file)
-  tokens:  ${xsTokensTotal.toLocaleString()}  (~$${xsCostUsd} estimated)
+  next:  /harness-implement docs/manifests/${planJsonName}
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`
   log(xsCliSummary)
   return {
@@ -1500,22 +1489,10 @@ const agentMetricsLines = Object.entries(agentCountByModel)
 
 const cliSummary = `
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-harness-plan
-  status:  ${planStatus}  ${planStatusIcon}
+harness-plan  ${planStatusIcon}  ${planSlugForDisplay}  ${size}  ·  ${planEntries.length} plan(s)  ${allTasks.length} tasks  ${allFilesInScope.length} files  ·  quality: ${qualityIssues.length === 0 ? '✓ clean' : `${qualityIssues.length} issue(s)`}
+${planEntries.map(e => `  · docs/manifests/${e.fileName}`).join('\n')}
 
-  ticket:  ${planSlugForDisplay}
-  size:    ${size}
-  agents:  ${totalAgents}
-${agentMetricsLines}
-  cost:    ~$${displayCostUsd}
-
-  plans: ${planEntries.length}    tasks: ${allTasks.length}    files: ${allFilesInScope.length}    concerns: ${validConcernResults.length}
-${planEntries.map(e => `    • docs/manifests/${e.fileName}  (${e.concern.label})`).join('\n')}
-
-  quality: ${qualityIssues.length === 0 ? '✓ clean' : `${qualityIssues.length} issue(s) — see audit log`}
-  next:    ${nextCmd}
-  
-           ~/Desktop/Repos/harness-telemetry/v2/  (run-specific file)
+  next:  ${nextCmd}
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`
 
 log(cliSummary)
