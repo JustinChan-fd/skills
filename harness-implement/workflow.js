@@ -149,7 +149,8 @@ async function writeAuditRecord(status, extra = {}) {
     _telemetryPath = _buildImplTelemetryPath({ repoPath: args.repoPath, issueKey, rawText: args.planPath, timestamp: args.runTs || 'unknown-ts' })
   }
   const record = JSON.stringify(recordObj)
-  const telemetryCmd = `mkdir -p "$(dirname '${_telemetryPath}')" && echo '${record.replace(/'/g, "'\\''")}' >> '${_telemetryPath}'`
+  const b64 = Buffer.from(record).toString('base64')
+  const telemetryCmd = `mkdir -p "$(dirname '${_telemetryPath}')" && printf '%s\\n' "$(echo '${b64}' | base64 -d)" >> '${_telemetryPath}'`
   await agent(
     `Append an audit record to a JSONL file. Use the Bash tool only.\n${telemetryCmd}\nReturn { appended: true }.`,
     { label: 'audit-write', phase: 'Debrief', model: 'haiku', effort: 'low',
