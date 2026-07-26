@@ -569,9 +569,14 @@ Return { written: true }`,
   auditWritten = true
   const xsCliSummary = `
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-harness-plan  ✅  ${planSlug}  XS  ·  1 task  ·  quality: ✓ clean
+harness-plan
+  status:  COMPLETE  ✅
+  ticket:  ${planSlug}
+  size:    XS
+  tasks:   1
+  quality: ✓ clean
 
-  next:  /harness-implement docs/manifests/${planJsonName}
+  next:    /harness-implement docs/manifests/${planJsonName}
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`
   log(xsCliSummary)
   return {
@@ -1489,10 +1494,17 @@ const agentMetricsLines = Object.entries(agentCountByModel)
 
 const cliSummary = `
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-harness-plan  ${planStatusIcon}  ${planSlugForDisplay}  ${size}  ·  ${planEntries.length} plan(s)  ${allTasks.length} tasks  ${allFilesInScope.length} files  ·  quality: ${qualityIssues.length === 0 ? '✓ clean' : `${qualityIssues.length} issue(s)`}
-${planEntries.map(e => `  · docs/manifests/${e.fileName}`).join('\n')}
+harness-plan
+  status:  ${planStatus}  ${planStatusIcon}
+  ticket:  ${planSlugForDisplay}
+  size:    ${size}
+  plans:   ${planEntries.length}
+  tasks:   ${allTasks.length}
+  files:   ${allFilesInScope.length}
+  quality: ${qualityIssues.length === 0 ? '✓ clean' : `${qualityIssues.length} issue(s)`}
+${planEntries.map(e => `    · docs/manifests/${e.fileName}`).join('\n')}
 
-  next:  ${nextCmd}
+  next:    ${nextCmd}
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`
 
 log(cliSummary)

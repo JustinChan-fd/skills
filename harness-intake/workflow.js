@@ -1032,10 +1032,15 @@ if (!splitRequired) {
 
   const skipSummary = `
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-harness-intake  ✅  ${issueKey || 'unknown'}  ${size}  ${workType}${triageSizeLine ? `  ${triageSizeLine.trim()}` : ''}
-  ${acList.length} ACs${migrationPattern ? `  ·  ${migrationPattern}` : ''}  ·  quality: ✓ clean
+harness-intake
+  status:  COMPLETE  ✅
+  ticket:  ${issueKey || 'unknown'}
+  size:    ${size}${triageSizeLine}
+  type:    ${workType}${migrationPattern ? `  ·  ${migrationPattern}` : ''}
+  acs:     ${acList.length}
+  quality: ✓ clean
 
-  next:  ${nextCmd}
+  next:    ${nextCmd}
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`
 
   auditWritten = true
@@ -1789,11 +1794,16 @@ const triageSizeLineLpath = triageSizeOverride
 
 const cliSummary = `
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-harness-intake  ${statusIcon}  ${issueKey || 'unknown'}  ${size}  ${workType}${triageSizeLineLpath ? `  ·  ${triageSizeLineLpath.trim()}` : ''}${conflictLines ? `\n  ⚠ framing corrected — ticket claims overridden by verified counts` : ''}
-  ${mergeResult.subtasks.length} subtasks  ·  ${mergeResult.execution}  ·  quality: ${qualityLine}
+harness-intake
+  status:   ${planStatus}  ${statusIcon}
+  ticket:   ${issueKey || 'unknown'}
+  size:     ${size}${triageSizeLineLpath}
+  type:     ${workType}${migrationPattern ? `  ·  ${migrationPattern}` : ''}
+  subtasks: ${mergeResult.subtasks.length}  ·  ${mergeResult.execution}${conflictLines ? '\n  framing:  corrected — ticket claims overridden by verified counts' : ''}
+  quality:  ${qualityLine}
 ${groupLines}
-${doneConditionAcs.length > 0 ? `  done-conditions: ${doneConditionAcs.map(ac => ac.slice(0, 80)).join('; ')}\n` : ''}
-  next:  confirm → create Jira subtasks → /harness-plan each G1 subtask
+${doneConditionAcs.length > 0 ? `  done-conditions:\n${doneConditionAcs.map(ac => `    · ${ac.slice(0, 80)}`).join('\n')}\n` : ''}
+  next:     confirm → create Jira subtasks → /harness-plan each G1 subtask
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`
 
 log(cliSummary)

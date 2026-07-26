@@ -1120,11 +1120,18 @@ const implSize = planData?.tasks?.length <= 2 ? 'XS' : planData?.tasks?.length <
 
 const cliSummary = `
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-harness-implement  ${implIcon}  ${planSlugForDisplay}  ${implSize}
-  tasks: ${passed.length}/${implementationReports.length} passed${blocked.length > 0 ? `  ·  ${blocked.length} blocked` : ''}  ·  tests: ${verifyResult?.testsPassed === true ? 'PASS' : verifyResult?.testsPassed === false ? 'FAIL' : '—'}  types: ${verifyResult?.typeCheckPassed === true ? 'clean' : verifyResult?.typeCheckPassed === false ? 'errors' : '—'}  security: ${securityResult?.status || '—'}
-  quality: ${criticalFindings.length > 0 ? `${criticalFindings.length} critical` : crFindings > 0 ? `${crFindings} finding(s)` : '✓ clean'}  ·  drift: ${!scopeDriftResult || scopeDriftResult.verdict === 'CLEAN' ? '✓ none' : `${unplannedFiles.length} unplanned file(s)`}
+harness-implement
+  status:    ${runStatus}  ${implIcon}
+  ticket:    ${planSlugForDisplay}
+  size:      ${implSize}
+  tasks:     ${passed.length}/${implementationReports.length} passed${blocked.length > 0 ? `  ·  ${blocked.length} blocked` : ''}
+  tests:     ${verifyResult?.testsPassed === true ? 'PASS' : verifyResult?.testsPassed === false ? 'FAIL' : '—'}
+  types:     ${verifyResult?.typeCheckPassed === true ? 'clean' : verifyResult?.typeCheckPassed === false ? 'errors' : '—'}
+  security:  ${securityResult?.status || '—'}
+  quality:   ${criticalFindings.length > 0 ? `${criticalFindings.length} critical finding(s)` : crFindings > 0 ? `${crFindings} finding(s)` : '✓ clean'}
+  drift:     ${!scopeDriftResult || scopeDriftResult.verdict === 'CLEAN' ? '✓ none' : `${unplannedFiles.length} unplanned file(s)`}
 ${blocked.length > 0 ? blocked.map(r => `  ❌ ${r.task.id}: ${r.handoff?.caveats || 'NEEDS_CONTEXT'}`).join('\n') + '\n' : ''}
-  next:  git push -u origin ${worktreeResult.branch} && gh pr create
+  next:      git push -u origin ${worktreeResult.branch} && gh pr create
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`
 
 log(cliSummary)
