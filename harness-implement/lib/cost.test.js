@@ -1,82 +1,129 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
-import { COST_RATES, rateFor, computeCost } from './cost.js'
+import { COST_RATES, PRICE_TABLE_VERSION, rateFor, computeCost } from './cost.js'
 
-// Rates sourced from https://platform.claude.com/docs/en/about-claude/pricing (2026-07-24)
+// Rates sourced from https://docs.claude.com/en/docs/about-claude/pricing (2026-07-25)
+describe('PRICE_TABLE_VERSION', () => {
+  it('is a date string', () => assert.match(PRICE_TABLE_VERSION, /^\d{4}-\d{2}-\d{2}$/))
+})
+
 describe('COST_RATES', () => {
-  it('haiku 4.5 output rate is $5.00/MTok',  () => assert.equal(COST_RATES.haiku.out,  5.00))
-  it('sonnet output rate is $15.00/MTok',    () => assert.equal(COST_RATES.sonnet.out, 15.00))
-  it('opus 4.5+ output rate is $25.00/MTok', () => assert.equal(COST_RATES.opus.out,   25.00))
+  it('haiku input rate is $1.00/MTok',   () => assert.equal(COST_RATES.haiku.in,   1.00))
+  it('haiku output rate is $5.00/MTok',  () => assert.equal(COST_RATES.haiku.out,  5.00))
+  it('sonnet input rate is $3.00/MTok',  () => assert.equal(COST_RATES.sonnet.in,  3.00))
+  it('sonnet output rate is $15.00/MTok', () => assert.equal(COST_RATES.sonnet.out, 15.00))
+  it('opus input rate is $5.00/MTok',    () => assert.equal(COST_RATES.opus.in,    5.00))
+  it('opus output rate is $25.00/MTok',  () => assert.equal(COST_RATES.opus.out,   25.00))
+  it('haiku cacheRead is 0.10× input',   () => assert.equal(COST_RATES.haiku.cacheRead,  0.10))
+  it('sonnet cacheRead is 0.10× input',  () => assert.equal(COST_RATES.sonnet.cacheRead, 0.30))
 })
 
 describe('rateFor', () => {
   it('returns opus rates for opus model ids', () => {
-    assert.deepEqual(rateFor('claude-opus-4-8'),           { in: 5,  out: 25 })
-    assert.deepEqual(rateFor('anthropic.claude-opus-4-5'), { in: 5,  out: 25 })
+    assert.deepEqual(rateFor('claude-opus-4-8'), COST_RATES.opus)
   })
   it('returns haiku rates for haiku model ids', () => {
-    assert.deepEqual(rateFor('claude-haiku-4-5-20251001'),            { in: 1, out: 5 })
-    assert.deepEqual(rateFor('anthropic.claude-haiku-4-5-20251001'),  { in: 1, out: 5 })
+    assert.deepEqual(rateFor('anthropic.claude-haiku-4-5-20251001'), COST_RATES.haiku)
   })
   it('returns sonnet rates for sonnet and unknown model ids', () => {
-    assert.deepEqual(rateFor('anthropic.claude-sonnet-4-6'), { in: 3, out: 15 })
-    assert.deepEqual(rateFor('unknown-model'),               { in: 3, out: 15 })
+    assert.deepEqual(rateFor('anthropic.claude-sonnet-4-6'), COST_RATES.sonnet)
+    assert.deepEqual(rateFor('unknown-model'), COST_RATES.sonnet)
   })
 })
 
-// computeCost(agentCountByModel, outputTokensTotal) splits tokens proportionally by agent count
-// and applies output rates. Immune to parallel() budget.spent() race condition.
-// Output-only — budget.spent() tracks outputs only. ~4x underestimate but self-contained.
 describe('computeCost', () => {
-  // 1M output tokens, 1 haiku agent → $5.00
-  it('pure haiku: 1M output tokens = $5.00', () => {
-    assert.equal(computeCost({ 'claude-haiku-4-5-20251001': 1 }, 1_000_000), 5.0000)
+  it('pure haiku: 1M input + 1M output = $6.00', () => {
+    const { rateLockedUsd } = computeCost({
+      agentCountByModel: { 'claude-haiku-4-5-20251001': 1 },
+      inputTokens: 1_000_000,
+      outputTokensTotal: 1_000_000,
+    })
+    assert.equal(rateLockedUsd, 6.0000)
   })
 
-  // 1M output tokens, 1 sonnet agent → $15.00
-  it('pure sonnet: 1M output tokens = $15.00', () => {
-    assert.equal(computeCost({ 'anthropic.claude-sonnet-4-6': 1 }, 1_000_000), 15.0000)
+  it('pure sonnet: 1M input + 1M output = $18.00', () => {
+    const { rateLockedUsd } = computeCost({
+      agentCountByModel: { 'anthropic.claude-sonnet-4-6': 1 },
+      inputTokens: 1_000_000,
+      outputTokensTotal: 1_000_000,
+    })
+    assert.equal(rateLockedUsd, 18.0000)
   })
 
-  // 1M output tokens, 1 opus agent → $25.00
-  it('pure opus: 1M output tokens = $25.00', () => {
-    assert.equal(computeCost({ 'claude-opus-4-8': 1 }, 1_000_000), 25.0000)
+  it('pure opus: 1M input + 1M output = $30.00', () => {
+    const { rateLockedUsd } = computeCost({
+      agentCountByModel: { 'claude-opus-4-8': 1 },
+      inputTokens: 1_000_000,
+      outputTokensTotal: 1_000_000,
+    })
+    assert.equal(rateLockedUsd, 30.0000)
   })
 
-  // Run-26 actuals: 77,884 output tokens, 20 haiku + 6 sonnet (26 total agents)
-  // blendedRate = (20/26)*5 + (6/26)*15 = 3.846 + 3.462 = 7.308/26... let's compute
-  // = (20*5 + 6*15) / 26 = (100+90)/26 = 7.308 $/MTok
-  // cost = 77884 * 7.308 / 1e6 = $0.5692
-  it('run-26 actuals (20 haiku + 6 sonnet, 77884 output tokens): ~$0.57', () => {
-    const cost = computeCost(
-      { 'anthropic.claude-haiku-4-5-20251001': 20, 'anthropic.claude-sonnet-4-6': 6 },
-      77_884
-    )
-    assert.ok(Math.abs(cost - 0.57) < 0.02, `expected ~0.57, got ${cost}`)
+  // TARS-1271 run actuals: subagentTokens=1232019, outputTokensTotal=52417
+  // inputTokens = 1232019 - 52417 = 1179602
+  // agentCount: 20 haiku + 6 sonnet (26 total)
+  // blendedInRate  = (20/26)*1 + (6/26)*3  = 0.769 + 0.692 = 1.461 $/MTok
+  // blendedOutRate = (20/26)*5 + (6/26)*15 = 3.846 + 3.462 = 7.308 $/MTok
+  // inCost  = 1179602 / 1e6 * 1.461 = $1.7233
+  // outCost = 52417   / 1e6 * 7.308 = $0.3831
+  // total ≈ $2.11
+  it('TARS-1271 actuals (20 haiku + 6 sonnet, 1179602 input + 52417 output): ~$2.11', () => {
+    const { rateLockedUsd } = computeCost({
+      agentCountByModel: {
+        'anthropic.claude-haiku-4-5-20251001': 20,
+        'anthropic.claude-sonnet-4-6': 6,
+      },
+      inputTokens: 1_179_602,
+      outputTokensTotal: 52_417,
+    })
+    assert.ok(Math.abs(rateLockedUsd - 2.11) < 0.05, `expected ~2.11, got ${rateLockedUsd}`)
   })
 
-  // Mixed: equal haiku/sonnet agents → blended rate = (5+15)/2 = $10/MTok
-  it('50/50 haiku+sonnet mix: 1M tokens = $10.00', () => {
-    assert.equal(
-      computeCost({ 'claude-haiku-4-5-20251001': 1, 'anthropic.claude-sonnet-4-6': 1 }, 1_000_000),
-      10.0000
-    )
+  it('when inputTokens is null, still computes output cost and records reason', () => {
+    const { rateLockedUsd, nullReasons } = computeCost({
+      agentCountByModel: { 'anthropic.claude-sonnet-4-6': 1 },
+      inputTokens: null,
+      outputTokensTotal: 1_000_000,
+    })
+    assert.equal(rateLockedUsd, 15.0000)
+    assert.ok(nullReasons['tokens.total.input'])
   })
 
-  it('returns 0 for empty agentCountByModel', () => {
-    assert.equal(computeCost({}, 1_000_000), 0)
+  it('50/50 haiku+sonnet: 1M input + 1M output = $10.00', () => {
+    const { rateLockedUsd } = computeCost({
+      agentCountByModel: { 'claude-haiku-4-5-20251001': 1, 'anthropic.claude-sonnet-4-6': 1 },
+      inputTokens: 1_000_000,
+      outputTokensTotal: 1_000_000,
+    })
+    // blendedIn = (1+3)/2 = 2; blendedOut = (5+15)/2 = 10; total = 2+10 = $12
+    assert.equal(rateLockedUsd, 12.0000)
   })
 
-  it('returns 0 for zero outputTokensTotal', () => {
-    assert.equal(computeCost({ 'anthropic.claude-sonnet-4-6': 5 }, 0), 0)
+  it('returns null rateLockedUsd and nullReason for empty agentCountByModel', () => {
+    const { rateLockedUsd, nullReasons } = computeCost({
+      agentCountByModel: {},
+      inputTokens: 1_000_000,
+      outputTokensTotal: 1_000_000,
+    })
+    assert.equal(rateLockedUsd, null)
+    assert.ok(nullReasons['cost.rateLockedUsd'])
   })
 
-  it('returns a number (not a string)', () => {
-    assert.equal(typeof computeCost({ 'anthropic.claude-sonnet-4-6': 1 }, 500), 'number')
+  it('always returns priceTableVersion', () => {
+    const { priceTableVersion } = computeCost({
+      agentCountByModel: { 'anthropic.claude-sonnet-4-6': 1 },
+      inputTokens: 100,
+      outputTokensTotal: 100,
+    })
+    assert.equal(priceTableVersion, PRICE_TABLE_VERSION)
   })
 
-  it('rounds to 4 decimal places', () => {
-    const result = computeCost({ 'anthropic.claude-sonnet-4-6': 1 }, 1)
-    assert.equal(result, 0.0000)
+  it('returns a number for rateLockedUsd (not a string)', () => {
+    const { rateLockedUsd } = computeCost({
+      agentCountByModel: { 'anthropic.claude-sonnet-4-6': 1 },
+      inputTokens: 1000,
+      outputTokensTotal: 1000,
+    })
+    assert.equal(typeof rateLockedUsd, 'number')
   })
 })

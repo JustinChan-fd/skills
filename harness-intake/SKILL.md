@@ -35,7 +35,7 @@ Run `/harness-intake` before every harness-plan invocation. Always.
 | XS/S/M | `intake-manifest.json` — typed work classification + AC list | `/harness-plan --intake <path>` |
 | L | `intake-manifest.json` (with `groups[]`) — work classification + split subtasks | `/harness-plan --intake <path>` on each G1 subtask |
 
-The manifest is written to `{repoPath}/docs/plans/`.
+The manifest is written to `{repoPath}/docs/manifests/`.
 
 ## Step-by-Step
 
@@ -47,9 +47,20 @@ Extract from the URL or text:
 
 For freeform prompts with no URL: set `issueKey = null`, `cloudId = null`.
 
-### 2. Resolve repoPath
+### 2. Resolve repoPath + cloudId
 
-Search common locations for the repo before asking the user:
+**Check the config first** — it's authoritative and avoids heuristic matching:
+
+```js
+const projectConfig = await Bash(
+  `node --input-type=module <<'EOF'\nimport { resolveProject } from '/Users/206618626@bwt3.com/Desktop/Repos/skills/config.js'\nconst r = resolveProject('${issueKey}')\nconsole.log(JSON.stringify(r))\nEOF`
+).then(r => { try { return JSON.parse(r.trim()) } catch { return null } })
+
+const repoPath = projectConfig?.repoPath ?? null
+const cloudId  = projectConfig?.cloudId  ?? 'fandango.atlassian.net'
+```
+
+If `projectConfig` is null (project key not in config), fall back to the git-remote scan:
 
 ```bash
 find ~/Desktop/Repos ~/repos ~/code -maxdepth 2 -name ".git" 2>/dev/null \
@@ -60,7 +71,7 @@ find ~/Desktop/Repos ~/repos ~/code -maxdepth 2 -name ".git" 2>/dev/null \
     done
 ```
 
-Match the git remote against the Jira project key or repo name in the URL. If unambiguous, use it silently. If ambiguous or not found, ask the user.
+Match the git remote against the Jira project key or repo name. If still ambiguous or not found, ask the user. Once resolved, add the mapping to `~/Desktop/Repos/skills/config.js` so future runs are deterministic.
 
 ### 3. Fetch ticket from Jira (if URL provided)
 
@@ -104,7 +115,10 @@ def set_nested(d, dotted_key, value):
         if k not in d or not isinstance(d[k], dict):
             d[k] = {}
         d = d[k]
-    d[keys[-1]] = value
+    if value is None:
+        d.pop(keys[-1], None)
+    else:
+        d[keys[-1]] = value
 
 path, fields_json = sys.argv[1], sys.argv[2]
 fields = json.loads(fields_json)
@@ -170,6 +184,7 @@ try {
       'tokens.total.subagentTokens': subagentTokens,
       'tokens.total.input': inputTokens,
       ...(recomputedCost != null ? { 'cost.rateLockedUsd': recomputedCost } : {}),
+      ...(inputTokens != null ? { 'cost.nullReasons.tokens.total.input': null } : {}),
     })
   }
 
@@ -197,10 +212,11 @@ Always write the intake manifest, regardless of size. Use the absolute path — 
 
 ```js
 // Ensure directory exists
-await Bash(`mkdir -p ${repoPath}/docs/plans`)
-const intakeManifestPath = `${repoPath}/docs/plans/${today}-${issueKey || 'intake'}-intake-manifest.json`
+await Bash(`mkdir -p ${repoPath}/docs/manifests`)
+const repo = repoPath.split('/').pop()
+const intakeManifestPath = `${repoPath}/docs/manifests/${repo}__harness-intake__${issueKey || 'intake'}__${runTs}__manifest.json`
 // Write result.intakeManifest as prettified JSON using the Write tool
-// Path must be absolute: ${repoPath}/docs/plans/... NOT docs/plans/...
+// Path must be absolute: ${repoPath}/docs/manifests/... NOT docs/manifests/...
 ```
 
 ### 7. XS/S/M exit — direct to harness-plan
@@ -210,7 +226,7 @@ If `result.splitRequired === false`:
 Print the next step clearly:
 ```
 Intake complete. Run:
-  /harness-plan --intake docs/plans/{today}-{issueKey}-intake-manifest.json
+  /harness-plan --intake docs/manifests/{today}-{issueKey}-intake-manifest.json
 ```
 
 Stop here. Do not create Jira subtasks.
@@ -256,7 +272,8 @@ Collect created keys + URLs.
 Inject `jiraKey` + `jiraUrl` per subtask in `result.intakeManifest.groups[*].subtasks[*]`, then write:
 
 ```js
-const intakeManifestPath = `${repoPath}/docs/plans/${today}-${issueKey}-intake-manifest.json`
+const repo = repoPath.split('/').pop()
+const intakeManifestPath = `${repoPath}/docs/manifests/${repo}__harness-intake__${issueKey}__${runTs}__manifest.json`
 // Write result.intakeManifest (already contains groups[]) as prettified JSON
 ```
 
@@ -266,11 +283,11 @@ const intakeManifestPath = `${repoPath}/docs/plans/${today}-${issueKey}-intake-m
 Subtasks created under {issueKey}.
 
 [G1 — run these in parallel]
-  /harness-plan --intake docs/plans/{today}-{key}-intake-manifest.json --entry {TARS-XXXX}
+  /harness-plan --intake docs/manifests/{today}-{key}-intake-manifest.json --entry {TARS-XXXX}
   ...
 
 [G2 — after all G1 plans are implemented]
-  /harness-plan --intake docs/plans/{today}-{key}-intake-manifest.json --entry {TARS-YYYY}
+  /harness-plan --intake docs/manifests/{today}-{key}-intake-manifest.json --entry {TARS-YYYY}
 ```
 
 ## Manifest Contracts

@@ -38,7 +38,7 @@ Reads an approved plan file and executes it:
 ## How to Invoke
 
 ```
-/harness-implement docs/plans/YYYY-MM-DD-<key>-p1.json
+/harness-implement docs/manifests/YYYY-MM-DD-<key>-p1.json
 ```
 
 Pass the companion `.json` path (not the `.md`). harness-plan always produces both.
@@ -85,7 +85,10 @@ def set_nested(d, dotted_key, value):
         if k not in d or not isinstance(d[k], dict):
             d[k] = {}
         d = d[k]
-    d[keys[-1]] = value
+    if value is None:
+        d.pop(keys[-1], None)
+    else:
+        d[keys[-1]] = value
 
 path, fields_json = sys.argv[1], sys.argv[2]
 fields = json.loads(fields_json)
@@ -126,6 +129,7 @@ if (result?.telemetryPath) {
     'tokens.total.subagentTokens': subagentTokens,
     'tokens.total.input': inputTokens,
     ...(recomputedCost != null ? { 'cost.rateLockedUsd': recomputedCost } : {}),
+    ...(inputTokens != null ? { 'cost.nullReasons.tokens.total.input': null } : {}),
   })
 }
 ```

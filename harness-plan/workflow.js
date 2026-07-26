@@ -218,14 +218,14 @@ function _rateForV2(model) {
 // L (independent concerns) → manifest with N parallel-safe entries.
 // L (interdependent) → manifest with N sequentially ordered entries.
 //
-// Manifest schema (docs/plans/YYYY-MM-DD-<slug>-manifest.json):
+// Manifest schema (docs/manifests/YYYY-MM-DD-<slug>-manifest.json):
 // {
 //   "title": string,
 //   "size": "XS"|"S"|"M"|"L",
 //   "execution": "sequential"|"parallel"|"mixed",
 //   "plans": [
-//     { "id": "p1", "path": "docs/plans/YYYY-MM-DD-<slug>-p1.md",
-//       "jsonPath": "docs/plans/YYYY-MM-DD-<slug>-p1.json",
+//     { "id": "p1", "path": "docs/manifests/YYYY-MM-DD-<slug>-p1.md",
+//       "jsonPath": "docs/manifests/YYYY-MM-DD-<slug>-p1.json",
 //       "dependsOn": [] }
 //   ]
 // }
@@ -510,7 +510,7 @@ if (size === 'XS' && !manifestEntry && !args.forceplan) {
   const manifestName = `${today}-${planSlug}-manifest.json`
   const planJson = JSON.stringify({
     planKey: `${planSlug}-p1`,
-    planPath: `docs/plans/${planFileName}`,
+    planPath: `docs/manifests/${planFileName}`,
     prTitle: microTask.title,
     mockPolicy: '',
     constraints: [],
@@ -521,13 +521,13 @@ if (size === 'XS' && !manifestEntry && !args.forceplan) {
     size: 'XS',
     execution: 'sequential',
     sourceSubtask: null,
-    plans: [{ id: 'p1', path: `docs/plans/${planFileName}`, jsonPath: `docs/plans/${planJsonName}`, dependsOn: [] }],
+    plans: [{ id: 'p1', path: `docs/manifests/${planFileName}`, jsonPath: `docs/manifests/${planJsonName}`, dependsOn: [] }],
   }
   const xsWriteResult = await trackedAgent(
     `Write THREE files using the Write tool. Do NOT truncate.
 
 FILE 1 — plan markdown:
-PATH: ${repoPath}/docs/plans/${planFileName}
+PATH: ${repoPath}/docs/manifests/${planFileName}
 CONTENT:
 # ${microTask.title}
 
@@ -540,12 +540,12 @@ ${JSON.stringify({ tasks: [microTask] }, null, 2)}
 \`\`\`
 
 FILE 2 — plan JSON:
-PATH: ${repoPath}/docs/plans/${planJsonName}
+PATH: ${repoPath}/docs/manifests/${planJsonName}
 CONTENT:
 ${planJson}
 
 FILE 3 — manifest:
-PATH: ${repoPath}/docs/plans/${manifestName}
+PATH: ${repoPath}/docs/manifests/${manifestName}
 CONTENT:
 ${JSON.stringify(manifestObj, null, 2)}
 
@@ -559,7 +559,7 @@ Return { written: true }`,
   const xsCostUsd = _computeCostV2({ agentCountByModel, inputTokens: null, outputTokensTotal: xsTokensTotal }).rateLockedUsd  // display only — not written to audit log
   await writeAuditRecord('COMPLETE', {
     planSlug,
-    manifestPath: `docs/plans/${manifestName}`,
+    manifestPath: `docs/manifests/${manifestName}`,
     planCount: 1,
     taskCount: 1,
     filesInScope: 0,
@@ -582,14 +582,14 @@ harness-plan
   (XS fast path — skipped Research through Coverage)
 
   quality: ✓ clean
-  next:    /harness-implement docs/plans/${planJsonName}
+  next:    /harness-implement docs/manifests/${planJsonName}
   
            ~/Desktop/Repos/harness-telemetry/v2/  (run-specific file)
   tokens:  ${xsTokensTotal.toLocaleString()}  (~$${xsCostUsd} estimated)
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`
   log(xsCliSummary)
   return {
-    manifestPath: `docs/plans/${manifestName}`,
+    manifestPath: `docs/manifests/${manifestName}`,
     planCount: 1,
     taskCount: 1,
     qualityIssues: [],
@@ -1277,7 +1277,7 @@ const planSlug = (() => {
 })()
 
 const manifestName = `${today}-${planSlug}-manifest.json`
-const manifestPath = `${repoPath}/docs/plans/${manifestName}`
+const manifestPath = `${repoPath}/docs/manifests/${manifestName}`
 
 // Build per-concern file entries
 const planEntries = validConcernResults.map((r, i) => {
@@ -1288,7 +1288,7 @@ const planEntries = validConcernResults.map((r, i) => {
   const prTitle = prTitleMatch ? prTitleMatch[1].trim() : r.concern.label
   const planJson = JSON.stringify({
     planKey: `${planSlug}-${suffix}`,
-    planPath: `docs/plans/${fileName}`,
+    planPath: `docs/manifests/${fileName}`,
     prTitle,
     mockPolicy: r.research.mockPolicy || '',
     constraints: r.research.constraints.map(c => c.howToApply ? `${c.rule} — ${c.howToApply}` : c.rule),
@@ -1307,8 +1307,8 @@ const manifestObj = {
   sourceSubtask: manifestEntry?.jiraKey || null,
   plans: planEntries.map((e, i) => ({
     id: e.suffix,
-    path: `docs/plans/${e.fileName}`,
-    jsonPath: `docs/plans/${e.jsonName}`,
+    path: `docs/manifests/${e.fileName}`,
+    jsonPath: `docs/manifests/${e.jsonName}`,
     dependsOn: execution === 'sequential' && i > 0 ? [planEntries[i - 1].suffix] : [],
   })),
 }
@@ -1318,12 +1318,12 @@ const writeResults = await parallel(planEntries.map(e => () => trackedAgent(
   `Write TWO files exactly as provided using the Write tool. Do NOT truncate or reformat — write byte-for-byte.
 
 FILE 1 — markdown plan:
-PATH: ${repoPath}/docs/plans/${e.fileName}
+PATH: ${repoPath}/docs/manifests/${e.fileName}
 CONTENT:
 ${e.planFileContent}
 
 FILE 2 — companion JSON (write EXACTLY as given, do not truncate):
-PATH: ${repoPath}/docs/plans/${e.jsonName}
+PATH: ${repoPath}/docs/manifests/${e.jsonName}
 CONTENT:
 ${e.planJson}
 
@@ -1336,7 +1336,7 @@ Return JSON: { written: true }`,
 const writeFailures = writeResults.filter(r => !r?.written)
 const writeStalls = writeResults.filter(r => r === null)
 if (writeStalls.length > 0) log(`⚠ Return: ${writeStalls.length} write agent(s) stalled (null) — files may be missing`)
-if (writeFailures.length > 0) throw new Error(`${writeFailures.length} plan file write(s) failed — check docs/plans/ permissions`)
+if (writeFailures.length > 0) throw new Error(`${writeFailures.length} plan file write(s) failed — check docs/manifests/ permissions`)
 
 // Write manifest only — no git commit. Plan files are local artifacts, not committed to the branch.
 // Committing plan files causes them to be discovered by future runs' researchers and biases output.
@@ -1359,14 +1359,14 @@ Return JSON: { written: true, committed: false, planCount: ${planEntries.length}
   }
 )
 
-if (!writeResult?.written) throw new Error('write-manifest agent failed — check docs/plans/ permissions')
+if (!writeResult?.written) throw new Error('write-manifest agent failed — check docs/manifests/ permissions')
 
 // Post-commit verification — confirm files exist on disk and JSON is valid
 const verifyResult = await trackedAgent(
   `Verify that all plan files exist on disk and JSON files are valid.
 Run these commands:
-1. Check each file exists: ${[...planEntries.map(e => `${repoPath}/docs/plans/${e.fileName}`), ...planEntries.map(e => `${repoPath}/docs/plans/${e.jsonName}`), manifestPath].map(f => `test -f "${f}" && echo "ok: ${f}" || echo "missing: ${f}"`).join('\n')}
-2. Validate each JSON: ${planEntries.map(e => `node -e "JSON.parse(require('fs').readFileSync('${repoPath}/docs/plans/${e.jsonName}','utf8'))" && echo "valid: ${e.jsonName}" || echo "invalid: ${e.jsonName}"`).join('\n')}
+1. Check each file exists: ${[...planEntries.map(e => `${repoPath}/docs/manifests/${e.fileName}`), ...planEntries.map(e => `${repoPath}/docs/manifests/${e.jsonName}`), manifestPath].map(f => `test -f "${f}" && echo "ok: ${f}" || echo "missing: ${f}"`).join('\n')}
+2. Validate each JSON: ${planEntries.map(e => `node -e "JSON.parse(require('fs').readFileSync('${repoPath}/docs/manifests/${e.jsonName}','utf8'))" && echo "valid: ${e.jsonName}" || echo "invalid: ${e.jsonName}"`).join('\n')}
 
 Return JSON: { allFilesPresent: boolean, allJsonValid: boolean, commitStat: "n/a — plans are local only, not committed", issues: string[] }`,
   { label: 'verify-files', phase: 'Return', model: haikuModel, effort: 'low',
@@ -1461,7 +1461,7 @@ const planStatus = (qualityIssues.length === 0 && commitOk) ? 'COMPLETE' : 'PROP
 
 await writeAuditRecord(planStatus, {
   planSlug,
-  manifestPath: `docs/plans/${manifestName}`,
+  manifestPath: `docs/manifests/${manifestName}`,
   planCount: planEntries.length,
   taskCount: allTasks.length,
   filesInScope: allFilesInScope.length,
@@ -1481,10 +1481,10 @@ const qualityLine = qualityIssues.length === 0
 
 const planSlugForDisplay = (input || '').match(/\b([A-Z]+-\d+)\b/)?.[1] || planSlug
 const nextCmd = manifestObj.execution === 'parallel'
-  ? planEntries.map(e => `/harness-implement docs/plans/${e.jsonName}`).join('\n         ')
+  ? planEntries.map(e => `/harness-implement docs/manifests/${e.jsonName}`).join('\n         ')
   : planEntries.map((e, i) => i === 0
-      ? `/harness-implement docs/plans/${e.jsonName}`
-      : `/harness-implement docs/plans/${e.jsonName}  (after ${planEntries[i-1].suffix})`
+      ? `/harness-implement docs/manifests/${e.jsonName}`
+      : `/harness-implement docs/manifests/${e.jsonName}  (after ${planEntries[i-1].suffix})`
     ).join('\n         ')
 
 const planStatusIcon = planStatus === 'COMPLETE' ? '✅' : '⚠️'
@@ -1509,7 +1509,7 @@ ${agentMetricsLines}
   cost:    ~$${displayCostUsd}
 
   plans: ${planEntries.length}    tasks: ${allTasks.length}    files: ${allFilesInScope.length}    concerns: ${validConcernResults.length}
-${planEntries.map(e => `    • docs/plans/${e.fileName}  (${e.concern.label})`).join('\n')}
+${planEntries.map(e => `    • docs/manifests/${e.fileName}  (${e.concern.label})`).join('\n')}
 
   quality: ${qualityIssues.length === 0 ? '✓ clean' : `${qualityIssues.length} issue(s) — see audit log`}
   next:    ${nextCmd}
@@ -1520,7 +1520,7 @@ ${planEntries.map(e => `    • docs/plans/${e.fileName}  (${e.concern.label})`)
 log(cliSummary)
 
 return {
-  manifestPath: `docs/plans/${manifestName}`,
+  manifestPath: `docs/manifests/${manifestName}`,
   planCount: planEntries.length,
   taskCount: allTasks.length,
   qualityIssues,

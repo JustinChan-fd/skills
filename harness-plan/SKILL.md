@@ -1,6 +1,6 @@
 ---
 name: harness-plan
-description: Use when you have a Jira ticket, freeform description, or rough notes and need a committed plan file ready for harness-implement. Produces docs/plans/YYYY-MM-DD-<key>-p1.md + manifest. Human approves before implement runs.
+description: Use when you have a Jira ticket, freeform description, or rough notes and need a committed plan file ready for harness-implement. Produces docs/manifests/YYYY-MM-DD-<key>-p1.md + manifest. Human approves before implement runs.
 ---
 
 # harness-plan
@@ -32,9 +32,9 @@ The manager's job is to make sure every decision is made, every ambiguity resolv
 Every run produces three files, regardless of size:
 
 ```
-docs/plans/YYYY-MM-DD-<slug>-p1.md       ← human-readable plan
-docs/plans/YYYY-MM-DD-<slug>-p1.json     ← harness-implement reads this
-docs/plans/YYYY-MM-DD-<slug>-manifest.json  ← orchestration
+docs/manifests/YYYY-MM-DD-<slug>-p1.md       ← human-readable plan
+docs/manifests/YYYY-MM-DD-<slug>-p1.json     ← harness-implement reads this
+docs/manifests/YYYY-MM-DD-<slug>-manifest.json  ← orchestration
 ```
 
 **Manifest schema** (same shape for all sizes):
@@ -46,8 +46,8 @@ docs/plans/YYYY-MM-DD-<slug>-manifest.json  ← orchestration
   "plans": [
     {
       "id": "p1",
-      "path": "docs/plans/YYYY-MM-DD-<slug>-p1.md",
-      "jsonPath": "docs/plans/YYYY-MM-DD-<slug>-p1.json",
+      "path": "docs/manifests/YYYY-MM-DD-<slug>-p1.md",
+      "jsonPath": "docs/manifests/YYYY-MM-DD-<slug>-p1.json",
       "dependsOn": []
     }
   ]
@@ -234,7 +234,10 @@ def set_nested(d, dotted_key, value):
         if k not in d or not isinstance(d[k], dict):
             d[k] = {}
         d = d[k]
-    d[keys[-1]] = value
+    if value is None:
+        d.pop(keys[-1], None)
+    else:
+        d[keys[-1]] = value
 
 path, fields_json = sys.argv[1], sys.argv[2]
 fields = json.loads(fields_json)
@@ -275,6 +278,7 @@ if (result?.telemetryPath) {
     'tokens.total.subagentTokens': subagentTokens,
     'tokens.total.input': inputTokens,
     ...(recomputedCost != null ? { 'cost.rateLockedUsd': recomputedCost } : {}),
+    ...(inputTokens != null ? { 'cost.nullReasons.tokens.total.input': null } : {}),
   })
 }
 ```
@@ -287,7 +291,7 @@ Then print `result.cliSummary` verbatim, then:
 
 Once approved:
 ```
-/harness-implement docs/plans/YYYY-MM-DD-<slug>-p1.json
+/harness-implement docs/manifests/YYYY-MM-DD-<slug>-p1.json
 ```
 
 ## What a Good Task Description Contains
