@@ -28,17 +28,8 @@ const manifestEntry = args.manifestEntry || null
 
 if (!input) throw new Error('harness-plan requires input or manifestEntry')
 
-// ─── Token tracking + wall-clock start ───────────────────────────────────────
-// _workflowStartTs: captured by a haiku shell agent at the top of the run so
-// durationMs is self-contained and does not require the caller to pass startTs.
-
-let _workflowStartTs = null
-const _startTsPromise = agent(
-  `Run: python3 -c "import time; print(int(time.time()*1000))"\nReturn { ms: <number> }`,
-  { label: 'workflow-start-ts', phase: 'Intake', model: 'claude-haiku-4-5-20251001', effort: 'low',
-    schema: { type: 'object', required: ['ms'], properties: { ms: { type: 'number' } } } }
-).then(r => { _workflowStartTs = r?.ms || null }).catch(() => {})
-
+// ─── Token tracking ───────────────────────────────────────────────────────────
+// durationMs is passed in from args.durationMs (computed by SKILL.md wrapper after Workflow() returns).
 const workflowStartTokens = budget.spent()
 const agentCountByModel = {}
 const agentCountByPhase = {}
@@ -56,63 +47,89 @@ async function trackedAgent(prompt, opts) {
 // Lets future analysis slice runs by era (pre/post spec-v8, etc).
 const SKILLS_SCHEMA_VERSION = 'spec-v8'
 
-// telemetryPath is set on first writeAuditRecord call, then reused across writes within the run.
+// telemetryPath: built from args.runId + args.runTs passed by SKILL.md wrapper.
 let _telemetryPath = null
 
-async function writeAuditRecord(status, extra = {}) {
+function _buildV2Record(status, extra = {}) {
   const outputTokensTotal = budget.spent() - workflowStartTokens
-  await _startTsPromise  // ensure start timestamp resolved before computing delta
-  const [durationMs, skillsCommit, runTs] = await Promise.all([
-    agent(
-      `Run: python3 -c "import time; print(int(time.time()*1000) - ${_workflowStartTs || (args.startTs || 0)})"\nReturn { ms: <number> }`,
-      { label: 'duration-ms', phase: 'Debrief', model: haikuModel, effort: 'low',
-        schema: { type: 'object', required: ['ms'], properties: { ms: { type: 'number' } } } }
-    ).then(r => { const v = r?.ms; return (v != null && v > 0 && v < 36_000_000) ? v : null }).catch(() => null),
-    agent(
-      `Run: git -C ~/Desktop/Repos/skills rev-parse HEAD 2>/dev/null || git -C ~/.claude/skills rev-parse HEAD 2>/dev/null || echo unknown\nReturn { sha: "<40-char hex or unknown>" }`,
-      { label: 'skills-commit', phase: 'Debrief', model: haikuModel, effort: 'low',
-        schema: { type: 'object', required: ['sha'], properties: { sha: { type: 'string' } } } }
-    ).then(r => r?.sha || null).catch(() => null),
-    _telemetryPath
-      ? Promise.resolve(null)
-      : agent(
-          `Run: python3 -c "from datetime import datetime, timezone; print(datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ'))"\nReturn { ts: "<compact-utc-timestamp>" }`,
-          { label: 'run-ts', phase: 'Debrief', model: haikuModel, effort: 'low',
-            schema: { type: 'object', required: ['ts'], properties: { ts: { type: 'string' } } } }
-        ).then(r => r?.ts || null).catch(() => null),
-  ])
+  const inputTokens = args.inputTokens != null ? args.inputTokens : null
+  const costResult  = _computeCostV2({ agentCountByModel, inputTokens, outputTokensTotal })
+  const repo = (repoPath || '').replace(/\/$/, '').split('/').pop() || null
+  const issueKey = (input || '').match(/\b([A-Z]+-\d+)\b/)?.[1] || manifestEntry?.jiraKey || _slugFromInput(input)
+  return {
+    schemaVersion: '2.0',
+    runId:         args.runId || null,
+    skill:         'harness-plan',
+    skillsSchemaVersion: SKILLS_SCHEMA_VERSION,
+    skillsCommit:  args.skillsCommit || null,
+    emitTrigger:   'workflow',
+    billingMode:   'api',
+    ts:            args.today || 'unknown',
+    status,
+    outcome:       toOutcome(status),
+    sourceIssue:   issueKey || 'unknown',
+    repo,
+    repoPath:      repoPath || null,
+    branch:        null,
+    durationMs:    args.durationMs != null ? args.durationMs : null,
+    size:          null,
+    tokens: {
+      byModel:     Object.fromEntries(Object.entries(agentCountByModel).map(([m, _]) => [m, { output: null }])),
+      total: {
+        input:          inputTokens,
+        output:         outputTokensTotal,
+        subagentTokens: null,
+        cacheRead:      null,
+        cacheCreation:  null,
+      },
+    },
+    agentCount: {
+      byModel: agentCountByModel,
+      byPhase: agentCountByPhase,
+    },
+    cost: costResult,
+    ...extra,
+  }
+}
+
+const _COST_RATES_V2 = { haiku: { in: 1.00, out: 5.00 }, sonnet: { in: 3.00, out: 15.00 }, opus: { in: 5.00, out: 25.00 } }
+const _PRICE_TABLE_VERSION = '2026-07-25'
+function _rateForV2(model) {
+  const m = String(model)
+  if (m.includes('opus'))  return _COST_RATES_V2.opus
+  if (m.includes('haiku')) return _COST_RATES_V2.haiku
+  return _COST_RATES_V2.sonnet
+}
+function _computeCostV2({ agentCountByModel, inputTokens, outputTokensTotal }) {
+  const nullReasons = {}
+  const entries = Object.entries(agentCountByModel || {})
+  const totalAgents = entries.reduce((s, [, c]) => s + c, 0)
+  if (!entries.length || !totalAgents) {
+    nullReasons['cost.rateLockedUsd'] = 'no agentCountByModel'
+    return { rateLockedUsd: null, priceTableVersion: _PRICE_TABLE_VERSION, nullReasons }
+  }
+  const blendedIn  = entries.reduce((s, [m, c]) => s + _rateForV2(m).in  * (c / totalAgents), 0)
+  const blendedOut = entries.reduce((s, [m, c]) => s + _rateForV2(m).out * (c / totalAgents), 0)
+  const inCost  = inputTokens       != null ? (inputTokens       / 1_000_000) * blendedIn  : 0
+  const outCost = outputTokensTotal != null ? (outputTokensTotal / 1_000_000) * blendedOut : 0
+  if (inputTokens == null) nullReasons['tokens.total.input'] = 'subagentTokens not yet patched'
+  return { rateLockedUsd: parseFloat((inCost + outCost).toFixed(4)), priceTableVersion: _PRICE_TABLE_VERSION, nullReasons }
+}
+
+// Record schema: skills/harness-telemetry-schema/telemetry-v2.jsonc
+async function writeAuditRecord(status, extra = {}) {
+  const recordObj = _buildV2Record(status, extra)
   if (!_telemetryPath) {
     const repo = (repoPath || '').replace(/\/$/, '').split('/').pop() || 'unknown-repo'
-    const issueKey = (input || '').match(/\b([A-Z]+-\d+)\b/)?.[1]
-      || manifestEntry?.jiraKey
-      || _slugFromInput(input)
-    const _homeDir = (repoPath || '').replace(/\/Desktop\/Repos\/[^/]+\/?$/, '') || '/tmp'
-    _telemetryPath = `${_homeDir}/Desktop/Repos/harness-telemetry/logs/${repo}__harness-plan__${issueKey}__${runTs || 'unknown-ts'}.jsonl`
+    const issueKey = (input || '').match(/\b([A-Z]+-\d+)\b/)?.[1] || manifestEntry?.jiraKey || _slugFromInput(input)
+    const homeDir = (repoPath || '').replace(/\/Desktop\/Repos\/[^/]+\/?$/, '') || '/tmp'
+    const runTs = args.runTs || 'unknown-ts'
+    _telemetryPath = `${homeDir}/Desktop/Repos/harness-telemetry/v2/${repo}__harness-plan__${issueKey}__${runTs}.jsonl`
   }
-  // ts: YYYY-MM-DD for dashboard day-grouping.
-  // args.today preferred; fall back to first 8 chars of compact UTC runTs (20260724T...)
-  const tsDate = args.today || (runTs ? runTs.slice(0, 4) + '-' + runTs.slice(4, 6) + '-' + runTs.slice(6, 8) : 'unknown')
-  const record = JSON.stringify({
-    ts: tsDate,
-    skill: 'harness-plan',
-    skillsSchemaVersion: SKILLS_SCHEMA_VERSION,
-    telemetryVersion: 'v2',
-    skillsCommit,
-    status,
-    outcome: toOutcome(status),
-    repo: (repoPath || '').replace(/\/$/, '').split('/').pop() || null,
-    repoPath: repoPath || null,
-    branch: null,
-    durationMs,
-    agentCountByModel,
-    agentCountByPhase,
-    outputTokensTotal,
-    ...extra,
-  })
-  const legacyCmd    = `echo '${record.replace(/'/g, "'\\''")}' >> ~/.claude/harness-plan-runs.jsonl`
+  const record = JSON.stringify(recordObj)
   const telemetryCmd = `mkdir -p "$(dirname '${_telemetryPath}')" && echo '${record.replace(/'/g, "'\\''")}' >> '${_telemetryPath}'`
   await agent(
-    `Append an audit record to two JSONL files. Use the Bash tool only. Run both commands:\n1. ${legacyCmd}\n2. ${telemetryCmd}\nReturn { appended: true }.`,
+    `Append an audit record to a JSONL file. Use the Bash tool only.\n${telemetryCmd}\nReturn { appended: true }.`,
     { label: 'audit-write', phase: 'Debrief', model: haikuModel, effort: 'low',
       schema: { type: 'object', required: ['appended'], properties: { appended: { type: 'boolean' } } },
     }
@@ -149,7 +166,7 @@ function _slugFromInput(text) {
     .replace(/\s+/g, '-').replace(/-{2,}/g, '-').slice(0, 40).replace(/-+$/, '')
   return slug || 'greenfield'
 }
-// Format: {telemetryDir}/logs/{repo}__{skill}__{ticket}__{timestamp}.jsonl
+// Format: {telemetryDir}/v2/{repo}__{skill}__{ticket}__{timestamp}.jsonl
 // (path is assembled inline in writeAuditRecord above)
 
 // lib/barrier.js — keep identical. import() unavailable in workflow scripts (probe-confirmed).
@@ -185,26 +202,13 @@ const _PLAN_OUTCOME_MAP = {
   FAILED:             'failed',
 }
 function toOutcome(status) { return _PLAN_OUTCOME_MAP[status] ?? 'failed' }
-// lib/cost.js — keep identical. Rates from https://platform.claude.com/docs/en/about-claude/pricing (2026-07-24)
-// Haiku 4.5: $1.00/$5.00 per MTok in/out | Sonnet 4.x: $3.00/$15.00 | Opus 4.5+: $5.00/$25.00
-const _COST_RATES = {
-  haiku:  { in: 1.00, out: 5.00  },
-  sonnet: { in: 3.00, out: 15.00 },
-  opus:   { in: 5.00, out: 25.00 },
-}
-function _rateFor(model) {
+// lib/cost.js — keep identical. Rates from https://docs.claude.com/en/docs/about-claude/pricing (2026-07-25)
+const _COST_RATES_V2 = { haiku: { in: 1.00, out: 5.00 }, sonnet: { in: 3.00, out: 15.00 }, opus: { in: 5.00, out: 25.00 } }
+function _rateForV2(model) {
   const m = String(model)
-  if (m.includes('opus'))  return _COST_RATES.opus
-  if (m.includes('haiku')) return _COST_RATES.haiku
-  return _COST_RATES.sonnet
-}
-function _computeCost(agentCountByModel, outputTokensTotal) {
-  const entries = Object.entries(agentCountByModel)
-  if (!entries.length || !outputTokensTotal) return 0
-  const totalAgents = entries.reduce((s, [, c]) => s + c, 0)
-  if (!totalAgents) return 0
-  const blendedRate = entries.reduce((s, [m, c]) => s + _rateFor(m).out * (c / totalAgents), 0)
-  return parseFloat(((outputTokensTotal / 1_000_000) * blendedRate).toFixed(4))
+  if (m.includes('opus'))  return _COST_RATES_V2.opus
+  if (m.includes('haiku')) return _COST_RATES_V2.haiku
+  return _COST_RATES_V2.sonnet
 }
 // ===== END PURE =====
 
@@ -552,7 +556,7 @@ Return { written: true }`,
 
   trackPhase('Debrief')
   const xsTokensTotal = budget.spent() - workflowStartTokens
-  const xsCostUsd = _computeCost(agentCountByModel, xsTokensTotal)  // display only — not written to audit log
+  const xsCostUsd = _computeCostV2({ agentCountByModel, inputTokens: null, outputTokensTotal: xsTokensTotal }).rateLockedUsd  // display only — not written to audit log
   await writeAuditRecord('COMPLETE', {
     planSlug,
     manifestPath: `docs/plans/${manifestName}`,
@@ -579,8 +583,8 @@ harness-plan
 
   quality: ✓ clean
   next:    /harness-implement docs/plans/${planJsonName}
-  audit:   ~/.claude/harness-plan-runs.jsonl
-           ~/Desktop/Repos/harness-telemetry/logs/  (run-specific file)
+  
+           ~/Desktop/Repos/harness-telemetry/v2/  (run-specific file)
   tokens:  ${xsTokensTotal.toLocaleString()}  (~$${xsCostUsd} estimated)
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`
   log(xsCliSummary)
@@ -1397,7 +1401,7 @@ const totalRevisions = validConcernResults.reduce((s, r) => s + (r.revisionRound
 const totalCoverageRounds = validConcernResults.reduce((s, r) => s + (r.coverageRound || 0), 0)
 
 const outputTokensTotal = budget.spent() - workflowStartTokens
-const estimatedCostUsd = _computeCost(agentCountByModel, outputTokensTotal)
+const displayCostUsd = _computeCostV2({ agentCountByModel, inputTokens: null, outputTokensTotal }).rateLockedUsd
 
 // Quality check — inline, no agent
 const qualityIssues = []
@@ -1467,6 +1471,7 @@ await writeAuditRecord(planStatus, {
   architectRevisions: totalRevisions,
   coverageRounds: totalCoverageRounds,
   size,
+  planManifest: manifestObj,
 })
 auditWritten = true
 
@@ -1481,8 +1486,6 @@ const nextCmd = manifestObj.execution === 'parallel'
       ? `/harness-implement docs/plans/${e.jsonName}`
       : `/harness-implement docs/plans/${e.jsonName}  (after ${planEntries[i-1].suffix})`
     ).join('\n         ')
-
-const outputTokensTotal = budget.spent() - workflowStartTokens
 
 const planStatusIcon = planStatus === 'COMPLETE' ? '✅' : '⚠️'
 
@@ -1503,15 +1506,15 @@ harness-plan
   size:    ${size}
   agents:  ${totalAgents}
 ${agentMetricsLines}
-  cost:    ~$${estimatedCostUsd}
+  cost:    ~$${displayCostUsd}
 
   plans: ${planEntries.length}    tasks: ${allTasks.length}    files: ${allFilesInScope.length}    concerns: ${validConcernResults.length}
 ${planEntries.map(e => `    • docs/plans/${e.fileName}  (${e.concern.label})`).join('\n')}
 
   quality: ${qualityIssues.length === 0 ? '✓ clean' : `${qualityIssues.length} issue(s) — see audit log`}
   next:    ${nextCmd}
-  audit:   ~/.claude/harness-plan-runs.jsonl
-           ~/Desktop/Repos/harness-telemetry/logs/  (run-specific file)
+  
+           ~/Desktop/Repos/harness-telemetry/v2/  (run-specific file)
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`
 
 log(cliSummary)
@@ -1521,9 +1524,12 @@ return {
   planCount: planEntries.length,
   taskCount: allTasks.length,
   qualityIssues,
-  estimatedCostUsd,
+  estimatedCostUsd: displayCostUsd,
   status: planStatus,
   cliSummary,
+  telemetryPath: _telemetryPath,
+  outputTokensTotal: budget.spent() - workflowStartTokens,
+  agentCountByModel,
 }
 
 } catch (err) {

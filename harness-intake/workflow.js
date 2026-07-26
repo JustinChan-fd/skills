@@ -90,7 +90,7 @@ function _slugFromInput(text) {
     .replace(/\s+/g, '-').replace(/-{2,}/g, '-').slice(0, 40).replace(/-+$/, '')
   return slug || 'greenfield'
 }
-// Format: {telemetryDir}/logs/{repo}__{skill}__{ticket}__{timestamp}.jsonl
+// Format: {telemetryDir}/v2/{repo}__{skill}__{ticket}__{timestamp}.jsonl
 // Split on __ to get exactly [repo, skill, ticket, timestamp]
 function _buildTelemetryPath({ repoPath, skill, issueKey, rawText, timestamp }) {
   const repo    = _repoNameFromPath(repoPath)
@@ -98,7 +98,7 @@ function _buildTelemetryPath({ repoPath, skill, issueKey, rawText, timestamp }) 
   const ts      = timestamp || 'unknown-ts'
   const homeDir = (repoPath || '').replace(/\/Desktop\/Repos\/[^/]+\/?$/, '') || '/tmp'
   const teleDir = `${homeDir}/Desktop/Repos/harness-telemetry`
-  return `${teleDir}/logs/${repo}__${skill}__${key}__${ts}.jsonl`
+  return `${teleDir}/v2/${repo}__${skill}__${key}__${ts}.jsonl`
 }
 function _buildAppendCmd(path, jsonLine) {
   const escaped = jsonLine.replace(/'/g, "'\\''")
@@ -289,30 +289,10 @@ function routingFor(size) {
   if (!r) throw new Error(`routingFor: unknown size "${size}"`)
   return r
 }
-// lib/cost.js — keep identical. Rates from https://platform.claude.com/docs/en/about-claude/pricing (2026-07-24)
-// Haiku 4.5: $1.00/$5.00 per MTok in/out | Sonnet 4.x: $3.00/$15.00 | Opus 4.5+: $5.00/$25.00
-const _COST_RATES = {
-  haiku:  { in: 1.00, out: 5.00  },
-  sonnet: { in: 3.00, out: 15.00 },
-  opus:   { in: 5.00, out: 25.00 },
-}
-function _rateFor(model) {
-  const m = String(model)
-  if (m.includes('opus'))  return _COST_RATES.opus
-  if (m.includes('haiku')) return _COST_RATES.haiku
-  return _COST_RATES.sonnet
-}
-// agentCountByModel: modelId→agent count. outputTokensTotal: total output tokens for the run.
-// Tokens are split proportionally by agent count — immune to parallel() budget.spent() race
-// (per-agent delta tracking overcounts sonnet when agents run concurrently).
-// Output-only — budget.spent() tracks outputs only. Underestimates true cost (~4x) but self-contained.
-function _computeCost(agentCountByModel, outputTokensTotal) {
-  const entries = Object.entries(agentCountByModel)
-  if (!entries.length || !outputTokensTotal) return 0
-  const totalAgents = entries.reduce((s, [, c]) => s + c, 0)
-  if (!totalAgents) return 0
-  const blendedRate = entries.reduce((s, [m, c]) => s + _rateFor(m).out * (c / totalAgents), 0)
-  return parseFloat(((outputTokensTotal / 1_000_000) * blendedRate).toFixed(4))
+// lib/cost.js — keep identical. Rates from https://docs.claude.com/en/docs/about-claude/pricing (2026-07-25)
+// Display-only: _computeCostV2 used in writeAuditRecord (full input+output); this is for CLI summary line only.
+function _computeDisplayCost(agentCountByModel, outputTokensTotal) {
+  return _computeCostV2({ agentCountByModel, inputTokens: null, outputTokensTotal }).rateLockedUsd || 0
 }
 // lib/grouper.js — keep identical.
 const _CHUNK_SIZE = 8
@@ -367,60 +347,88 @@ function _chunkAcFilesIntoSubtasks(acResult, issueKey, migrationPattern) {
 }
 // ===== END PURE =====
 
-// telemetryPath is set on first writeAuditRecord call (needs a timestamp agent),
-// then reused so all writes within a run land in the same file.
+// telemetryPath: built from args.runId + args.runTs passed by SKILL.md wrapper.
+// No timestamp agent needed — wrapper captures wall-clock before/after Workflow().
 let _telemetryPath = null
 
-async function writeAuditRecord(status, extra = {}) {
+function _buildV2Record(status, extra = {}) {
   const outputTokensTotal = budget.spent() - workflowStartTokens
-  // durationMs: computed via shell since Date.now() is unavailable in workflow scripts
-  // startTs is passed as args.startTs (epoch ms string) from SKILL.md before Workflow() call
-  const [durationMs, skillsCommit, runTs] = await Promise.all([
-    args.startTs
-      ? agent(
-          `Run: python3 -c "import time; print(int(time.time()*1000) - ${args.startTs})"\nReturn { ms: <number> }`,
-          { label: 'duration-ms', phase: 'Debrief', model: haikuModel, effort: 'low',
-            schema: { type: 'object', required: ['ms'], properties: { ms: { type: 'number' } } } }
-        ).then(r => { const v = r?.ms; return (v != null && v > 0 && v < 36_000_000) ? v : null }).catch(() => null)
-      : Promise.resolve(null),
-    agent(
-      `Run: git -C ~/Desktop/Repos/skills rev-parse HEAD 2>/dev/null || git -C ~/.claude/skills rev-parse HEAD 2>/dev/null || echo unknown\nReturn { sha: "<40-char hex or unknown>" }`,
-      { label: 'skills-commit', phase: 'Debrief', model: haikuModel, effort: 'low',
-        schema: { type: 'object', required: ['sha'], properties: { sha: { type: 'string' } } } }
-    ).then(r => r?.sha || null).catch(() => null),
-    _telemetryPath
-      ? Promise.resolve(null)
-      : agent(
-          `Run: python3 -c "from datetime import datetime, timezone; print(datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ'))"\nReturn { ts: "<compact-utc-timestamp>" }`,
-          { label: 'run-ts', phase: 'Debrief', model: haikuModel, effort: 'low',
-            schema: { type: 'object', required: ['ts'], properties: { ts: { type: 'string' } } } }
-        ).then(r => r?.ts || null).catch(() => null),
-  ])
+  // inputTokens derived by SKILL.md wrapper after Workflow() returns (subagentTokens - outputTokensTotal).
+  // args.inputTokens is null until the wrapper patches the file; record is correct at emit time.
+  const inputTokens = args.inputTokens != null ? args.inputTokens : null
+  const costResult  = _computeCostV2({ agentCountByModel, inputTokens, outputTokensTotal })
+  return {
+    schemaVersion: '2.0',
+    runId:         args.runId || null,
+    skill:         'harness-intake',
+    skillsSchemaVersion: SKILLS_SCHEMA_VERSION,
+    skillsCommit:  args.skillsCommit || null,
+    emitTrigger:   'workflow',
+    billingMode:   'api',
+    ts:            args.today || 'unknown',
+    status,
+    outcome:       toOutcome(status),
+    sourceIssue:   issueKey || 'unknown',
+    repo:          _repoNameFromPath(repoPath),
+    repoPath:      repoPath || null,
+    branch:        null,
+    durationMs:    args.durationMs != null ? args.durationMs : null,
+    size:          null,
+    tokens: {
+      byModel:     Object.fromEntries(Object.entries(agentCountByModel).map(([m, _]) => [m, { output: null }])),
+      total: {
+        input:           inputTokens,
+        output:          outputTokensTotal,
+        subagentTokens:  null,
+        cacheRead:       null,
+        cacheCreation:   null,
+      },
+    },
+    agentCount: {
+      byModel: agentCountByModel,
+      byPhase: agentCountByPhase,
+    },
+    cost: costResult,
+    ...extra,
+  }
+}
+
+// Inline mirror of lib/cost.js computeCost (import() unavailable in workflow scripts).
+const _COST_RATES_V2 = { haiku: { in: 1.00, out: 5.00 }, sonnet: { in: 3.00, out: 15.00 }, opus: { in: 5.00, out: 25.00 } }
+const _PRICE_TABLE_VERSION = '2026-07-25'
+function _rateForV2(model) {
+  const m = String(model)
+  if (m.includes('opus'))  return _COST_RATES_V2.opus
+  if (m.includes('haiku')) return _COST_RATES_V2.haiku
+  return _COST_RATES_V2.sonnet
+}
+function _computeCostV2({ agentCountByModel, inputTokens, outputTokensTotal }) {
+  const nullReasons = {}
+  const entries = Object.entries(agentCountByModel || {})
+  const totalAgents = entries.reduce((s, [, c]) => s + c, 0)
+  if (!entries.length || !totalAgents) {
+    nullReasons['cost.rateLockedUsd'] = 'no agentCountByModel'
+    return { rateLockedUsd: null, priceTableVersion: _PRICE_TABLE_VERSION, nullReasons }
+  }
+  const blendedIn  = entries.reduce((s, [m, c]) => s + _rateForV2(m).in  * (c / totalAgents), 0)
+  const blendedOut = entries.reduce((s, [m, c]) => s + _rateForV2(m).out * (c / totalAgents), 0)
+  const inCost  = inputTokens      != null ? (inputTokens      / 1_000_000) * blendedIn  : 0
+  const outCost = outputTokensTotal != null ? (outputTokensTotal / 1_000_000) * blendedOut : 0
+  if (inputTokens == null) nullReasons['tokens.total.input'] = 'subagentTokens not yet patched'
+  return { rateLockedUsd: parseFloat((inCost + outCost).toFixed(4)), priceTableVersion: _PRICE_TABLE_VERSION, nullReasons }
+}
+
+// Record schema: skills/harness-telemetry-schema/telemetry-v2.jsonc
+async function writeAuditRecord(status, extra = {}) {
+  const recordObj = _buildV2Record(status, extra)
   if (!_telemetryPath) {
+    const runTs = args.runTs || 'unknown-ts'
     _telemetryPath = _buildTelemetryPath({ repoPath, skill: 'harness-intake', issueKey, rawText: input, timestamp: runTs })
   }
-  const record = JSON.stringify({
-    ts: args.today || 'unknown',
-    skill: 'harness-intake',
-    skillsSchemaVersion: SKILLS_SCHEMA_VERSION,
-    telemetryVersion: 'v2',
-    skillsCommit,
-    status,
-    outcome: toOutcome(status),
-    sourceIssue: issueKey || 'unknown',
-    repo: _repoNameFromPath(repoPath),
-    repoPath: repoPath || null,
-    branch: null,
-    durationMs,
-    agentCountByModel,
-    agentCountByPhase,
-    outputTokensTotal,
-    ...extra,
-  })
-  const legacyCmd  = `echo '${record.replace(/'/g, "'\\''")}' >> ~/.claude/harness-intake-runs.jsonl`
+  const record = JSON.stringify(recordObj)
   const telemetryCmd = _buildAppendCmd(_telemetryPath, record)
   await agent(
-    `Append an audit record to two JSONL files. Use the Bash tool only. Run both commands:\n1. ${legacyCmd}\n2. ${telemetryCmd}\nReturn { appended: true }.`,
+    `Append an audit record to a JSONL file. Use the Bash tool only.\n${telemetryCmd}\nReturn { appended: true }.`,
     {
       label: 'audit-write',
       phase: 'Debrief',
@@ -1012,7 +1020,7 @@ log(`Work Intelligence: size=${size} splitRequired=${splitRequired} type=${workT
 
 if (!splitRequired) {
   const outputTokensTotal = budget.spent() - workflowStartTokens
-  const estimatedCostUsd = _computeCost(agentCountByModel, outputTokensTotal)
+  const estimatedCostUsd = _computeDisplayCost(agentCountByModel, outputTokensTotal)
 
   // intakeManifest — full typed handoff for harness-plan
   const intakeManifest = {
@@ -1051,8 +1059,7 @@ harness-intake
 
   quality: ✓ clean
   next:    ${nextCmd}
-  audit:   ~/.claude/harness-intake-runs.jsonl
-           ~/Desktop/Repos/harness-telemetry/logs/  (run-specific file)
+           ~/Desktop/Repos/harness-telemetry/v2/   (run-specific file)
   tokens:  ${outputTokensTotal.toLocaleString()}  (~$${estimatedCostUsd} estimated)
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`
 
@@ -1065,6 +1072,7 @@ harness-intake
     execution: 'sequential',
     framingConflicts: 0,
     triageSizeOverride,
+    intakeManifest,
   })
   log(skipSummary)
   return {
@@ -1073,6 +1081,8 @@ harness-intake
     intakeManifest,
     cliSummary: skipSummary,
     telemetryPath: _telemetryPath,
+    outputTokensTotal,
+    agentCountByModel,
   }
 }
 
@@ -1748,6 +1758,7 @@ await writeAuditRecord(planStatus, {
     .map(ac => ({ bullet: ac.bullet, resolved: !!ac.suspiciousZeroResolved, variant: ac.zeroRetryVariant || null, finalCount: ac.verifiedCount })),
   qualityIssues,
   triageSizeOverride,
+  intakeManifest,
 })
 
 // Build CLI group display lines
@@ -1764,7 +1775,7 @@ const qualityLine = qualityIssues.length === 0
   : `${qualityIssues.length} issue(s) — ${qualityIssues.slice(0, 2).join('; ')}${qualityIssues.length > 2 ? '…' : ''}`
 
 const outputTokensTotal = budget.spent() - workflowStartTokens
-const estimatedCostUsd  = _computeCost(agentCountByModel, outputTokensTotal)
+const estimatedCostUsd  = _computeDisplayCost(agentCountByModel, outputTokensTotal)
 
 const statusIcon = planStatus === 'COMPLETE' ? '✅' : planStatus === 'COMPLETE_FRAMING_CORRECTED' ? '✅' : planStatus === 'COMPLETE_WITH_STUBS' ? '⚠️' : '⚠️'
 
@@ -1817,8 +1828,7 @@ ${groupLines}
 ${doneConditionAcs.length > 0 ? `\n  done-conditions (add to predecessor AC criteria, not separate subtasks):\n${doneConditionAcs.map(ac => `    · ${ac.slice(0, 80)}`).join('\n')}\n` : ''}
   quality: ${qualityLine}
   next:    confirm → create Jira subtasks → /harness-plan each G1 subtask
-  audit:   ~/.claude/harness-intake-runs.jsonl
-           ~/Desktop/Repos/harness-telemetry/logs/  (run-specific file)
+           ~/Desktop/Repos/harness-telemetry/v2/   (run-specific file)
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`
 
 log(cliSummary)
@@ -1836,6 +1846,8 @@ return {
   status: planStatus,
   cliSummary,
   telemetryPath: _telemetryPath,
+  outputTokensTotal,
+  agentCountByModel,
 }
 
 } catch (err) {

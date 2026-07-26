@@ -5,6 +5,9 @@ description: Use after harness-plan has produced and you have approved a plan fi
 
 # harness-implement
 
+> **IMPORTANT — invoke via `/harness-implement`, never directly.**
+> Running `workflow.js` directly bypasses the SKILL.md wrapper entirely: `startTs`, `skillsCommit`, `runTs`, `runId`, and the post-workflow telemetry patch (subagentTokens, inputTokens, durationMs, recomputedCost) are all set by the wrapper, not the workflow. A bare Workflow call produces an incomplete audit record and a mismatched or missing telemetry file. Always enter through the skill.
+
 ## Philosophy: No Thinking, Just Typing
 
 **harness-implement does not think. It executes.**
@@ -52,25 +55,79 @@ List the available remote branches (run `git branch -r | sed 's|origin/||' | gre
 
 Then pass the answer as `baseBranch`:
 ```js
-const startTs = await Bash('python3 -c "import time; print(int(time.time()*1000))"').then(r => r.trim())
-Workflow({
+// Capture metadata before Workflow() — Date.now() is unavailable inside workflow scripts.
+const [startTs, skillsCommit, runTs] = await Promise.all([
+  Bash('python3 -c "import time; print(int(time.time()*1000))"').then(r => r.trim()),
+  Bash('git -C ~/Desktop/Repos/skills rev-parse HEAD 2>/dev/null || git -C ~/.claude/skills rev-parse HEAD 2>/dev/null || echo unknown').then(r => r.trim()),
+  Bash('python3 -c "from datetime import datetime, timezone; print(datetime.now(timezone.utc).strftime(\'%Y%m%dT%H%M%SZ\'))"').then(r => r.trim()),
+])
+const issueKey = planPath.match(/[A-Z]+-\d+/)?.[0] || 'impl'
+const runId = `${issueKey}-${runTs}`
+
+const result = await Workflow({
   scriptPath: '/Users/206618626@bwt3.com/.claude/skills/harness-implement/workflow.js',
-  args: { planPath, repoPath, today: currentDate, baseBranch, startTs },
+  args: { planPath, repoPath, today: currentDate, baseBranch, startTs, runId, runTs, skillsCommit },
 })
 // currentDate is injected into every session — it is always available, never guess or hardcode it
 // baseBranch: the branch name the user selected (no "origin/" prefix)
-```
 
-After the workflow returns, run this backup audit immediately:
+// Patch telemetry file with token counts and duration after Workflow() returns.
+// Supports dot-notation keys for nested v2 paths (e.g. "tokens.total.input").
+const patchTelemetryRecord = async (path, fields) => {
+  try {
+    const fieldJson = JSON.stringify(fields).replace(/'/g, "'\\''")
+    await Bash(`python3 -c "
+import json, sys
 
-```js
-const auditBackup = JSON.stringify({
-  ts: currentDate, skill: 'harness-implement', status: result.status || 'COMPLETE',
-  planKey: result.planKey || 'unknown', branch: result.branch || null,
-  tasksPassed: result.tasksPassed || 0, tasksTotal: result.tasksTotal || 0,
-  backup: true,
-})
-await Bash(`grep -q '"backup":true' ~/.claude/harness-implement-runs.jsonl 2>/dev/null || echo '${auditBackup.replace(/'/g, "'\\''")}' >> ~/.claude/harness-implement-runs.jsonl`)
+def set_nested(d, dotted_key, value):
+    keys = dotted_key.split('.')
+    for k in keys[:-1]:
+        if k not in d or not isinstance(d[k], dict):
+            d[k] = {}
+        d = d[k]
+    d[keys[-1]] = value
+
+path, fields_json = sys.argv[1], sys.argv[2]
+fields = json.loads(fields_json)
+lines = open(path).readlines()
+if lines:
+    last = json.loads(lines[-1])
+    for k, v in fields.items():
+        if '.' in k:
+            set_nested(last, k, v)
+        else:
+            last[k] = v
+    lines[-1] = json.dumps(last)
+    open(path, 'w').writelines([l + ('\\\n' if not l.endswith('\\\n') else '') for l in lines])
+" "${path}" '${fieldJson}'`)
+  } catch (_) {}
+}
+
+const endTs = parseInt(await Bash('python3 -c "import time; print(int(time.time()*1000))"').then(r => r.trim()), 10)
+const durationMs = endTs - parseInt(startTs, 10)
+const subagentTokens = <usage.subagent_tokens from completion notification>
+const outputTokensTotal = result?.outputTokensTotal ?? null
+const inputTokens = (subagentTokens != null && outputTokensTotal != null) ? subagentTokens - outputTokensTotal : null
+
+let recomputedCost = null
+if (inputTokens != null && outputTokensTotal != null && result?.agentCountByModel) {
+  const entries = Object.entries(result.agentCountByModel)
+  const totalAgents = entries.reduce((s, [, c]) => s + c, 0)
+  if (totalAgents > 0) {
+    const rate = m => m.includes('opus') ? {in:5,out:25} : m.includes('haiku') ? {in:1,out:5} : {in:3,out:15}
+    const bIn  = entries.reduce((s,[m,c]) => s + rate(m).in  * (c/totalAgents), 0)
+    const bOut = entries.reduce((s,[m,c]) => s + rate(m).out * (c/totalAgents), 0)
+    recomputedCost = parseFloat(((inputTokens/1e6)*bIn + (outputTokensTotal/1e6)*bOut).toFixed(4))
+  }
+}
+if (result?.telemetryPath) {
+  await patchTelemetryRecord(result.telemetryPath, {
+    durationMs,
+    'tokens.total.subagentTokens': subagentTokens,
+    'tokens.total.input': inputTokens,
+    ...(recomputedCost != null ? { 'cost.rateLockedUsd': recomputedCost } : {}),
+  })
+}
 ```
 
 ## What You Get Back
@@ -122,4 +179,4 @@ When you are stuck or unsure on an important, hard-to-reverse decision:
 - **Blocking** — stop and surface; do not proceed.
 - **Non-blocking** — proceed under a clearly-labeled default; flag it in the output.
 
-Every barrier event is logged to the audit record (`~/.claude/harness-implement-runs.jsonl`).
+Every barrier event is logged to the audit record (`~/Desktop/Repos/harness-telemetry/v2/`).

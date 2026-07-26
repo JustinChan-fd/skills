@@ -5,6 +5,9 @@ description: Universal harness entry point. Classifies any ticket or prompt into
 
 # harness-intake
 
+> **IMPORTANT — invoke via `/harness-intake`, never directly.**
+> Running `workflow.js` directly bypasses the SKILL.md wrapper entirely: `startTs`, `skillsCommit`, `runTs`, `runId`, and the post-workflow telemetry patch (subagentTokens, inputTokens, durationMs, recomputedCost) are all set by the wrapper, not the workflow. A bare Workflow call produces an incomplete audit record and a mismatched or missing telemetry file. Always enter through the skill.
+
 ## Philosophy
 
 **harness-intake is the universal front door for all harness work.**
@@ -74,26 +77,48 @@ Build `input` as `${summary}\n\n${description}`. For freeform prompts, use the p
 
 ### 4. Run the workflow
 
-Run the workflow and patch `subagentTokens` in a single try/catch block. `usage.subagent_tokens` is in the `<usage>` block of the Workflow completion notification — it is the combined input+output token count for all subagents.
+Run the workflow. All metadata (runId, skillsCommit, timestamps) is captured here — the workflow receives them as args and emits them verbatim. After completion, patch the telemetry file with `subagentTokens` and `inputTokens` so cost can be computed accurately. `usage.subagent_tokens` is in the `<usage>` block of the Workflow completion notification.
 
 ```js
-const startTs = await Bash('python3 -c "import time; print(int(time.time()*1000))"').then(r => r.trim())
+// Capture everything before Workflow() — Date.now() is unavailable inside workflow scripts.
+const [startTs, skillsCommit, runTs] = await Promise.all([
+  Bash('python3 -c "import time; print(int(time.time()*1000))"').then(r => r.trim()),
+  Bash('git -C ~/Desktop/Repos/skills rev-parse HEAD 2>/dev/null || git -C ~/.claude/skills rev-parse HEAD 2>/dev/null || echo unknown').then(r => r.trim()),
+  Bash('python3 -c "from datetime import datetime, timezone; print(datetime.now(timezone.utc).strftime(\'%Y%m%dT%H%M%SZ\'))"').then(r => r.trim()),
+])
+// runId: unique per logical run — shared with harness-plan and harness-implement so all 3 records link together.
+const runId = `${issueKey || 'intake'}-${runTs}`
 
-// Helper: patch subagentTokens into the last line of a JSONL file.
-// Wrapped in its own try/catch — if the file doesn't exist yet (early crash
-// before audit-write ran) this is a no-op, not a fatal error.
-const patchSubagentTokens = async (path, subagentTokens) => {
+// Helper: patch fields into the last JSONL line of the telemetry file.
+// Supports dot-notation keys for nested paths (e.g. "tokens.total.input").
+// Wrapped in try/catch — no-op if the file doesn't exist yet (early crash).
+const patchTelemetryRecord = async (path, fields) => {
   try {
+    const fieldJson = JSON.stringify(fields).replace(/'/g, "'\\''")
     await Bash(`python3 -c "
 import json, sys
-path = sys.argv[1]
+
+def set_nested(d, dotted_key, value):
+    keys = dotted_key.split('.')
+    for k in keys[:-1]:
+        if k not in d or not isinstance(d[k], dict):
+            d[k] = {}
+        d = d[k]
+    d[keys[-1]] = value
+
+path, fields_json = sys.argv[1], sys.argv[2]
+fields = json.loads(fields_json)
 lines = open(path).readlines()
 if lines:
     last = json.loads(lines[-1])
-    last['subagentTokens'] = ${subagentTokens}
+    for k, v in fields.items():
+        if '.' in k:
+            set_nested(last, k, v)
+        else:
+            last[k] = v
     lines[-1] = json.dumps(last)
     open(path, 'w').writelines([l + ('\\\n' if not l.endswith('\\\n') else '') for l in lines])
-" "${path}"`)
+" "${path}" '${fieldJson}'`)
   } catch (_) {}
 }
 
@@ -108,14 +133,44 @@ try {
       repoPath,
       today: currentDate,
       startTs,
+      runId,
+      runTs,
+      skillsCommit,
     },
   })
 
-  // Read subagent_tokens from the <usage> block in the completion notification above.
+  // Compute wall-clock duration and token breakdown after Workflow() returns.
+  const endTs = parseInt(await Bash('python3 -c "import time; print(int(time.time()*1000))"').then(r => r.trim()), 10)
+  const durationMs = endTs - parseInt(startTs, 10)
+
+  // subagent_tokens from the <usage> block in the completion notification above.
+  // inputTokens = subagentTokens - outputTokensTotal (both measured by the workflow runtime).
   const subagentTokens = <usage.subagent_tokens from completion notification>
-  await patchSubagentTokens('~/.claude/harness-intake-runs.jsonl', subagentTokens)
-  if (result.telemetryPath) {
-    await patchSubagentTokens(result.telemetryPath, subagentTokens)
+  const outputTokensTotal = result?.outputTokensTotal ?? null
+  const inputTokens = (subagentTokens != null && outputTokensTotal != null)
+    ? subagentTokens - outputTokensTotal
+    : null
+
+  if (result?.telemetryPath) {
+    // Recompute cost with full input+output for accuracy.
+    // Use inline blended-rate formula matching lib/cost.js (import() unavailable in skills).
+    let recomputedCost = null
+    if (inputTokens != null && outputTokensTotal != null && result?.agentCountByModel) {
+      const entries = Object.entries(result.agentCountByModel)
+      const totalAgents = entries.reduce((s, [, c]) => s + c, 0)
+      if (totalAgents > 0) {
+        const rate = m => m.includes('opus') ? {in:5,out:25} : m.includes('haiku') ? {in:1,out:5} : {in:3,out:15}
+        const bIn  = entries.reduce((s,[m,c]) => s + rate(m).in  * (c/totalAgents), 0)
+        const bOut = entries.reduce((s,[m,c]) => s + rate(m).out * (c/totalAgents), 0)
+        recomputedCost = parseFloat(((inputTokens/1e6)*bIn + (outputTokensTotal/1e6)*bOut).toFixed(4))
+      }
+    }
+    await patchTelemetryRecord(result.telemetryPath, {
+      durationMs,
+      'tokens.total.subagentTokens': subagentTokens,
+      'tokens.total.input': inputTokens,
+      ...(recomputedCost != null ? { 'cost.rateLockedUsd': recomputedCost } : {}),
+    })
   }
 
 } catch (err) {
@@ -123,9 +178,8 @@ try {
   // a CRASHED/FAILED audit record. Patch subagentTokens into it if available —
   // on cancellation the <usage> block still appears in the notification.
   const subagentTokens = <usage.subagent_tokens from completion notification, or null if absent>
-  if (subagentTokens) {
-    await patchSubagentTokens('~/.claude/harness-intake-runs.jsonl', subagentTokens)
-    // telemetryPath is unavailable on crash (result is undefined) — skip telemetry patch
+  if (subagentTokens && result?.telemetryPath) {
+    await patchTelemetryRecord(result.telemetryPath, { subagentTokens })
   }
   throw err
 }
@@ -273,4 +327,4 @@ When you are stuck or unsure on an important, hard-to-reverse decision:
 - **Blocking** — stop and surface; do not proceed.
 - **Non-blocking** — proceed under a clearly-labeled default; flag it in the output.
 
-Every barrier event is logged to the audit record (`~/.claude/harness-intake-runs.jsonl`).
+Every barrier event is logged to the audit record (`~/Desktop/Repos/harness-telemetry/v2/`).
