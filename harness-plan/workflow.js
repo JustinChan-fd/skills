@@ -206,14 +206,6 @@ const _PLAN_OUTCOME_MAP = {
   FAILED:             'failed',
 }
 function toOutcome(status) { return _PLAN_OUTCOME_MAP[status] ?? 'failed' }
-// lib/cost.js — keep identical. Rates from https://docs.claude.com/en/docs/about-claude/pricing (2026-07-25)
-const _COST_RATES_V2 = { haiku: { in: 1.00, out: 5.00 }, sonnet: { in: 3.00, out: 15.00 }, opus: { in: 5.00, out: 25.00 } }
-function _rateForV2(model) {
-  const m = String(model)
-  if (m.includes('opus'))  return _COST_RATES_V2.opus
-  if (m.includes('haiku')) return _COST_RATES_V2.haiku
-  return _COST_RATES_V2.sonnet
-}
 // ===== END PURE =====
 
 // ─── Manifest contract ────────────────────────────────────────────────────────
@@ -507,7 +499,7 @@ Return your sizing decision with a one-sentence reasoning and the repo layer lis
 const refineBlock = refine ? `
 
 ## REFINE PASS — the plan was gated below threshold at Handoff B
-Weak checks: ${refine.flags.join(', ') || '(none named)'}.
+Weak checks: ${(refine.flags || []).join(', ') || '(none named)'}.
 Skeptic notes: ${(refine.probeResults || []).map(p => `- ${p.reason}`).join('\n') || '(none)'}.
 Fix these specifically:
 - task-spec-completeness → every task needs WHAT/WHERE/HOW and, when tddRequired, a literal DONE assertion + a fenced code snippet.
