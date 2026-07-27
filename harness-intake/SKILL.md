@@ -47,6 +47,22 @@ Extract from the URL or text:
 
 For freeform prompts with no URL: set `issueKey = null`, `cloudId = null`.
 
+### 1b. Parse --refine (RE_ASK path)
+
+**`--refine <priorManifestPath>`** — re-research mode, invoked by harness-run after a RE_ASK verdict. Load the prior manifest and the bridge's flags/probeResults, and pass them as `args.refine`. The workflow uses them to target its re-research at the specific weak checks (e.g. `grounding-evidence-fresh` low → re-run the grep with `verifiedCount`; `files-populated` low on an L → re-derive subtask files). This does not change the manifest contract — it produces a better-grounded manifest of the same shape.
+
+Invocation delta:
+
+```js
+// when --refine is present:
+const refine = {
+  flags: bridgeResult.flags || [],
+  probeResults: bridgeResult.probeResults || [],
+  priorManifestPath,
+}
+// pass refine into the existing Workflow(...) args object (add `refine` key; default null otherwise)
+```
+
 ### 2. Resolve repoPath + cloudId
 
 **Check the config first** — it's authoritative and avoids heuristic matching:
@@ -164,6 +180,7 @@ try {
       runId,
       runTs,
       skillsCommit,
+      refine: refine || null,
     },
   })
 

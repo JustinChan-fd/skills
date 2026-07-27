@@ -22,9 +22,21 @@ export const meta = {
 const input = args.input
 const repoPath = args.repoPath
 const issueKey = args.issueKey || ''
+const refine = args.refine || null
 
 if (!input) throw new Error('harness-intake requires input')
 if (!repoPath) throw new Error('harness-intake requires repoPath')
+
+const refineBlock = refine ? `
+
+## REFINE PASS — the previous manifest was gated below threshold
+The confidence gate flagged these weak checks: ${refine.flags.join(', ') || '(none named)'}.
+Skeptic notes: ${(refine.probeResults || []).map(p => `- ${p.reason}`).join('\n') || '(none)'}.
+Fix these specifically:
+- grounding-evidence-fresh / ac-research-executable → actually RUN each AC's grep/shell and record verifiedCount; do not assume.
+- files-populated → for an L split, every subtask must carry a non-empty files[]; derive them from the grep hits.
+- size-corroboration → corroborate size from at least two signals (verified hit count AND file count), not a single Sonnet guess.
+Produce a manifest that would now pass these checks.` : ''
 
 // ─── Philosophy (injected into every agent prompt) ────────────────────────────
 const PHILOSOPHY = `
@@ -665,7 +677,7 @@ Return the directory names as repoLayers[]. Do not read any files or run any oth
   ),
   () => trackedAgent(
     `You are a work classifier for harness-intake. Do NOT use any tools or run any shell commands.
-${PHILOSOPHY}
+${PHILOSOPHY}${refineBlock}
 
 CLASSIFY the work type from the ticket text:
   migration     — replace pattern A with B across N files
@@ -690,7 +702,7 @@ ${input}`,
   ),
   () => trackedAgent(
     `You are an AC synthesizer for harness-intake. Do NOT use any tools or run any shell commands.
-${PHILOSOPHY}
+${PHILOSOPHY}${refineBlock}
 
 Your job: synthesize the complete acceptance criteria list from the ticket text alone.
 For each AC, derive the research strategy that a separate verifier will run to check the file count.
