@@ -5,12 +5,12 @@ description: Conductor and runbook for the full harness pipeline; walks intake �
 
 # harness-run
 
-> **IMPORTANT — enter via `/harness-run`, not by launching any child `workflow.js` directly.**
-> harness-run is a runbook with no `workflow.js` of its own. Its children (`/harness-intake`, `/harness-bridge`, `/harness-plan`, `/harness-implement`) must be fired as skills — their wrappers are what set `startTs`/`skillsCommit`/`runId` and write the telemetry records this run aggregates. A bare Workflow call bypasses every one of those and produces an audit-dark, telemetry-incomplete run.
+> **IMPORTANT — enter via `/harness-run`, never by launching `workflow.js` directly.**
+> The SKILL.md wrapper captures `startTs`, `skillsCommit`, `runTs`, `runId`, derives `repo`/`worktreeName`/`runBranch`, reads `weights-override.json`, loads `initialWeights`, and fires `Workflow({scriptPath: harness-run/workflow.js})`. A bare Workflow call skips all of that and produces an incomplete run with no weight-evolution report.
 
 ## Philosophy
 
-**harness-run is the conductor, not a player.** It is an artifact-gated runbook — NOT a JS program that calls skills. It provisions an isolated worktree, then walks the fixed SEQUENCE (`lib/conductor.js`), invoking each child skill **as a skill** (`/harness-intake`, `/harness-plan`, `/harness-implement`) and running `/harness-bridge` between them as a confidence gate. It never launches any `workflow.js` directly. It aggregates every stage's telemetry and, at the end, prints a run summary and a weight-evolution report.
+**harness-run is the conductor, not a player.** It provisions an isolated worktree, then walks the fixed sequence — intake → bridge-A → plan → bridge-B → implement — with each stage running as an `agent()` call inside the conductor workflow. This keeps every stage's token budget isolated in its own subagent, preventing the main session from accumulating output tokens across all stages.
 
 ## The Sequence
 
@@ -28,102 +28,132 @@ guardrailed DRAFT PR + run summary + weight-evolution report
 
 ## Parsing the invocation
 
-Before Phase 0, derive every variable the rest of the runbook uses from the invocation line `/harness-run <jira-key> [--repo <path>] [--base <branch>]`:
-
 ```js
-// Parse the invocation — these four variables are used throughout the runbook.
-const issueKey  = argv[0]                                         // e.g. 'TARS-1271'
-const repoPath  = flags.repo  || null                             // e.g. '/Users/206618626@bwt3.com/Desktop/Repos/webtarsthree'
-const baseBranch = flags.base || 'feat/migrate-native-fetch-from-axios'
-// runTs: UTC timestamp, same format as harness-plan/harness-implement
-const runTs = await Bash('python3 -c "from datetime import datetime, timezone; print(datetime.now(timezone.utc).strftime(\'%Y%m%dT%H%M%SZ\'))"').then(r => r.trim())
+const issueKey    = argv[0]                                        // e.g. 'TARS-1271'
+const repoPath    = flags.repo    || null                          // e.g. '/Users/.../webtarsthree'
+const baseBranch  = flags.base    || 'feat/migrate-native-fetch-from-axios'
+const resumePath  = flags.resume  || null                          // path to a __run-state.json file
+const parentRunId = flags.parent  || null                          // runId of the original run
 ```
 
-`repoPath` must not be null — if `--repo` was omitted, STOP and surface: "harness-run requires --repo <absolute-path-to-target-repo>".
+`repoPath` must not be null — STOP and surface if omitted.
+`baseBranch` must not be empty — STOP if unset; never let it default to main/master.
 
-`baseBranch` must not be empty. If it is somehow unset, STOP and surface rather than letting origin/HEAD resolve to master — this directly triggers the **NEVER master/main** guardrail.
+### Resume mode (`--resume <stateFilePath>`)
+
+When `--resume` is passed, read the checkpoint and validate it before firing the workflow:
+
+```js
+let resumeFromState = null
+if (resumePath) {
+  resumeFromState = JSON.parse(await Read(resumePath))
+  // Validate that all listed artifact paths still exist on disk
+  const missing = []
+  for (const [k, v] of Object.entries(resumeFromState.artifacts || {})) {
+    if (v) {
+      const exists = await Bash(`test -f "${v}" && echo ok || echo missing`).then(r => r.trim())
+      if (exists !== 'ok') missing.push(`${k}: ${v}`)
+    }
+  }
+  if (missing.length) {
+    // Surface missing artifacts — user must fix before resuming
+    throw new Error(`Resume validation failed — these artifacts are missing:\n${missing.join('\n')}\nFix the missing files or start a new run with --parent ${resumeFromState.runId}`)
+  }
+  // Carry forward runTs/runId from the checkpoint so the resumed run shares the same IDs
+  // (All new telemetry records will carry the same runId, linking them to the original run)
+}
+```
+
+Pass `resumeFromState` and `parentRunId` into the Workflow args.
+
+### Continuation mode (`--parent <runId>`)
+
+When `--parent` is passed (without `--resume`), this is a fresh run that acknowledges it continues prior work. All records emitted in this run will carry `parentRunId` in their telemetry, allowing cost aggregation across the full logical run.
+
+```js
+// parentRunId flows into workflow args → every _buildV2Record carries it
+```
 
 ## Guardrails (NEVER cross without explicit human approval)
 
-- **Draft PR only.** Push to a `harness/<ISSUE>-<runTs>` branch; open a DRAFT PR with **base = the feature branch passed via `--base`** (default `feat/migrate-native-fetch-from-axios` for TARS-1271). NEVER merge, NEVER force-push, NEVER touch main/master.
-- **Isolated worktree.** Base off `origin/<base>`; never touch the user's dirty local branches.
-- **Fire children as skills.** Never launch a child `workflow.js` directly.
-- **Stop on first success.** Once the PR lands + `npm test` green + telemetry flowed, STOP iterating.
-- **Spend ceiling.** Hard stop if aggregate cost crosses the run's ceiling (default $500 tonight); stop-on-first-success is the primary brake.
-- **NEVER-list categories** (irreversible-destructive, security-auth-permission, cost-over-threshold, public-api-contract, out-of-scope, legal-compliance) are never auto-decided — stop and surface.
+- **Draft PR only.** Push to `harness/<ISSUE>-<runTs>`; open DRAFT PR with **base = `baseBranch`**. NEVER merge, NEVER force-push, NEVER touch main/master.
+- **Isolated worktree.** Base off `origin/<base>`; never touch dirty local branches.
+- **Stop on first success.** Once PR lands + `npm test` green + telemetry flowed, STOP.
+- **Spend ceiling.** Hard stop if aggregate cost crosses the run ceiling (default $500).
+- **NEVER-list categories** (irreversible-destructive, security-auth-permission, cost-over-threshold, public-api-contract, out-of-scope, legal-compliance) — never auto-decide, stop and surface.
 
-## Phase 0 — Provision the worktree
+## How the wrapper fires the workflow
 
 ```js
-// Single branch name for this entire run — used everywhere below.
-const runBranch = `harness/${issueKey}-${runTs}`
+const [startTs, skillsCommit, runTs] = await Promise.all([
+  Bash('python3 -c "import time; print(int(time.time()*1000))"').then(r => r.trim()),
+  Bash('git -C ~/Desktop/Repos/skills rev-parse HEAD 2>/dev/null || echo unknown').then(r => r.trim()),
+  Bash('python3 -c "from datetime import datetime, timezone; print(datetime.now(timezone.utc).strftime(\'%Y%m%dT%H%M%SZ\'))"').then(r => r.trim()),
+])
+const runId = `${issueKey}-${runTs}`
 
-// Capture initial weights BEFORE any override is applied — this makes the initial→final
-// weight-evolution report meaningful at the end of the run.
-// You are a conductor driving tools, not a JS module — `import` will not run here.
-// Shell out to node to read the frozen defaults out of lib/:
+// repo: canonical name (e.g. 'webtarsthree') — from repoPath, NOT the worktree dir
+const repo = repoPath.split('/').pop()
+
+// Read weights-override.json for tonight's adjustments
+let weightsOverride = {}
+try {
+  weightsOverride = JSON.parse(await Read('/Users/206618626@bwt3.com/.claude/skills/harness-bridge/weights-override.json'))
+} catch {
+  await Write('/Users/206618626@bwt3.com/.claude/skills/harness-bridge/weights-override.json', '{}\n')
+  weightsOverride = {}
+}
+
+// Load initial weights for the weight-evolution report
 const initialWeights = JSON.parse(await Bash(`node --input-type=module -e "
 import { loadWeights } from '/Users/206618626@bwt3.com/.claude/skills/harness-bridge/lib/weights.js'
 import { CHECKS_A } from '/Users/206618626@bwt3.com/.claude/skills/harness-bridge/lib/checks-a.js'
 import { CHECKS_B } from '/Users/206618626@bwt3.com/.claude/skills/harness-bridge/lib/checks-b.js'
 console.log(JSON.stringify({ A: loadWeights(CHECKS_A, null), B: loadWeights(CHECKS_B, null) }))
 "`).then(r => r.trim()))
-let allWeightChanges = []
 
-await Bash(`git -C ${repoPath} fetch origin ${baseBranch}`)
-await Bash(`git -C ${repoPath} worktree add -b ${runBranch} ../wt-${issueKey}-${runTs} origin/${baseBranch}`)
-const worktreePath = `${repoPath}/../wt-${issueKey}-${runTs}`
-// All subsequent child skills receive repoPath and baseBranch as Workflow args (not --repo flags).
-// Only harness-intake accepts a --repo CLI flag; harness-plan and harness-implement take repoPath
-// as a Workflow arg named repoPath.
+const result = await Workflow({
+  scriptPath: '/Users/206618626@bwt3.com/.claude/skills/harness-run/workflow.js',
+  args: {
+    issueKey,
+    repoPath,
+    baseBranch,
+    homeDir: '/Users/206618626@bwt3.com',
+    repo,
+    runTs,
+    runId,
+    skillsCommit,
+    startTs,
+    weightsOverride,
+    initialWeights,
+    parentRunId:      parentRunId || null,
+    resumeFromState:  resumeFromState || null,
+  },
+})
 ```
 
-## Walking the sequence
+After Workflow returns, print `result.summaryBox` and `result.weightReport` verbatim.
 
-For each stage in `SEQUENCE` (from `lib/conductor.js`):
+If `result.finalStatus === 'EXIT'`, print the exit phase, flags, and skeptic reasons clearly — do NOT advance.
 
-1. **Child skill** (intake/plan/implement): invoke as a slash-skill and pass `repoPath` and `baseBranch` as **Workflow args** — NOT as `--repo`/`--base` CLI flags (only harness-intake accepts `--repo`; harness-plan and harness-implement take `repoPath` as a named Workflow arg). For harness-implement, also pass `branchName: runBranch` explicitly so its worktree is created on the same branch that Phase 0 provisioned. harness-implement creates its own nested worktree under `<repoPath>/.claude/worktrees/<planKey>` on `runBranch`; the commits land there — so the push and the draft PR must come from that worktree, not from the Phase-0 worktree. harness-implement's "ask the user one question" step (`harness-implement/SKILL.md:48`) is **pre-answered** by `baseBranch` — do NOT stop to ask; pass `baseBranch` directly. Capture each child's manifest path and telemetry record.
-2. **Bridge stage**: invoke `/harness-bridge` with the upstream artifact path + `handoff` + `retriesUsed` + current `weightsOverride`. Read `result.verdict`:
-   - `actionForVerdict(verdict, retriesUsed).next === 'advance'` → pass `result.gatedPath` to the next child. **For Handoff A that means invoking `/harness-plan <issue> --intake <result.gatedPath>`** — the `--intake` flag is the ONLY way the gated manifest reaches `args.gatedIntake` and becomes authoritative over the ticket text (manifest supremacy). Passing `gatedPath` any other way silently drops it and the gate becomes a no-op.
-   - `=== 'refine'` → re-run the upstream child with `--refine` (passing `result.flags`, `result.probeResults`, and the gated intake path for plan), then re-gate with `retriesUsed: 1`.
-   - `=== 'stop'` → halt; print the weak checks + skeptic reasons; do NOT advance.
-
-## Weight agency (tonight only)
-
-The frozen checklist is the jumping-off point. During the run, if a gate is visibly miscalibrated (e.g. it PROCEEDs on a plan that then stalls implement, or EXITs on a plan that is actually fine), harness-run MAY adjust a weight — under these guardrails:
-
-**Override file wiring (do this in the runbook):** before the first gate, read `harness-bridge/weights-override.json`, creating it as `{}` if absent:
-
-```js
-let weightsOverride = {}
-try { weightsOverride = JSON.parse(await Read('/Users/206618626@bwt3.com/.claude/skills/harness-bridge/weights-override.json')) }
-catch { await Write('/Users/206618626@bwt3.com/.claude/skills/harness-bridge/weights-override.json', '{}\n'); weightsOverride = {} }
-// shape: { A: {checkId: weight, ...}, B: {checkId: weight, ...} } — pass the per-handoff slice to each bridge call:
-//   weightsOverride: (weightsOverride[handoff] && Object.keys(weightsOverride[handoff]).length) ? weightsOverride[handoff] : null
+If `result.stateFilePath` is set, print:
+```
+Run state saved to: <result.stateFilePath>
+To resume: /harness-run <issueKey> --repo <repoPath> --base <baseBranch> --resume <result.stateFilePath>
+To continue as new run: /harness-run <issueKey> --repo <repoPath> --base <baseBranch> --parent <result.runId>
 ```
 
-Pass that per-handoff slice as the bridge's `weightsOverride` arg. To adjust mid-run, compute the new map with `applyWeightChange`, write it back to `weights-override.json` under its handoff key, record a `makeWeightChange({...})` event into the run's `allWeightChanges[]`, and pass it to the next gate call.
+## Weight agency
 
-- Edit only `harness-bridge/weights-override.json` (the default `weight:` literals in `lib/checks-a.js` / `lib/checks-b.js` are NEVER edited).
-- Use `applyWeightChange` semantics: ±15 per adjustment, floor 1, ceiling 60, renormalize to exactly 100.
-- Log every change as a `weightChanges[]` event `{handoff, checkId, oldWeight, newWeight, reason, triggeringRunId, ts}` on the bridge telemetry record.
-- Adjustments are for tonight's run only and are surfaced in the final report for human review.
+Before the first bridge call, the workflow reads `weightsOverride` from the wrapper args. To adjust mid-run: compute the new map with `applyWeightChange` semantics (±15 per check, floor 1, ceiling 60, renormalize to 100), write it back to `weights-override.json` under its handoff key, and pass updated `weightsOverride` to the next bridge call. All changes surface in the final `weightEvolutionReport`.
 
-## End of run
+## Telemetry
 
-1. Aggregate all stage records with `assembleRunSummary(records)`; print the summary box.
-2. Print `weightEvolutionReport(initialWeights, allWeightChanges)` — initial → final for both handoffs, every change with its reason.
-3. If `finalStatus === 'COMPLETE'` and the draft PR landed and `npm test` is green → STOP (first success).
+Each child skill writes its own telemetry record independently. harness-run does not write a separate telemetry record — the run summary is printed from `result.summaryBox`. The individual records in `~/Desktop/Repos/harness-telemetry/v2/` are the authoritative per-stage records.
 
 ## Getting past a barrier
 
-When you are stuck or unsure on an important, hard-to-reverse decision:
-
-1. **Name the single unknown** that would most change your answer.
-2. **Do a quick read-only look** to resolve just that — one shell command, no file writes.
-3. **Re-decide.** Repeat at most **twice** (`MAX_PROBE_LOOPS = 2`).
-
-**NEVER-list decisions** (categories below) are never yours to make — stop and surface them regardless of confidence:
+**NEVER-list decisions** are never auto-decided — stop and surface:
 
 | Category | Keywords |
 |---|---|
@@ -133,9 +163,3 @@ When you are stuck or unsure on an important, hard-to-reverse decision:
 | public-api-contract | public api, breaking change, contract change, schema migration |
 | out-of-scope | outside scope, unplanned file, not in plan |
 | legal-compliance | license, gdpr, compliance, pii |
-
-**After two probes, if still stuck:** record the decision, options, and what you found, then:
-- **Blocking** — stop the run and surface to the human; do not proceed.
-- **Non-blocking** — proceed under a clearly-labeled default; flag it in the output.
-
-Every barrier event is logged to the audit record (`~/Desktop/Repos/harness-telemetry/v2/`).

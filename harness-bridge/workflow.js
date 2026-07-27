@@ -345,12 +345,16 @@ const a = args || {}
 const handoff = a.handoff === 'B' ? 'B' : 'A'
 const retriesUsed = a.retriesUsed || 0
 const errorLog = []
+let currentPhase = 'Score'
+
+try {
 
 function loadArtifact(h, raw) {
   if (h === 'A') return raw
   return { tasks: raw._tasks || [], plans: raw.plans || [], execution: raw.execution || 'sequential', size: raw.size || null }
 }
 
+currentPhase = 'Score'
 phase('Score')
 const artifact = loadArtifact(handoff, a.artifact || {})
 const checks = handoff === 'A' ? CHECKS_A : CHECKS_B
@@ -361,6 +365,7 @@ log(`JS confidence (handoff ${handoff}): ${score}/100`)
 // Flags: any check whose contribution is far below its weight is a weak spot the skeptic should probe.
 const flags = perCheck.filter(p => p.value < 0.5).map(p => p.id)
 
+currentPhase = 'Skeptic'
 phase('Skeptic')
 // ONE adversarial skeptic. It may only LOWER the score. Give it the per-check breakdown + the artifact.
 let adjustedScore = null
@@ -384,13 +389,14 @@ Respond with ONLY this JSON: {"adjustedScore": <int 0..${score}>, "reasons": [".
   adjustedScore = parsed.adjustedScore
   reasons = parsed.reasons
 } catch (err) {
-  errorLog.push({ phase: 'skeptic', message: String(err?.message || err), ts: a.runTs })
+  errorLog.push({ phase: 'skeptic', message: String(err?.message || err), ts: a.runTs, severity: 'warn' })
 }
 
 const finalScore = _clampAdjusted(score, adjustedScore)
 const probeResults = reasons.map(r => ({ source: 'skeptic', reason: r }))
 log(`Final confidence after skeptic: ${finalScore}/100${adjustedScore != null && adjustedScore < score ? ` (lowered from ${score})` : ''}`)
 
+currentPhase = 'Gate'
 phase('Gate')
 const { verdict, action } = _verdictFor(finalScore, retriesUsed)
 log(`Verdict: ${verdict} → ${action}`)
@@ -401,6 +407,8 @@ const stamped = _stampManifest(a.artifact || {}, { confidence: finalScore, verdi
 
 // Telemetry
 const repo = a.repo || _repoNameFromPath(a.repoPath)
+const worktree = a.worktree || null
+const branch = a.branch || null
 const telemetryPath = _bridgeTelemetryPath({ homeDir: a.homeDir, repo, issueKey: a.issueKey || 'intake', runTs: a.runTs })
 const record = {
   schemaVersion: '2.0',
@@ -408,10 +416,13 @@ const record = {
   skill: 'harness-bridge',
   skillsCommit: a.skillsCommit || 'unknown',
   ts: a.runTs,
-  status: 'COMPLETE',
+  status: verdict === 'PROCEED' ? 'COMPLETE' : verdict,
   outcome: verdict,
   sourceIssue: a.issueKey || null,
   repo,
+  worktree,
+  branch,
+  parentRunId:   a.parentRunId   || null,
   repoPath: a.repoPath || null,
   handoff,
   confidence: finalScore,
@@ -443,4 +454,44 @@ return {
   gatedPath, stamped, telemetryPath, telemetryLine: line, appendCmd: _buildAppendCmd(telemetryPath, line),
   outputTokensTotal: null, agentCountByModel: { [MODEL.sonnet]: 1 },
   cliSummary,
+}
+} catch (err) {
+  const isKilled = err.message?.includes('abort') || err.message?.includes('cancel') || err.message?.includes('interrupt')
+  const crashStatus = isKilled ? 'CRASHED' : 'FAILED'
+  const crashRecord = {
+    schemaVersion: '2.0',
+    runId:         a.runId || null,
+    skill:         'harness-bridge',
+    skillsCommit:  a.skillsCommit || 'unknown',
+    ts:            a.runTs || 'unknown',
+    status:        crashStatus,
+    outcome:       'failed',
+    sourceIssue:   a.issueKey || null,
+    repo:          a.repo || (a.repoPath || '').replace(/\/$/, '').split('/').pop() || null,
+    worktree:      a.worktree || null,
+    branch:        a.branch || null,
+    parentRunId:   a.parentRunId || null,
+    repoPath:      a.repoPath || null,
+    handoff:       a.handoff || null,
+    confidence:    null,
+    jsScore:       null,
+    verdict:       crashStatus,
+    action:        'stop',
+    flags:         [],
+    probeResults:  [],
+    failedAtPhase: currentPhase,
+    error:         err.message || String(err),
+    retries:       a.retriesUsed || 0,
+    errorLog:      [...errorLog, { phase: currentPhase, message: String(err?.message || err), ts: a.runTs || 'unknown', severity: 'error' }],
+    weightChanges: a.weightChanges || [],
+  }
+  const crashLine = JSON.stringify(crashRecord)
+  const crashTelemetryPath = _bridgeTelemetryPath({ homeDir: a.homeDir, repo: crashRecord.repo, issueKey: a.issueKey || 'unknown', runTs: a.runTs || 'unknown' })
+  throw Object.assign(err, {
+    telemetryPath:  crashTelemetryPath,
+    telemetryLine:  crashLine,
+    appendCmd:      _buildAppendCmd(crashTelemetryPath, crashLine),
+    verdict:        crashStatus,
+    action:         'stop',
+  })
 }

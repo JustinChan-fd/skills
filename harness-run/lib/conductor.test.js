@@ -11,6 +11,9 @@ test('actionForVerdict routes PROCEED/RE_ASK/EXIT', () => {
   assert.equal(actionForVerdict('RE_ASK', 0).next, 'refine')
   assert.equal(actionForVerdict('EXIT', 1).next, 'stop')
 })
+test('actionForVerdict RE_ASK with retriesUsed=1 stops (not refine)', () => {
+  assert.equal(actionForVerdict('RE_ASK', 1).next, 'stop')
+})
 test('assembleRunSummary sums cost + duration and reports final status', () => {
   const recs = [
     { skill: 'harness-intake', cost: { rateLockedUsd: 0.5 }, durationMs: 1000, outcome: 'COMPLETE' },

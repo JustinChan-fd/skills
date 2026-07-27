@@ -44,14 +44,15 @@ if (handoff === 'B') {
   artifact._tasks = tasks
 }
 
-const startTs = await Bash('python3 -c "import time; print(int(time.time()*1000))"').then(r => r.trim())
+try {
+const startTs = parseInt(await Bash('python3 -c "import time; print(int(time.time()*1000))"').then(r => r.trim()), 10)
 const result = await Workflow({
   scriptPath: '/Users/206618626@bwt3.com/.claude/skills/harness-bridge/workflow.js',
   args: {
     artifact, artifactPath, handoff,          // 'A' | 'B'
     retriesUsed,                              // 0 on first gate, 1 after one --refine
     weightsOverride: weightsOverride || null, // {checkId: weight} or null
-    homeDir, repo, repoPath, issueKey, runId, runTs, skillsCommit, startTs,
+    homeDir, repo, worktree, branch, repoPath, issueKey, runId, runTs, skillsCommit, startTs,
   },
 })
 ```
@@ -69,8 +70,41 @@ if (result.gatedPath) {
 }
 // 2. Append telemetry (always — even on EXIT)
 await Bash(result.appendCmd)
-// 3. Print the summary
+// 3. Patch durationMs + subagentTokens into the last telemetry line
+const endTs = parseInt(await Bash('python3 -c "import time; print(int(time.time()*1000))"').then(r => r.trim()), 10)
+const durationMs = endTs - startTs
+const subagentTokens = <usage.subagent_tokens from completion notification>
+if (result.telemetryPath) {
+  const fieldJson = JSON.stringify({ durationMs, 'tokens.total.subagentTokens': subagentTokens }).replace(/'/g, "'\\''")
+  await Bash(`python3 -c "
+import json, sys
+def set_nested(d, k, v):
+    keys = k.split('.')
+    for part in keys[:-1]:
+        d = d.setdefault(part, {})
+    if v is None: d.pop(keys[-1], None)
+    else: d[keys[-1]] = v
+path, fj = sys.argv[1], sys.argv[2]
+fields = json.loads(fj)
+lines = open(path).readlines()
+if lines:
+    last = json.loads(lines[-1])
+    for k, v in fields.items():
+        if '.' in k: set_nested(last, k, v)
+        else: last[k] = v
+    lines[-1] = json.dumps(last)
+    open(path, 'w').writelines([l + ('\\n' if not l.endswith('\\n') else '') for l in lines])
+" "${result.telemetryPath}" '${fieldJson}'`)
+}
+// 4. Print the summary
 // print result.cliSummary verbatim
+} catch (err) {
+  // Bridge crashed — write the crash record if the workflow attached one
+  if (err.appendCmd) {
+    try { await Bash(err.appendCmd) } catch (_) {}
+  }
+  throw err
+}
 ```
 
 ## Verdict handling (returned to harness-run)

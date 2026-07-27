@@ -8,7 +8,7 @@ export const SEQUENCE = [
 
 export function actionForVerdict(verdict, retriesUsed) {
   if (verdict === 'PROCEED') return { next: 'advance' }
-  if (verdict === 'RE_ASK') return { next: 'refine' }
+  if (verdict === 'RE_ASK' && retriesUsed === 0) return { next: 'refine' }
   return { next: 'stop' }
 }
 

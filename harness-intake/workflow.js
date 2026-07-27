@@ -27,16 +27,37 @@ const refine = args.refine || null
 if (!input) throw new Error('harness-intake requires input')
 if (!repoPath) throw new Error('harness-intake requires repoPath')
 
+const CHECK_REQUIREMENTS = {
+  'grounding-evidence-fresh':   'REQUIRED: Run each AC\'s shellCommand in the repo and write back the real integer to verifiedCount. A null or missing verifiedCount on any grep/shell AC is a hard failure.',
+  'ac-research-executable':     'REQUIRED: Every AC with researchType grep must have grepPattern of length ≥ 2. Every AC with researchType shell must have shellCommand of length ≥ 4. Verify each one.',
+  'files-populated':            'REQUIRED: For every subtask (L split), re-run the file discovery grep and replace files[] with the actual grep output. An empty files[] is a hard failure.',
+  'ac-referenced-files-covered':'REQUIRED: Every file in files[] must appear in at least one AC\'s searchScope or grepPattern. Remove files that appear in no AC, or add an AC that covers them.',
+  'size-corroboration':         'REQUIRED: Corroborate size from at least two independent signals: (1) verified grep hit count AND (2) distinct file count from a separate find command. Single-source sizing is a hard failure.',
+  'claim-truth-consistency':    'REQUIRED: Re-verify every numeric claim (file counts, line counts) against actual grep/shell output. Any claim that contradicts a shell-verified number must be corrected.',
+  'scope-grounded':             'REQUIRED: scopePath must be an actual directory that exists in the repo (verify with ls). Remove or correct any scopePath that does not exist.',
+}
+
+const flaggedRequirements = (refine?.flags || [])
+  .map(f => CHECK_REQUIREMENTS[f])
+  .filter(Boolean)
+
 const refineBlock = refine ? `
 
 ## REFINE PASS — the previous manifest was gated below threshold
 The confidence gate flagged these weak checks: ${refine.flags.join(', ') || '(none named)'}.
-Skeptic notes: ${(refine.probeResults || []).map(p => `- ${p.reason}`).join('\n') || '(none)'}.
-Fix these specifically:
-- grounding-evidence-fresh / ac-research-executable → actually RUN each AC's grep/shell and record verifiedCount; do not assume.
+Skeptic notes:
+${(refine.probeResults || []).map(p => `- ${p.reason}`).join('\n') || '(none)'}
+
+## HARD REQUIREMENTS FOR THIS REFINE PASS
+The following are not suggestions — they are blocking requirements. The manifest is not valid until all of them are satisfied:
+
+${flaggedRequirements.length ? flaggedRequirements.map((r, i) => `${i + 1}. ${r}`).join('\n') : '- Re-verify all AC shellCommands and verifiedCounts against the actual repo.'}
+
+General fix guidance:
+- grounding-evidence-fresh / ac-research-executable → actually RUN each AC\'s grep/shell and record verifiedCount; do not assume.
 - files-populated → for an L split, every subtask must carry a non-empty files[]; derive them from the grep hits.
 - size-corroboration → corroborate size from at least two signals (verified hit count AND file count), not a single Sonnet guess.
-Produce a manifest that would now pass these checks.` : ''
+Produce a manifest that satisfies every HARD REQUIREMENT above.` : ''
 
 // ─── Philosophy (injected into every agent prompt) ────────────────────────────
 const PHILOSOPHY = `
@@ -373,13 +394,15 @@ function _buildV2Record(status, extra = {}) {
     skillsCommit:  args.skillsCommit || null,
     emitTrigger:   'workflow',
     billingMode:   'api',
-    ts:            args.today || 'unknown',
+    ts:            args.runTs || args.today || 'unknown',
     status,
     outcome:       toOutcome(status),
     sourceIssue:   issueKey || 'unknown',
     repo:          _repoNameFromPath(repoPath),
     repoPath:      repoPath || null,
-    branch:        null,
+    worktree:      args.worktree      || null,
+    branch:        args.branch        || null,
+    parentRunId:   args.parentRunId   || null,
     durationMs:    args.durationMs != null ? args.durationMs : null,
     size:          null,
     tokens: {
@@ -733,6 +756,7 @@ CRITICAL rules for AC strategies:
 - ACs about axios imports → grep grepPattern="from 'axios'" or grepPattern="require('axios')"
 - ACs about bare fetch() calls → grep grepPattern="fetch(" (separate from axios grep)
 - For migrations — ALWAYS add an AC for bypass patterns even if not in ticket
+- For migrations — if tests import the old pattern, add a SEPARATE AC for updating test imports/mocks (e.g. "Update test file imports to use clientFetch mock pattern"). Set its searchScope to the directory containing test files and its grepPattern to the old import in tests. Test files must be covered by their own dedicated AC — do NOT add them to the searchScope of implementation ACs, and do NOT list them in files[] unless a specific AC covers them.
 - ticketClaimedCount: the number explicitly stated in the ticket text (0 if none stated)
 - searchScope: path relative to repoPath to constrain this search (empty = use top-level scope)
 - If ACs are explicit in ticket: rephrase as actions if needed, then use them. If partial/missing: INFER from description.

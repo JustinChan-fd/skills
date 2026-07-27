@@ -112,13 +112,15 @@ function _buildV2Record(status, extra = {}) {
     skillsCommit:  args.skillsCommit || null,
     emitTrigger:   'workflow',
     billingMode:   'api',
-    ts:            args.today || 'unknown',
+    ts:            args.runTs || args.today || 'unknown',
     status,
     outcome:       toOutcome(status),
     sourceIssue:   issueKey || 'unknown',
     repo:          _repoNameFromPath(args.repoPath),
     repoPath:      args.repoPath || null,
-    branch:        null,
+    worktree:      args.worktree      || null,
+    branch:        args.branch        || null,
+    parentRunId:   args.parentRunId   || null,
     planPath:      args.planPath || 'unknown',
     durationMs:    args.durationMs != null ? args.durationMs : null,
     size:          null,
@@ -500,8 +502,17 @@ for (const [groupId, tasks] of Object.entries(tasksByGroup)) {
 
 trackPhase('Worktree')
 
-const worktreeResult = resume.worktree || await agent(
-  `Run these exact shell commands in sequence and return JSON.
+// When harness-run already provisioned a worktree, skip creation and use the existing path.
+// args.worktreePath + args.runBranch are set by the conductor so implement doesn't create a second worktree.
+let worktreeResult
+if (args.worktreePath) {
+  // Conductor-provisioned worktree: skip git worktree add entirely.
+  const conductorBranch = args.runBranch || branchName
+  worktreeResult = { worktreePath: args.worktreePath, branch: conductorBranch, baseBranch: baseBranch || 'unknown' }
+  log(`Worktree: using conductor-provisioned worktree at ${args.worktreePath} (branch: ${conductorBranch})`)
+} else {
+  worktreeResult = resume.worktree || await agent(
+    `Run these exact shell commands in sequence and return JSON.
 
 \`\`\`bash
 cd ${args.repoPath}
@@ -516,19 +527,19 @@ echo "{\"worktreePath\":\"$WORKTREE_PATH\",\"branch\":\"${branchName}\",\"baseBr
 \`\`\`
 
 Return the JSON object printed by the last echo.`,
-  { label: 'worktree-setup', phase: 'Worktree', model: 'haiku', effort: 'low',
-    schema: {
-      type: 'object',
-      required: ['worktreePath', 'branch', 'baseBranch'],
-      properties: { worktreePath: { type: 'string' }, branch: { type: 'string' }, baseBranch: { type: 'string' } },
-    },
-  }
-)
-
-if (!worktreeResult) throw new Error('Worktree setup failed')
+    { label: 'worktree-setup', phase: 'Worktree', model: 'haiku', effort: 'low',
+      schema: {
+        type: 'object',
+        required: ['worktreePath', 'branch', 'baseBranch'],
+        properties: { worktreePath: { type: 'string' }, branch: { type: 'string' }, baseBranch: { type: 'string' } },
+      },
+    }
+  )
+  if (!worktreeResult) throw new Error('Worktree setup failed')
+  log(`Worktree: ${worktreeResult.worktreePath} (branch: ${branchName}, base: ${worktreeResult.baseBranch})`)
+}
 
 const workDir = worktreeResult.worktreePath
-log(`Worktree: ${workDir} (branch: ${branchName}, base: ${worktreeResult.baseBranch})`)
 partialState.branch = worktreeResult.branch
 partialState.baseBranch = worktreeResult.baseBranch
 

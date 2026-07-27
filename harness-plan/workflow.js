@@ -69,13 +69,15 @@ function _buildV2Record(status, extra = {}) {
     skillsCommit:  args.skillsCommit || null,
     emitTrigger:   'workflow',
     billingMode:   'api',
-    ts:            args.today || 'unknown',
+    ts:            args.runTs || args.today || 'unknown',
     status,
     outcome:       toOutcome(status),
     sourceIssue:   issueKey || 'unknown',
     repo,
     repoPath:      repoPath || null,
-    branch:        null,
+    worktree:      args.worktree      || null,
+    branch:        args.branch        || null,
+    parentRunId:   args.parentRunId   || null,
     durationMs:    args.durationMs != null ? args.durationMs : null,
     size:          null,
     tokens: {
@@ -206,6 +208,63 @@ const _PLAN_OUTCOME_MAP = {
   FAILED:             'failed',
 }
 function toOutcome(status) { return _PLAN_OUTCOME_MAP[status] ?? 'failed' }
+// lib/decompose-strategy.js — keep identical.
+function selectDecomposeStrategy(args, size, manifestEntry) {
+  if (args?.gatedIntake?.groups?.length) return 'gated-intake-groups'
+  if (manifestEntry) return 'manifest-entry'
+  if (size === 'L' || size === 'M') return 'llm-decompose'
+  return 'skip'
+}
+// lib/plan-grouping.js — keep identical.
+const _FILE_BUDGET_CAP = 8
+function buildDecomposeConcernsFromGroups(groups, repoPath, globalMigrationPattern) {
+  const concerns = []
+  for (const group of groups) {
+    for (const subtask of (group.subtasks || [])) {
+      const pattern = subtask.migrationPattern || globalMigrationPattern || 'this change'
+      const rawFiles = subtask.files || []
+      const absFiles = rawFiles.map(f => f.startsWith('/') ? f : `${repoPath}/${f}`)
+      const questions = [
+        `What is the exact before/after pattern for "${pattern}"? Show a concrete 3-5 line code snippet for BEFORE and AFTER.`,
+        `For each file in the list, confirm the pattern exists (grep first) and list every call site by line number.`,
+        `Are there any files in the list with unusual call shapes that don't fit the main migration pattern (extra args, different error handling, multiple call sites with different shapes)?`,
+      ]
+      if (subtask.description) questions.push(`Context from intake: ${subtask.description}`)
+      concerns.push({
+        label:            subtask.title || `${subtask.groupId || group.groupId}-${concerns.length + 1}`,
+        filesToRead:      absFiles.slice(0, _FILE_BUDGET_CAP),
+        fileBudget:       Math.min(absFiles.length, _FILE_BUDGET_CAP),
+        questions,
+        scopePath:        subtask.scopePath || null,
+        migrationPattern: pattern,
+        groupId:          subtask.groupId || group.groupId || null,
+        isDeferred:       subtask.isDeferred || false,
+      })
+    }
+  }
+  return concerns
+}
+function buildManifestDependsOn(entries) {
+  if (!entries.length) return []
+  const entryGroups = entries.map(e => e.concern?.groupId || null)
+  const seenGroups = []
+  for (const g of entryGroups) if (g !== null && !seenGroups.includes(g)) seenGroups.push(g)
+  const result = []
+  const groupLastSuffix = {}
+  for (let i = 0; i < entries.length; i++) {
+    const e = entries[i]
+    const groupId = entryGroups[i]
+    const groupIdx = groupId !== null ? seenGroups.indexOf(groupId) : -1
+    let dependsOn = []
+    if (groupId !== null && groupIdx > 0 && !groupLastSuffix[groupId]) {
+      const priorLastSuffix = groupLastSuffix[seenGroups[groupIdx - 1]]
+      if (priorLastSuffix) dependsOn = [priorLastSuffix]
+    }
+    if (groupId !== null) groupLastSuffix[groupId] = e.suffix
+    result.push({ ...e, id: e.suffix, dependsOn })
+  }
+  return result
+}
 // ===== END PURE =====
 
 // ─── Manifest contract ────────────────────────────────────────────────────────
@@ -657,7 +716,9 @@ trackPhase('Decompose')
 
 let decomposeConcerns
 
-if (size === 'L' || size === 'M') {
+const decomposeStrategy = selectDecomposeStrategy(args, size, manifestEntry)
+
+if (decomposeStrategy === 'llm-decompose') {
   const decomposeResult = await trackedAgent(
     `You are a decomposer. Break this task into focused concerns for parallel research.
 Each concern maps to a small focused file set with a list of questions a single researcher can answer.
@@ -770,8 +831,14 @@ The architect produces one task per file being modified. This is non-negotiable 
   }
 
   log(`Decompose: ${decomposeConcerns.length} focused sub-problems (model: ${size === 'L' ? 'opus' : 'sonnet'})`)
-} else if (manifestEntry) {
-  // manifestEntry fast path: synthesize a single concern from the manifest subtask
+} else if (decomposeStrategy === 'gated-intake-groups') {
+  decomposeConcerns = buildDecomposeConcernsFromGroups(
+    args.gatedIntake.groups,
+    repoPath,
+    args.gatedIntake.migrationPattern || null
+  )
+  log(`Decompose: skipped — gated intake groups, ${decomposeConcerns.length} subtask concerns (${args.gatedIntake.groups.length} group(s))`)
+} else if (decomposeStrategy === 'manifest-entry') {
   decomposeConcerns = [{
     label: manifestEntry.title || 'main',
     filesToRead: (manifestEntry.files || []).slice(0, 8),
@@ -1341,19 +1408,22 @@ const planEntries = validConcernResults.map((r, i) => {
   return { suffix, fileName, jsonName, planFileContent: r.planFileContent, planJson, prTitle, concern: r.concern }
 })
 
-// Determine execution order — sequential by default, parallel if all concerns are independent
-const execution = validConcernResults.length === 1 ? 'sequential' : 'parallel'
+// Build dependsOn wiring from groupId boundaries (G1 parallel, G2 waits for G1, etc.)
+// For non-gated runs (M/S/XS single plan) all entries have no groupId → all dependsOn: []
+const depsEntries = buildManifestDependsOn(planEntries)
+const hasAnyDeps = depsEntries.some(e => e.dependsOn.length > 0)
+const execution = planEntries.length === 1 ? 'sequential' : hasAnyDeps ? 'mixed' : 'parallel'
 
 const manifestObj = {
   title: (input || '').split('\n')[0].slice(0, 80).trim(),
   size,
   execution,
   sourceSubtask: manifestEntry?.jiraKey || null,
-  plans: planEntries.map((e, i) => ({
+  plans: depsEntries.map(e => ({
     id: e.suffix,
     path: `docs/manifests/${e.fileName}`,
     jsonPath: `docs/manifests/${e.jsonName}`,
-    dependsOn: execution === 'sequential' && i > 0 ? [planEntries[i - 1].suffix] : [],
+    dependsOn: e.dependsOn,
   })),
 }
 
