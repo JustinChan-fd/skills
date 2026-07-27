@@ -1,0 +1,15 @@
+{
+  "skill": "harness-intake",
+  "sourceIssue": "TARS-9999",
+  "sourceTitle": "Vague migration thing",
+  "size": "L",
+  "workType": "migration",
+  "migrationPattern": "old → new",
+  "scopePath": "src/somewhere",
+  "acList": [
+    { "bullet": "Do the migration", "researchType": "", "grepPattern": "", "searchScope": "", "shellCommand": "", "verifiedCount": null }
+  ],
+  "files": [],
+  "groups": [{ "subtasks": [{ "files": [] }, { "files": [] }] }],
+  "execution": "sequential"
+}

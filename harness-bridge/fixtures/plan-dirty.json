@@ -1,0 +1,10 @@
+{
+  "title": "Do some stuff",
+  "size": "M",
+  "execution": "sequential",
+  "plans": [{ "id": "p1", "path": "docs/plans/p1.md", "jsonPath": "docs/plans/p1.json", "dependsOn": ["pX"] }],
+  "tasks": [
+    { "id": "t1", "title": "Fix the thing", "description": "WHAT: fix it\nWHERE: somewhere\nHOW: do it", "files": [], "tddRequired": true },
+    { "id": "t2", "title": "Update tests", "description": "Update the tests to pass", "files": ["a.ts", "b.ts", "c.ts", "d.ts", "e.ts"], "tddRequired": false }
+  ]
+}

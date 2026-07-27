@@ -1,0 +1,10 @@
+{
+  "title": "Migrate client HTTP layer",
+  "size": "M",
+  "execution": "sequential",
+  "plans": [{ "id": "p1", "path": "docs/plans/p1.md", "jsonPath": "docs/plans/p1.json", "dependsOn": [] }],
+  "tasks": [
+    { "id": "t1", "title": "Replace axios import in fetchMovies", "description": "WHAT: Replace axios with clientFetch in fetchMovies.ts\nWHERE: src/client/api/fetchMovies.ts:3-15 — the import and usage site\nHOW: swap the import and call site:\n```typescript\nimport { clientFetch } from '../lib/clientFetch'\nconst response = await clientFetch('/api/movies', { method: 'GET' })\n```\nDONE: expect(fetchMovies()).resolves.toEqual(mockMovies)", "files": ["src/client/api/fetchMovies.ts", "src/client/lib/clientFetch.ts"], "tddRequired": true },
+    { "id": "t2", "title": "Replace axios import in fetchShowtimes", "description": "WHAT: Replace axios with clientFetch in fetchShowtimes.ts\nWHERE: src/client/api/fetchShowtimes.ts:1-10 — import line and fetch call\nHOW: same pattern as t1:\n```typescript\nimport { clientFetch } from '../lib/clientFetch'\nconst response = await clientFetch('/api/showtimes', { method: 'GET' })\n```\nDONE: expect(fetchShowtimes()).resolves.toEqual(mockShowtimes)", "files": ["src/client/api/fetchShowtimes.ts", "src/client/lib/clientFetch.ts"], "tddRequired": true }
+  ]
+}

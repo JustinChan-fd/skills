@@ -1,0 +1,16 @@
+{
+  "skill": "harness-intake",
+  "sourceIssue": "TARS-1271",
+  "sourceTitle": "Phase 5: Client - Migrate client HTTP layer",
+  "size": "M",
+  "workType": "migration",
+  "migrationPattern": "axios → clientFetch",
+  "scopePath": "src/client",
+  "acList": [
+    { "bullet": "118 client files migrated to use clientFetch", "researchType": "grep", "grepPattern": "axios", "searchScope": "src/client", "shellCommand": "grep -rl 'axios' src/client | wc -l", "verifiedCount": 118, "ticketClaimedCount": 118 },
+    { "bullet": "clientFetch wrapper exists and is importable", "researchType": "grep", "grepPattern": "clientFetch", "searchScope": "src/client/lib", "shellCommand": "grep -rl 'clientFetch' src/client/lib", "verifiedCount": 1 },
+    { "bullet": "All client tests pass", "researchType": "shell", "grepPattern": "", "searchScope": "src/client", "shellCommand": "npm test -- --filter client", "verifiedCount": null }
+  ],
+  "files": ["src/client/api/fetchMovies.ts", "src/client/api/fetchShowtimes.ts", "src/client/lib/clientFetch.ts"],
+  "execution": "sequential"
+}
