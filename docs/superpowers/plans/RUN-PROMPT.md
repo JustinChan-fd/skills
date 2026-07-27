@@ -18,6 +18,8 @@ Execute the implementation plan at `docs/superpowers/plans/2026-07-27-harness-e2
 
 **Phase 0 probe (do this before Task 1):** confirm whether `workflow.js` can `import` from `./lib/`. Create `harness-bridge/lib/_probe.js` (`export const ok = 1`) and a scratch Workflow script that imports it. If the import resolves, proceed as written. If it does NOT, mirror each `workflow.js`'s pure logic into a `// ===== PURE (mirrors lib/) =====` block and keep `lib/` authoritative for tests (as the existing skills already do). Delete `_probe.js` after.
 
+**Before Task 16 — skill discovery:** `harness-bridge` and `harness-run` are built during this session (Tasks 3–15). Skills live at `~/.claude/skills/`, which is a symlink to this repo's working tree, so the files are on disk the moment they're written — no merge to `main` is needed and `main` is irrelevant to what loads. BUT a slash command created mid-session may not be invocable until the session reloads. When you reach Task 16, if `/harness-run` is not recognized, tell me and I'll start a fresh session for the live run (pasting a Task-16-only prompt); do not fall back to launching `workflow.js` directly.
+
 **Task 16 is the live run — HARD GUARDRAILS, do not cross without my explicit approval:**
 - Runs in `~/Desktop/Repos/webtarsthree`, NOT skills. Branch from `origin/feat/migrate-native-fetch-from-axios` (the epic feature branch — NEVER master/main) via an isolated git worktree; never touch my dirty local branches.
 - Invoke the pipeline as a skill: `/harness-run TARS-1271 --repo ~/Desktop/Repos/webtarsthree --base feat/migrate-native-fetch-from-axios`. Always fire harnesses as skills; never launch a `workflow.js` directly.
