@@ -13,18 +13,23 @@ export const meta = {
   ],
 }
 
-// args: { input, repoPath, qaAnswers?, today?, manifestEntry?, forceplan? }
+// args: { input, repoPath, qaAnswers?, today?, manifestEntry?, forceplan?, refine?, gatedIntake? }
 // input: raw text — Jira ticket, freeform description, rough notes
 // manifestEntry: one subtask from split-manifest.json groups[*].subtasks[*]
 //   When present: skip Intake + Decompose entirely — size/files/scopePath already known
 //   Required fields: { title, description, scopePath?, files?, migrationPattern?, size?, jiraKey? }
 // forceplan: when true, skip XS fast path and run full pipeline even for XS
 // qaAnswers: string — collected Q&A answers from grill-me session (L-size or flag)
+// refine: { flags, probeResults, priorPlanManifestPath, gatedIntakePath } | null
+//   When present: re-plan mode after Handoff-B RE_ASK — targets flagged weak checks
+// gatedIntake: parsed gated intake manifest (read from gatedIntakePath when --refine is set)
+//   Provides manifest-supremacy sizing: gatedIntake.size / .files / .acList override ticket values
 
 const input = args.input || (args.manifestEntry?.description ? args.manifestEntry.description : '')
 const qaAnswers = args.qaAnswers || ''
 const repoPath = args.repoPath
 const manifestEntry = args.manifestEntry || null
+const refine = args.refine || null
 
 if (!input) throw new Error('harness-plan requires input or manifestEntry')
 
@@ -432,13 +437,27 @@ try {
 let size, architectModel, decomposeModel
 let intakeResult = null
 
+// ── Manifest-supremacy sizing source ─────────────────────────────────────────
+// When a refine pass provides a gated intake manifest, that manifest outranks the ticket
+// for size and file scope. Used only within the manifestEntry fast path (below) and
+// in refineBlock for the architect prompt. Does NOT trigger the fast path on its own —
+// a refine pass without manifestEntry still runs normal Intake.
+//
+// Field shape comparison:
+//   manifestEntry (split subtask):  { size, files, acList?, ... }
+//   gatedIntake (harness-bridge):   { size, files, acList, ... }
+//   Both carry .size and .files — compatible for sizing. Use .acList from whichever is present.
+const sizingSource = (refine && args.gatedIntake) ? args.gatedIntake : (manifestEntry || null)
+
 if (manifestEntry) {
   // ── manifestEntry fast path: skip Intake + Decompose entirely ──────────────
-  // harness-split already sized this subtask — trust it
-  size = manifestEntry.size || 'S'
+  // harness-split already sized this subtask — trust it.
+  // On a refine pass (sizingSource = gatedIntake), use the gated manifest's size and files
+  // instead of the subtask's raw values — manifest supremacy.
+  size = sizingSource.size || 'S'
   architectModel = researcherModel
   decomposeModel = researcherModel
-  log(`Fast path: manifest entry — skipping Intake + Decompose. size=${size} files=${(manifestEntry.files || []).length}`)
+  log(`Fast path: manifest entry — skipping Intake + Decompose. size=${size} files=${(sizingSource.files || []).length}${refine ? ' (manifest-supremacy: gated intake)' : ''}`)
   partialState.size = size
 } else {
   // ── Normal path: Intake ────────────────────────────────────────────────────
@@ -482,6 +501,24 @@ Return your sizing decision with a one-sentence reasoning and the repo layer lis
   partialState.fileCountEstimate = intakeResult.fileCountEstimate
   partialState.concernCount = intakeResult.concernCount
 }
+
+// ─── Refine block: injected into architect prompt on --refine pass ────────────
+// Targets the Handoff-B flagged weak checks. Absent (empty string) on normal runs.
+const refineBlock = refine ? `
+
+## REFINE PASS — the plan was gated below threshold at Handoff B
+Weak checks: ${refine.flags.join(', ') || '(none named)'}.
+Skeptic notes: ${(refine.probeResults || []).map(p => `- ${p.reason}`).join('\n') || '(none)'}.
+Fix these specifically:
+- task-spec-completeness → every task needs WHAT/WHERE/HOW and, when tddRequired, a literal DONE assertion + a fenced code snippet.
+- task-files-present-bounded → every task carries 1–3 concrete files[]; split tasks that touch more.
+- where-resolves-to-files → each WHERE names file:line that appears in that task's files[].
+- companion-edit-closure → if a task imports a module, the file that must change to satisfy that import is also in some task's files[] (e.g. the auth middleware index.js re-export).
+- concern-atomicity → one DONE per task; do not fold a distinct concern into another task.
+
+## MANIFEST SUPREMACY
+Use the GATED intake manifest as ground truth over the ticket for size and file scope:
+${refine.gatedIntakePath ? '(gated manifest provided as args.gatedIntake)' : '(none)'}` : ''
 
 // ─── XS fast path: write minimal plan, skip Research through Coverage ─────────
 // Only applies when NOT in manifestEntry mode and NOT --forceplan
@@ -933,7 +970,7 @@ ${JSON.stringify(architectResearch, null, 2)}
 
 ${securityNewSurface.length > 0 ? `NEW SECURITY SURFACE (address in tasks where relevant):
 ${securityNewSurface.map(s => `• ${s}`).join('\n')}` : ''}
-${qaAnswers ? `\nQA_ANSWERS:\n${qaAnswers}` : ''}`,
+${qaAnswers ? `\nQA_ANSWERS:\n${qaAnswers}` : ''}${refineBlock}`,
       { label: `hp-architect:${concern.label}`, phase: 'Architect', model: architectModel, effort: 'high', schema: ARCHITECT_SCHEMA, agentType: 'hp-architect' }
     )
 

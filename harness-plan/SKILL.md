@@ -90,6 +90,8 @@ Concretely:
 /harness-plan --forceplan                         # run full pipeline even for XS tickets
 /harness-plan --manifest path/to/split-manifest.json --entry TARS-1275
                                                   # consume a harness-split subtask entry
+/harness-plan --refine path/to/prior-plan-manifest.json
+                                                  # re-plan after Handoff-B RE_ASK (manifest supremacy)
 ```
 
 ### Parsing flags
@@ -99,6 +101,15 @@ When the user invokes `/harness-plan [url] [flags]`:
 1. **`--grill-me`** — set `qaMode: true`, run grill-me Q&A before workflow.
 2. **`--forceplan`** — pass `forceplan: true` to workflow args; skips the XS fast path.
 3. **`--manifest <path> --entry <jiraKey>`** — read `splitManifestPath` from disk, find the subtask with `jiraKey` in `groups[*].subtasks[*]`, pass it as `manifestEntry` to workflow args. The `input` arg becomes the subtask's `description` field.
+4. **`--refine <priorPlanManifestPath>`** — re-plan mode after a Handoff-B RE_ASK. Loads the prior plan manifest + the bridge flags/probeResults, and (critically) the **gated intake manifest** (`*-intake-manifest-gated.json`). The architect re-sizes and re-specifies tasks treating the gated manifest as ground truth — if the ticket says "118 files" but the gated manifest verified 92, the plan uses 92. This is **manifest supremacy**: a gated manifest outranks the ticket.
+
+   When `--refine` is present, the SKILL wrapper reads the gated intake manifest and passes it as `args.gatedIntake`:
+   ```js
+   // Only read gatedIntake when --refine is set
+   const gatedIntake = refinePayload?.gatedIntakePath
+     ? JSON.parse(await Read(refinePayload.gatedIntakePath))
+     : null
+   ```
 
 Example invocation with manifest entry:
 ```js
@@ -133,6 +144,8 @@ const result = await Workflow({
     runId,
     runTs,
     skillsCommit,
+    refine: refinePayload || null,       // { flags, probeResults, priorPlanManifestPath, gatedIntakePath } | null
+    gatedIntake: gatedIntake || null,    // parsed gated intake manifest; null when not in refine mode
   },
 })
 ```
