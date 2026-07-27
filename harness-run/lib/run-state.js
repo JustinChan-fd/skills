@@ -62,6 +62,20 @@ export function shouldSkipStage(resumeNextStage, currentStage, laterStages, requ
   return !!requiredArtifact
 }
 
+// A resumed run derives worktreePath/runBranch from its OWN runTs, which is new on
+// every invocation — so the derived name never matches the worktree the original run
+// provisioned. Since resuming also skips Provision, every later stage would read from
+// a directory that does not exist. Prefer whatever the checkpoint recorded.
+export function resolveWorktreeTarget(state, derived) {
+  const worktreePath = (state && state.worktreePath) || derived.worktreePath
+  const runBranch    = (state && state.runBranch)    || derived.runBranch
+  return {
+    worktreePath,
+    runBranch,
+    reused: worktreePath !== derived.worktreePath || runBranch !== derived.runBranch,
+  }
+}
+
 // Returns array of "key: path" strings for any artifact path that existsFn returns false for.
 // null/undefined values are silently skipped (optional artifacts).
 export function validateResumeArtifacts(artifacts, existsFn) {

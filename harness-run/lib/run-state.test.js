@@ -1,6 +1,53 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { buildStateFilePath, buildRunState, shouldSkipStage, validateResumeArtifacts, normalizeResumeStage } from './run-state.js'
+import { buildStateFilePath, buildRunState, shouldSkipStage, validateResumeArtifacts, normalizeResumeStage, resolveWorktreeTarget } from './run-state.js'
+
+// ---- resolveWorktreeTarget (resume must reuse the ORIGINAL worktree) ----
+
+const DERIVED = { worktreePath: '/Repos/wt-TARS-1271-20260727T220000Z', runBranch: 'harness/TARS-1271-20260727T220000Z' }
+const CHECKPOINT = { worktreePath: '/Repos/wt-TARS-1271-20260727T194141Z', runBranch: 'harness/TARS-1271-20260727T194141Z' }
+
+test('resolveWorktreeTarget: fresh run (no state) uses the derived path/branch', () => {
+  assert.deepEqual(resolveWorktreeTarget(null, DERIVED), { ...DERIVED, reused: false })
+})
+
+test('resolveWorktreeTarget: resume prefers the checkpoint worktree over the newly derived one', () => {
+  // runTs is new on every invocation, so the derived name never matches the
+  // worktree the original run provisioned. Skipping Provision while pointing at
+  // the derived path means every later stage reads from a directory that does
+  // not exist — the plan-manifest read fails first.
+  const got = resolveWorktreeTarget(CHECKPOINT, DERIVED)
+  assert.equal(got.worktreePath, CHECKPOINT.worktreePath)
+  assert.equal(got.runBranch, CHECKPOINT.runBranch)
+  assert.equal(got.reused, true)
+})
+
+test('resolveWorktreeTarget: a checkpoint missing worktreePath falls back to derived', () => {
+  const got = resolveWorktreeTarget({ runBranch: CHECKPOINT.runBranch }, DERIVED)
+  assert.equal(got.worktreePath, DERIVED.worktreePath)
+  assert.equal(got.runBranch, CHECKPOINT.runBranch)
+})
+
+test('resolveWorktreeTarget: a checkpoint missing runBranch falls back to derived branch', () => {
+  const got = resolveWorktreeTarget({ worktreePath: CHECKPOINT.worktreePath }, DERIVED)
+  assert.equal(got.worktreePath, CHECKPOINT.worktreePath)
+  assert.equal(got.runBranch, DERIVED.runBranch)
+})
+
+test('resolveWorktreeTarget: empty-string fields in the checkpoint are treated as absent', () => {
+  const got = resolveWorktreeTarget({ worktreePath: '', runBranch: '' }, DERIVED)
+  assert.deepEqual(got, { ...DERIVED, reused: false })
+})
+
+test('resolveWorktreeTarget: reused is false when nothing was actually carried over', () => {
+  assert.equal(resolveWorktreeTarget({}, DERIVED).reused, false)
+})
+
+test('resolveWorktreeTarget: never mutates the derived object', () => {
+  const derived = { ...DERIVED }
+  resolveWorktreeTarget(CHECKPOINT, derived)
+  assert.deepEqual(derived, DERIVED)
+})
 
 // ---- normalizeResumeStage (bridge-era checkpoint compatibility) ----
 

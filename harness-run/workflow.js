@@ -70,6 +70,18 @@ function normalizeResumeStage(stage) {
   return LEGACY_STAGE_ALIASES[key] || stage
 }
 
+// Mirror of lib/run-state.js — a resumed run must reuse the worktree the original run
+// provisioned, since runTs (and therefore the derived worktree name) is new every time.
+function resolveWorktreeTarget(state, derived) {
+  const worktreePath = (state && state.worktreePath) || derived.worktreePath
+  const runBranch    = (state && state.runBranch)    || derived.runBranch
+  return {
+    worktreePath,
+    runBranch,
+    reused: worktreePath !== derived.worktreePath || runBranch !== derived.runBranch,
+  }
+}
+
 function shouldSkipStage(resumeNextStage, currentStage, laterStages, requiredArtifact) {
   const next = normalizeResumeStage(resumeNextStage)
   if (!next) return false
@@ -212,11 +224,18 @@ if (!today)      throw new Error('harness-run workflow requires today (calendar 
 // not `wt-TARS-1271-20260727T194141Z`.
 const repo         = repoPath.replace(/\/$/, '').split('/').pop()
 const worktreeName = `wt-${issueKey}-${runTs}`
-const runBranch    = `harness/${issueKey}-${runTs}`
 // Resolve the parent dir explicitly — a literal `..` in the path breaks the
 // homeDir regex the child telemetry-path builders run against repoPath.
 const reposDir     = repoPath.replace(/\/$/, '').split('/').slice(0, -1).join('/')
-const worktreePath = `${reposDir}/${worktreeName}`
+// A resumed run must land in the worktree the ORIGINAL run provisioned, not one named
+// after this invocation's runTs — Provision is skipped when resuming, so a derived-but-
+// absent directory makes the first stage that reads an artifact fail.
+const _derivedTarget = { worktreePath: `${reposDir}/${worktreeName}`, runBranch: `harness/${issueKey}-${runTs}` }
+const { worktreePath, runBranch: _resolvedBranch, reused: _reusedWorktree } =
+  resolveWorktreeTarget(a.resumeFromState || null, _derivedTarget)
+const runBranch = _resolvedBranch
+// Report the directory we actually work in, so the summary box and PR steps agree.
+const activeWorktreeName = worktreePath.split('/').pop()
 
 const stateFilePath = buildStateFilePath(worktreePath, repo, issueKey, runTs)
 
@@ -242,6 +261,7 @@ if (resumeFromState) {
   stageRecords.push(...restoredRecords)
   const _aliased = _rawNextStage && _rawNextStage !== resumeNextStage ? ` (bridge-era "${_rawNextStage}")` : ''
   log(`Resuming run ${runId} from stage: ${resumeNextStage}${_aliased} (${restoredRecords.length} prior stage records restored)`)
+  if (_reusedWorktree) log(`Reusing checkpoint worktree ${worktreePath} on branch ${runBranch} (this invocation's runTs would have derived ${_derivedTarget.worktreePath})`)
 }
 
 async function writeCheckpoint(lastCompletedStage, nextStage, artifacts) {
@@ -295,7 +315,7 @@ Report: "WORKTREE_OK: <worktreePath>" on success, or "WORKTREE_ERROR: <message>"
 // repoName is the canonical repo; repoPath is the worktree the child actually edits.
 const childTelemetryArgs = {
   repoName: repo,
-  worktree: worktreeName,
+  worktree: activeWorktreeName,
   branch:   runBranch,
   runId,
   runTs,
@@ -694,7 +714,7 @@ if (implOutcome === 'FAILED') {
     runId,
     parentRunId,
     runBranch,
-    worktreeName,
+    worktreeName: activeWorktreeName,
     stateFilePath,
     prUrl: null,
     testsPassed: false,
@@ -744,7 +764,7 @@ const summaryBox = [
   parentRunId ? `│ Parent:    ${parentRunId}` : null,
   `│ Ticket:    ${issueKey}`,
   `│ Branch:    ${runBranch}`,
-  `│ Worktree:  ${worktreeName}`,
+  `│ Worktree:  ${activeWorktreeName}`,
   `│ PR:        ${prParsed.prUrl || (prParsed.noCommits ? '(not created — no commits on branch)' : '(not created)')}`,
   `│ Tests:     ${prParsed.testsPassed ? 'PASS' : 'FAIL'}`,
   `│ Status:    ${summary.finalStatus}`,
@@ -760,7 +780,7 @@ return {
   runId,
   parentRunId,
   runBranch,
-  worktreeName,
+  worktreeName: activeWorktreeName,
   stateFilePath,
   prUrl: prParsed.prUrl || null,
   testsPassed: prParsed.testsPassed || false,
