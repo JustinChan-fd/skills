@@ -1,6 +1,62 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { SEQUENCE, GATED_SEQUENCE, actionForVerdict, assembleRunSummary, weightEvolutionReport } from './conductor.js'
+import { SEQUENCE, GATED_SEQUENCE, actionForVerdict, assembleRunSummary, weightEvolutionReport, parseAgentJson } from './conductor.js'
+
+// ---- parseAgentJson (agent() returns null on terminal API error) ----
+
+test('parseAgentJson: null → {} (agent died; typeof null is "object", which defeats a bare ternary)', () => {
+  // This is the crash: `typeof prResult === "object" ? prResult : JSON.parse(...)`
+  // assigns null through, then `prParsed.prUrl` throws and the whole run dies with
+  // no summary box and no state file — even though the real failure was upstream.
+  assert.deepEqual(parseAgentJson(null), {})
+})
+
+test('parseAgentJson: undefined → {}', () => {
+  assert.deepEqual(parseAgentJson(undefined), {})
+})
+
+test('parseAgentJson: an object passes through by identity', () => {
+  const o = { prUrl: 'https://x/pull/1', testsPassed: true }
+  assert.equal(parseAgentJson(o), o)
+})
+
+test('parseAgentJson: an array is not a result object → {}', () => {
+  assert.deepEqual(parseAgentJson([1, 2]), {})
+})
+
+test('parseAgentJson: extracts a JSON object embedded in prose', () => {
+  const got = parseAgentJson('Here you go:\n{"prUrl": "https://x/pull/2", "testsPassed": false}\nDone.')
+  assert.equal(got.prUrl, 'https://x/pull/2')
+  assert.equal(got.testsPassed, false)
+})
+
+test('parseAgentJson: handles a fenced code block', () => {
+  const got = parseAgentJson('```json\n{"prUrl": null, "noCommits": true}\n```')
+  assert.equal(got.noCommits, true)
+  assert.equal(got.prUrl, null)
+})
+
+test('parseAgentJson: malformed JSON → {} rather than throwing', () => {
+  assert.deepEqual(parseAgentJson('{not valid json at all'), {})
+})
+
+test('parseAgentJson: a string with no JSON at all → {}', () => {
+  assert.deepEqual(parseAgentJson('Please run /login · API Error: 403 Access Denied'), {})
+})
+
+test('parseAgentJson: empty string → {}', () => {
+  assert.deepEqual(parseAgentJson(''), {})
+})
+
+test('parseAgentJson: a JSON scalar is not a result object → {}', () => {
+  assert.deepEqual(parseAgentJson('42'), {})
+})
+
+test('parseAgentJson: result of a died agent is safe to property-access', () => {
+  // The actual invariant the PR phase needs: never throw on .prUrl
+  assert.equal(parseAgentJson(null).prUrl, undefined)
+  assert.equal(parseAgentJson(null).noCommits, undefined)
+})
 
 test('SEQUENCE is intake → plan → implement (no bridge — manifest-as-gospel)', () => {
   assert.deepEqual(SEQUENCE.map(s => s.skill),

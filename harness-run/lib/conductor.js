@@ -24,6 +24,25 @@ export function actionForVerdict(verdict, retriesUsed) {
   return { next: 'stop' }
 }
 
+// agent() returns null when a subagent dies on a terminal API error (403 after a
+// logout, budget exhaustion, retries exhausted). `typeof null === 'object'` is true,
+// so a bare `typeof r === 'object' ? r : JSON.parse(...)` assigns null straight
+// through and the next property access throws — turning a recoverable stage failure
+// into a workflow crash with no summary box and no resumable state file.
+// Always returns a plain object, so `.prUrl` etc. are safe to read.
+export function parseAgentJson(result) {
+  if (result && typeof result === 'object') return Array.isArray(result) ? {} : result
+  if (typeof result !== 'string' || !result) return {}
+  const match = result.match(/\{[\s\S]*\}/)
+  if (!match) return {}
+  try {
+    const parsed = JSON.parse(match[0])
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {}
+  } catch (_) {
+    return {}
+  }
+}
+
 export function assembleRunSummary(records) {
   const stages = records.map(r => ({
     skill: r.skill,

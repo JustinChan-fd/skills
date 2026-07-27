@@ -103,6 +103,25 @@ function shouldSkipStage(resumeNextStage, currentStage, laterStages, requiredArt
   return !!requiredArtifact
 }
 
+// agent() returns null when a subagent dies on a terminal API error (403 after a
+// logout, budget exhaustion, retries exhausted). `typeof null === 'object'` is true,
+// so a bare `typeof r === 'object' ? r : JSON.parse(...)` assigns null straight
+// through and the next property access throws — turning a recoverable stage failure
+// into a workflow crash with no summary box and no resumable state file.
+// Always returns a plain object, so `.prUrl` etc. are safe to read.
+function parseAgentJson(result) {
+  if (result && typeof result === 'object') return Array.isArray(result) ? {} : result
+  if (typeof result !== 'string' || !result) return {}
+  const match = result.match(/\{[\s\S]*\}/)
+  if (!match) return {}
+  try {
+    const parsed = JSON.parse(match[0])
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {}
+  } catch (_) {
+    return {}
+  }
+}
+
 function assembleRunSummary(records) {
   const stages = records.map(r => ({
     skill: r.skill,
@@ -763,8 +782,8 @@ Return JSON: {"prUrl": "...", "testsPassed": true/false, "testOutput": "...", "n
   { label: 'draft-pr', phase: 'PR', effort: 'low' }
 )
 
-let prParsed = {}
-try { prParsed = typeof prResult === 'object' ? prResult : JSON.parse(String(prResult).match(/\{[\s\S]*\}/)?.[0] || '{}') } catch (_) {}
+const prParsed = parseAgentJson(prResult)
+if (prResult == null) log('PR stage agent died (no result) — recording FAILED and continuing to the summary so the run stays resumable.')
 stageRecords.push({ skill: 'harness-pr', outcome: prParsed.prUrl ? 'COMPLETE' : 'FAILED', durationMs: 0 })
 
 // ── Phase 5: Summary ──────────────────────────────────────────────────────────
