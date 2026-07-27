@@ -1,6 +1,40 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { buildStateFilePath, buildRunState, shouldSkipStage, validateResumeArtifacts } from './run-state.js'
+import { buildStateFilePath, buildRunState, shouldSkipStage, validateResumeArtifacts, normalizeResumeStage } from './run-state.js'
+
+// ---- normalizeResumeStage (bridge-era checkpoint compatibility) ----
+
+test('normalizeResumeStage maps gate-A onto plan', () => {
+  assert.equal(normalizeResumeStage('gate-A'), 'plan')
+})
+test('normalizeResumeStage maps gate-B onto implement', () => {
+  assert.equal(normalizeResumeStage('gate-B'), 'implement')
+})
+test('normalizeResumeStage is case-insensitive', () => {
+  assert.equal(normalizeResumeStage('GATE-B'), 'implement')
+  assert.equal(normalizeResumeStage('gateb'), 'implement')
+})
+test('normalizeResumeStage passes current stage names through untouched', () => {
+  for (const s of ['intake', 'plan', 'implement', 'pr']) assert.equal(normalizeResumeStage(s), s)
+})
+test('normalizeResumeStage passes null/undefined through as null', () => {
+  assert.equal(normalizeResumeStage(null), null)
+  assert.equal(normalizeResumeStage(undefined), null)
+})
+
+test('a bridge-era gate-B checkpoint skips plan instead of re-running it', () => {
+  // Real shape from a 2026-07-27 run-state.json: lastCompletedStage=plan, nextStage=gate-B.
+  // Before normalization 'gate-B' matched no laterStages list, so nothing was skipped
+  // and the resumed run re-ran harness-plan from scratch.
+  assert.equal(shouldSkipStage('gate-B', 'plan', ['implement', 'pr'], '/path/to/plan-manifest.json'), true)
+  assert.equal(shouldSkipStage('gate-B', 'intake', ['plan', 'implement', 'pr'], '/path/to/intake.json'), true)
+  // ...but does NOT skip implement — that is where it resumes.
+  assert.equal(shouldSkipStage('gate-B', 'implement', ['pr'], true), false)
+})
+test('a bridge-era gate-A checkpoint skips intake but not plan', () => {
+  assert.equal(shouldSkipStage('gate-A', 'intake', ['plan', 'implement', 'pr'], '/intake.json'), true)
+  assert.equal(shouldSkipStage('gate-A', 'plan', ['implement', 'pr'], '/plan.json'), false)
+})
 
 // ---- buildStateFilePath ----
 
@@ -65,7 +99,11 @@ test('shouldSkipStage: null resumeNextStage → false (fresh run, never skip)', 
 })
 
 test('shouldSkipStage: resumeNextStage === currentStage → false (re-run the checkpoint stage)', () => {
-  assert.equal(shouldSkipStage('gate-A', 'gate-A', ['plan', 'gate-B'], '/artifact'), false)
+  assert.equal(shouldSkipStage('plan', 'plan', ['implement', 'pr'], '/artifact'), false)
+})
+test('shouldSkipStage: identity holds after legacy normalization too', () => {
+  // 'gate-B' normalizes to 'implement', so the implement stage must still re-run
+  assert.equal(shouldSkipStage('gate-B', 'implement', ['pr'], '/artifact'), false)
 })
 
 test('shouldSkipStage: resumeNextStage is in laterStages AND artifact is truthy → true (skip)', () => {

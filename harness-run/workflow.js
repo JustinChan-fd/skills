@@ -53,10 +53,28 @@ function buildRunState({ runId, parentRunId = null, lastCompletedStage, nextStag
   }
 }
 
+// Bridge-era checkpoints name stages that no longer exist. Map them onto the stage
+// the manifest-as-gospel sequence would resume at, so a `nextStage: 'gate-B'` state
+// file resumes at implement rather than silently re-running plan from scratch
+// (an unrecognised stage name matches no laterStages list, so nothing is skipped).
+const LEGACY_STAGE_ALIASES = {
+  'gate-a': 'plan',       // gate A sat between intake and plan; intake is done
+  'gatea':  'plan',
+  'gate-b': 'implement',  // gate B sat between plan and implement; plan is done
+  'gateb':  'implement',
+}
+
+function normalizeResumeStage(stage) {
+  if (!stage) return null
+  const key = String(stage).toLowerCase()
+  return LEGACY_STAGE_ALIASES[key] || stage
+}
+
 function shouldSkipStage(resumeNextStage, currentStage, laterStages, requiredArtifact) {
-  if (!resumeNextStage) return false
-  if (resumeNextStage === currentStage) return false
-  if (!laterStages.includes(resumeNextStage)) return false
+  const next = normalizeResumeStage(resumeNextStage)
+  if (!next) return false
+  if (next === currentStage) return false
+  if (!laterStages.includes(next)) return false
   return !!requiredArtifact
 }
 
@@ -218,10 +236,12 @@ let resumeArtifacts = {
 let resumeNextStage = null
 if (resumeFromState) {
   resumeArtifacts  = { ...resumeArtifacts, ...(resumeFromState.artifacts || {}) }
-  resumeNextStage  = resumeFromState.nextStage || null
+  const _rawNextStage = resumeFromState.nextStage || null
+  resumeNextStage  = normalizeResumeStage(_rawNextStage)
   const restoredRecords = resumeFromState.stageRecords || []
   stageRecords.push(...restoredRecords)
-  log(`Resuming run ${runId} from stage: ${resumeNextStage} (${restoredRecords.length} prior stage records restored)`)
+  const _aliased = _rawNextStage && _rawNextStage !== resumeNextStage ? ` (bridge-era "${_rawNextStage}")` : ''
+  log(`Resuming run ${runId} from stage: ${resumeNextStage}${_aliased} (${restoredRecords.length} prior stage records restored)`)
 }
 
 async function writeCheckpoint(lastCompletedStage, nextStage, artifacts) {
