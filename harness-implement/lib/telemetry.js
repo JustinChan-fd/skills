@@ -54,3 +54,8 @@ export function buildAppendCmd(telemetryPath, jsonLine) {
   const escaped = jsonLine.replace(/'/g, "'\\''")
   return `mkdir -p "$(dirname '${telemetryPath}')" && echo '${escaped}' >> '${telemetryPath}'`
 }
+
+/** Fields every v2 record must carry beyond the base shape. ADD-only; never remove. */
+export function recordExtras({ retries = 0, errorLog = [] } = {}) {
+  return { retries, errorLog }
+}

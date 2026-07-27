@@ -88,6 +88,8 @@ function _buildV2Record(status, extra = {}) {
       byPhase: agentCountByPhase,
     },
     cost: costResult,
+    retries:    args.retries != null ? args.retries : 0,
+    errorLog:   Array.isArray(args.errorLog) ? args.errorLog : [],
     ...extra,
   }
 }

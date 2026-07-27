@@ -97,3 +97,8 @@ export function ejectTestFiles(subtasks, issueKey, scopePath) {
     needsReview: false,
   }))
 }
+
+/** Fields every v2 record must carry beyond the base shape. ADD-only; never remove. */
+export function recordExtras({ retries = 0, errorLog = [] } = {}) {
+  return { retries, errorLog }
+}

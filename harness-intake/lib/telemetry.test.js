@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { repoNameFromPath, slugFromInput, buildTelemetryPath, buildAppendCmd, ejectTestFiles } from './telemetry.js'
+import { repoNameFromPath, slugFromInput, buildTelemetryPath, buildAppendCmd, ejectTestFiles, recordExtras } from './telemetry.js'
 
 test('repoNameFromPath extracts last segment', () => {
   assert.equal(repoNameFromPath('/Users/foo/Desktop/Repos/webtarsthree'), 'webtarsthree')
@@ -128,4 +128,13 @@ test('ejectTestFiles chunks at 8 files', () => {
   assert.equal(injected.length, 2)
   assert.equal(injected[0].files.length, 8)
   assert.equal(injected[1].files.length, 2)
+})
+
+test('recordExtras defaults retries=0 and errorLog=[]', () => {
+  assert.deepEqual(recordExtras(), { retries: 0, errorLog: [] })
+})
+
+test('recordExtras passes through provided values', () => {
+  assert.deepEqual(recordExtras({ retries: 2, errorLog: [{ phase: 'x', message: 'y', ts: 't' }] }),
+    { retries: 2, errorLog: [{ phase: 'x', message: 'y', ts: 't' }] })
 })

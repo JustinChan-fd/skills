@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { repoNameFromPath, slugFromInput, buildTelemetryPath, buildAppendCmd } from './telemetry.js'
+import { repoNameFromPath, slugFromInput, buildTelemetryPath, buildAppendCmd, recordExtras } from './telemetry.js'
 
 test('repoNameFromPath extracts last segment', () => {
   assert.equal(repoNameFromPath('/Users/foo/Desktop/Repos/webtarsthree'), 'webtarsthree')
@@ -81,4 +81,13 @@ test('buildAppendCmd escapes single quotes and ensures dir exists', () => {
   assert.ok(cmd.includes('mkdir -p'))
   assert.ok(cmd.includes('>>'))
   assert.ok(!cmd.match(/'[^'\\]*'[^'\\]*it's/), 'raw single quote should be escaped')
+})
+
+test('recordExtras defaults retries=0 and errorLog=[]', () => {
+  assert.deepEqual(recordExtras(), { retries: 0, errorLog: [] })
+})
+
+test('recordExtras passes through provided values', () => {
+  assert.deepEqual(recordExtras({ retries: 2, errorLog: [{ phase: 'x', message: 'y', ts: 't' }] }),
+    { retries: 2, errorLog: [{ phase: 'x', message: 'y', ts: 't' }] })
 })
