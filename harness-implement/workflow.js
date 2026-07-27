@@ -55,8 +55,8 @@ function _slugFromInput(text) {
   return slug || 'greenfield'
 }
 // Format: {telemetryDir}/v2/{repo}__{skill}__{ticket}__{timestamp}.jsonl
-function _buildImplTelemetryPath({ repoPath, issueKey, rawText, timestamp }) {
-  const repo    = _repoNameFromPath(repoPath)
+function _buildImplTelemetryPath({ repoPath, issueKey, rawText, timestamp, repoName }) {
+  const repo    = repoName || _repoNameFromPath(repoPath)
   const key     = issueKey || _slugFromInput(rawText)
   const ts      = timestamp || 'unknown-ts'
   const homeDir = (repoPath || '').replace(/\/Desktop\/Repos\/[^/]+\/?$/, '') || '/tmp'
@@ -112,11 +112,15 @@ function _buildV2Record(status, extra = {}) {
     skillsCommit:  args.skillsCommit || null,
     emitTrigger:   'workflow',
     billingMode:   'api',
-    ts:            args.runTs || args.today || 'unknown',
+    // Calendar date per telemetry-v2 schema. args.today wins — args.runTs is a
+    // compact stamp (20260727T194141Z) and only used as a last-resort fallback.
+    ts:            args.today || args.runTs || 'unknown',
     status,
     outcome:       toOutcome(status),
     sourceIssue:   issueKey || 'unknown',
-    repo:          _repoNameFromPath(args.repoPath),
+    // args.repoName is the canonical repo (e.g. 'webtarsthree'), passed by a conductor
+    // whose repoPath is a worktree. Falls back to the path tail for standalone runs.
+    repo:          args.repoName || _repoNameFromPath(args.repoPath),
     repoPath:      args.repoPath || null,
     worktree:      args.worktree      || null,
     branch:        args.branch        || null,
@@ -149,7 +153,7 @@ function _buildV2Record(status, extra = {}) {
 function _buildAuditRecord(status, extra = {}) {
   if (!_telemetryPath) {
     const issueKey = (args.planPath || '').match(/\b([A-Z]+-\d+)\b/i)?.[1] || null
-    _telemetryPath = _buildImplTelemetryPath({ repoPath: args.repoPath, issueKey, rawText: args.planPath, timestamp: args.runTs || 'unknown-ts' })
+    _telemetryPath = _buildImplTelemetryPath({ repoPath: args.repoPath, repoName: args.repoName || null, issueKey, rawText: args.planPath, timestamp: args.runTs || 'unknown-ts' })
   }
   return _buildV2Record(status, extra)
 }

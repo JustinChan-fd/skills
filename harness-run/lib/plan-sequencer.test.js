@@ -1,6 +1,26 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { orderPlansByDeps, extractPlanEntries } from './plan-sequencer.js'
+import { orderPlansByDeps, extractPlanEntries, planPathFor } from './plan-sequencer.js'
+
+// ── planPathFor ───────────────────────────────────────────────────────────────
+
+test('planPathFor prefers the markdown path so implement can fall back to it', () => {
+  // harness-implement derives the .json itself; handing it jsonPath makes both
+  // resolve to the same file and kills its markdown fallback.
+  const plan = { id: 'p1', path: 'docs/manifests/2026-07-27-slug.md', jsonPath: 'docs/manifests/2026-07-27-slug.json', dependsOn: [] }
+  assert.equal(planPathFor(plan), 'docs/manifests/2026-07-27-slug.md')
+})
+test('planPathFor falls back to jsonPath when path is absent', () => {
+  assert.equal(planPathFor({ id: 'p1', jsonPath: 'docs/p1.json' }), 'docs/p1.json')
+})
+test('planPathFor returns a repo-relative path, never an absolute one', () => {
+  // implement joins it onto repoPath itself — an absolute path doubles the prefix
+  assert.doesNotMatch(planPathFor({ id: 'p1', path: 'docs/manifests/x.md' }), /^\//)
+})
+test('planPathFor throws when the entry carries neither path', () => {
+  assert.throws(() => planPathFor({ id: 'p9', dependsOn: [] }), /neither path nor jsonPath/)
+  assert.throws(() => planPathFor(null), /plan entry is required/)
+})
 
 // ── extractPlanEntries ────────────────────────────────────────────────────────
 

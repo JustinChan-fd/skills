@@ -59,7 +59,9 @@ function _buildV2Record(status, extra = {}) {
   const outputTokensTotal = budget.spent() - workflowStartTokens
   const inputTokens = args.inputTokens != null ? args.inputTokens : null
   const costResult  = _computeCostV2({ agentCountByModel, inputTokens, outputTokensTotal })
-  const repo = (repoPath || '').replace(/\/$/, '').split('/').pop() || null
+  // args.repoName is the canonical repo (e.g. 'webtarsthree'), passed by a conductor
+  // whose repoPath is a worktree. Falls back to the path tail for standalone runs.
+  const repo = args.repoName || (repoPath || '').replace(/\/$/, '').split('/').pop() || null
   const issueKey = (input || '').match(/\b([A-Z]+-\d+)\b/)?.[1] || manifestEntry?.jiraKey || _slugFromInput(input)
   return {
     schemaVersion: '2.0',
@@ -69,7 +71,9 @@ function _buildV2Record(status, extra = {}) {
     skillsCommit:  args.skillsCommit || null,
     emitTrigger:   'workflow',
     billingMode:   'api',
-    ts:            args.runTs || args.today || 'unknown',
+    // Calendar date per telemetry-v2 schema. args.today wins — args.runTs is a
+    // compact stamp (20260727T194141Z) and only used as a last-resort fallback.
+    ts:            args.today || args.runTs || 'unknown',
     status,
     outcome:       toOutcome(status),
     sourceIssue:   issueKey || 'unknown',
@@ -129,7 +133,7 @@ function _computeCostV2({ agentCountByModel, inputTokens, outputTokensTotal }) {
 const _pendingAuditRecords = []
 function _buildAuditRecord(status, extra = {}) {
   if (!_telemetryPath) {
-    const repo = (repoPath || '').replace(/\/$/, '').split('/').pop() || 'unknown-repo'
+    const repo = args.repoName || (repoPath || '').replace(/\/$/, '').split('/').pop() || 'unknown-repo'
     const issueKey = (input || '').match(/\b([A-Z]+-\d+)\b/)?.[1] || manifestEntry?.jiraKey || _slugFromInput(input)
     const homeDir = (repoPath || '').replace(/\/Desktop\/Repos\/[^/]+\/?$/, '') || '/tmp'
     const runTs = args.runTs || 'unknown-ts'

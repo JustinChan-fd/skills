@@ -9,6 +9,25 @@ export function extractPlanEntries(manifest) {
 }
 
 /**
+ * The path to hand harness-implement for one plan entry, relative to repoPath.
+ *
+ * Prefers the MARKDOWN path. harness-implement derives the JSON companion itself
+ * (`planPath.replace(/\.md$/, '.json')`) and keeps the .md as its fallback when the
+ * JSON is missing or malformed. Passing jsonPath makes both resolve to the same
+ * .json file, so that fallback can never fire.
+ *
+ * @param {object} plan - { id, path, jsonPath, dependsOn }
+ * @returns {string} repo-relative plan path
+ * @throws if the entry carries neither path
+ */
+export function planPathFor(plan) {
+  if (plan == null) throw new Error('plan entry is required')
+  const p = plan.path || plan.jsonPath
+  if (!p) throw new Error(`Plan "${plan.id ?? '(no id)'}" has neither path nor jsonPath`)
+  return p
+}
+
+/**
  * Topological sort of plan entries by dependsOn.
  * Plans with no deps come first; later plans wait for their deps.
  * Input order is preserved for plans at the same level (stable).

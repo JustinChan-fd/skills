@@ -9,8 +9,10 @@ export function buildRunState({
   nextStage,
   artifacts,
   stageRecords,
-  allWeightChanges,
-  weightsOverride,
+  // Bridge-era fields. harness-run no longer produces weight changes, but they stay
+  // in the shape (always empty) so bridge-era checkpoints remain resume-compatible.
+  allWeightChanges = [],
+  weightsOverride = {},
   worktreePath,
   runBranch,
   startTs,

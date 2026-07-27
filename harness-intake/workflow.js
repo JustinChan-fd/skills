@@ -125,8 +125,8 @@ function _slugFromInput(text) {
 }
 // Format: {telemetryDir}/v2/{repo}__{skill}__{ticket}__{timestamp}.jsonl
 // Split on __ to get exactly [repo, skill, ticket, timestamp]
-function _buildTelemetryPath({ repoPath, skill, issueKey, rawText, timestamp }) {
-  const repo    = _repoNameFromPath(repoPath)
+function _buildTelemetryPath({ repoPath, skill, issueKey, rawText, timestamp, repoName }) {
+  const repo    = repoName || _repoNameFromPath(repoPath)
   const key     = issueKey || _slugFromInput(rawText)
   const ts      = timestamp || 'unknown-ts'
   const homeDir = (repoPath || '').replace(/\/Desktop\/Repos\/[^/]+\/?$/, '') || '/tmp'
@@ -394,11 +394,15 @@ function _buildV2Record(status, extra = {}) {
     skillsCommit:  args.skillsCommit || null,
     emitTrigger:   'workflow',
     billingMode:   'api',
-    ts:            args.runTs || args.today || 'unknown',
+    // Calendar date per telemetry-v2 schema. args.today wins — args.runTs is a
+    // compact stamp (20260727T194141Z) and only used as a last-resort fallback.
+    ts:            args.today || args.runTs || 'unknown',
     status,
     outcome:       toOutcome(status),
     sourceIssue:   issueKey || 'unknown',
-    repo:          _repoNameFromPath(repoPath),
+    // args.repoName is the canonical repo (e.g. 'webtarsthree'), passed by a conductor
+    // whose repoPath is a worktree. Falls back to the path tail for standalone runs.
+    repo:          args.repoName || _repoNameFromPath(repoPath),
     repoPath:      repoPath || null,
     worktree:      args.worktree      || null,
     branch:        args.branch        || null,
@@ -456,7 +460,7 @@ function _computeCostV2({ agentCountByModel, inputTokens, outputTokensTotal }) {
 function _buildAuditRecord(status, extra = {}) {
   if (!_telemetryPath) {
     const runTs = args.runTs || 'unknown-ts'
-    _telemetryPath = _buildTelemetryPath({ repoPath, skill: 'harness-intake', issueKey, rawText: input, timestamp: runTs })
+    _telemetryPath = _buildTelemetryPath({ repoPath, repoName: args.repoName || null, skill: 'harness-intake', issueKey, rawText: input, timestamp: runTs })
   }
   return _buildV2Record(status, extra)
 }
@@ -1097,6 +1101,10 @@ harness-intake
     splitRequired: false,
     size,
     intakeManifest,
+    // Same key as the L path below, so a conductor reading `status` gets a value on
+    // every path. This path is unconditionally COMPLETE — it is the clean XS/S/M
+    // skip, and the audit record above is built with 'COMPLETE' to match.
+    status: 'COMPLETE',
     cliSummary: skipSummary,
     telemetryPath: _telemetryPath,
     auditRecord,

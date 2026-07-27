@@ -1,9 +1,13 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { SEQUENCE, actionForVerdict, assembleRunSummary, weightEvolutionReport } from './conductor.js'
+import { SEQUENCE, GATED_SEQUENCE, actionForVerdict, assembleRunSummary, weightEvolutionReport } from './conductor.js'
 
-test('SEQUENCE is intake → bridgeA → plan → bridgeB → implement', () => {
+test('SEQUENCE is intake → plan → implement (no bridge — manifest-as-gospel)', () => {
   assert.deepEqual(SEQUENCE.map(s => s.skill),
+    ['harness-intake', 'harness-plan', 'harness-implement'])
+})
+test('GATED_SEQUENCE keeps the bridge shape for the --gate path', () => {
+  assert.deepEqual(GATED_SEQUENCE.map(s => s.skill),
     ['harness-intake', 'harness-bridge', 'harness-plan', 'harness-bridge', 'harness-implement'])
 })
 test('actionForVerdict routes PROCEED/RE_ASK/EXIT', () => {
@@ -63,6 +67,15 @@ test('assembleRunSummary: all success → COMPLETE', () => {
     { skill: 'harness-plan', outcome: 'success', durationMs: 0 },
   ]
   assert.equal(assembleRunSummary(recs).finalStatus, 'COMPLETE')
+})
+
+test('assembleRunSummary never falls back to status — a record with only status is null-outcome', () => {
+  const recs = [
+    { skill: 'harness-intake', status: 'COMPLETE_FRAMING_CORRECTED', durationMs: 0 },
+  ]
+  const s = assembleRunSummary(recs)
+  assert.equal(s.stages[0].outcome, null)
+  assert.equal(s.finalStatus, 'UNKNOWN')
 })
 
 test('weightEvolutionReport shows initial → final and each change', () => {

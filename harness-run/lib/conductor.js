@@ -1,4 +1,15 @@
+// The sequence harness-run actually walks (manifest-as-gospel, 2026-07-27).
+// Each stage's manifest is ground truth for the next — no scoring gate between.
 export const SEQUENCE = [
+  { skill: 'harness-intake',    role: 'intake' },
+  { skill: 'harness-plan',      role: 'plan' },
+  { skill: 'harness-implement', role: 'implement' },
+]
+
+// The bridge-gated sequence. Not walked today: the RE_ASK loop death-spiralled and
+// checks-B's schema contract does not match harness-plan's task shape. Retained as
+// the target shape for the opt-in --gate flag, alongside actionForVerdict below.
+export const GATED_SEQUENCE = [
   { skill: 'harness-intake',    role: 'intake' },
   { skill: 'harness-bridge',    role: 'gateA', handoff: 'A' },
   { skill: 'harness-plan',      role: 'plan' },
@@ -6,6 +17,7 @@ export const SEQUENCE = [
   { skill: 'harness-implement', role: 'implement' },
 ]
 
+// Bridge-era. Unused while GATED_SEQUENCE is unused; kept for the --gate path.
 export function actionForVerdict(verdict, retriesUsed) {
   if (verdict === 'PROCEED') return { next: 'advance' }
   if (verdict === 'RE_ASK' && retriesUsed === 0) return { next: 'refine' }
@@ -15,7 +27,10 @@ export function actionForVerdict(verdict, retriesUsed) {
 export function assembleRunSummary(records) {
   const stages = records.map(r => ({
     skill: r.skill,
-    outcome: r.outcome ?? r.status ?? null,
+    // `outcome` only. Never fall back to r.status — status carries lifecycle
+    // values (COMPLETE, COMPLETE_FRAMING_CORRECTED) on a different axis, and
+    // conflating them is what made the dashboard RESULT column unreadable.
+    outcome: r.outcome ?? null,
     confidence: r.confidence ?? null,
     costUsd: r.cost?.rateLockedUsd ?? 0,
     durationMs: r.durationMs ?? 0,

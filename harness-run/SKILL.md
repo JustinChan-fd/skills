@@ -1,30 +1,73 @@
 ---
 name: harness-run
-description: Conductor and runbook for the full harness pipeline; walks intake → bridge → plan → bridge → implement, gates each stage on confidence, and produces a guardrailed DRAFT PR.
+description: Conductor and runbook for the full harness pipeline; walks intake → plan → implement with each manifest passed through as ground truth, and produces a guardrailed DRAFT PR.
 ---
 
 # harness-run
 
 > **IMPORTANT — enter via `/harness-run`, never by launching `workflow.js` directly.**
-> The SKILL.md wrapper captures `startTs`, `skillsCommit`, `runTs`, `runId`, derives `repo`/`worktreeName`/`runBranch`, reads `weights-override.json`, loads `initialWeights`, and fires `Workflow({scriptPath: harness-run/workflow.js})`. A bare Workflow call skips all of that and produces an incomplete run with no weight-evolution report.
+> The SKILL.md wrapper captures `startTs`, `skillsCommit`, `runTs`, `runId`, `today`, derives `repo`/`worktreeName`/`runBranch`, and fires `Workflow({scriptPath: harness-run/workflow.js})`. A bare Workflow call skips all of that and produces an incomplete run.
 
 ## Philosophy
 
-**harness-run is the conductor, not a player.** It provisions an isolated worktree, then walks the fixed sequence — intake → bridge-A → plan → bridge-B → implement — with each stage running as an `agent()` call inside the conductor workflow. This keeps every stage's token budget isolated in its own subagent, preventing the main session from accumulating output tokens across all stages.
+**harness-run is the conductor, not a player.** It provisions an isolated worktree, then walks the fixed sequence — intake → plan → implement — calling each child skill's `workflow.js` directly via the script-level `workflow()` hook. Each stage's token budget stays isolated in its own child workflow, so the main session never accumulates output tokens across stages.
+
+**Manifest-as-gospel.** Each stage's manifest is accepted as ground truth by the next stage. There is no scoring gate between stages, no RE_ASK verdict, and no refine loop. harness-plan already honours `args.gatedIntake` as authoritative for size and file scope (manifest supremacy) — it does not care whether a bridge stamped the manifest, only that one is present.
+
+> **Why no bridge (2026-07-27).** harness-bridge used to gate Handoff A and Handoff B. Its RE_ASK loop death-spiralled — four consecutive refine agents died mid-`Read` — and blocked a run whose whole purpose was a proven happy path to a draft PR. The skill and its `lib/checks-*.js` are untouched on disk. Re-add the gates here behind an opt-in `--gate` flag once the checks-B ↔ harness-plan schema contract is aligned (checks-B expects a single `description` string per task; harness-plan emits flat `what`/`where`/`how`/`done`/`snippets`).
+
+## Why `workflow()`, not `agent()`
+
+Child skills MUST be invoked with the script-level `workflow({scriptPath}, args)` hook:
+
+```js
+const intakeResult = await workflow(
+  { scriptPath: '.../harness-intake/workflow.js' },
+  { input, issueKey, repoPath: worktreePath, ...childTelemetryArgs }
+)
+```
+
+**Never** spawn an `agent()` whose prompt tells it to call `Workflow` or `/harness-intake`. Subagents cannot nest `Workflow`, so that shape silently never runs the child's `workflow.js` — the subagent instead improvises a hand-written manifest and every per-stage telemetry field comes back null. That was the single root cause of the null DURATION/TOKENS/COST columns in the dashboard for the harness-run era.
+
+Because the conductor bypasses each child's SKILL.md wrapper, it takes over the wrapper's two post-workflow jobs itself: stamping wall-clock `durationMs` (via a haiku agent, since `Date.now()` is unavailable in workflow scripts) and appending the returned audit record to the child's telemetry JSONL. See `finalizeStageTelemetry` in `workflow.js`.
 
 ## The Sequence
 
 ```
 Phase 0  provision worktree (off origin/<base>)
   ↓
-harness-intake        → intake-manifest.json
-  ↓  harness-bridge (Handoff A)   PROCEED / RE_ASK→refine intake / EXIT
-harness-plan          → plan-manifest.json + p1.json
-  ↓  harness-bridge (Handoff B)   PROCEED / RE_ASK→refine plan / EXIT
-harness-implement     → code + tests
+harness-intake        → intake manifest (written by the conductor)
+  ↓  passed through verbatim as gatedIntake
+harness-plan          → plan-manifest.json + p1.json (written by harness-plan)
+  ↓  plans[] ordered by dependsOn
+harness-implement     → code + tests (once per plan entry)
   ↓
-guardrailed DRAFT PR + run summary + weight-evolution report
+guardrailed DRAFT PR + run summary
 ```
+
+### Two handoff shapes that bite
+
+**intake → plan.** harness-plan takes *two* inputs off the intake manifest, and they
+are not interchangeable:
+
+| Arg | Shape | Role |
+|---|---|---|
+| `gatedIntake` | the manifest object, verbatim | authoritative size + file scope (manifest supremacy) |
+| `input` | **raw prose** | what the sizing agent reads, what the issue-key regex scans, what the plan slug/title come from |
+
+`input` is built by `lib/plan-input.js` from the fields the manifest actually carries
+— `sourceTitle`, `groundedReality`, `acList`, `migrationPattern`, `scopePath` —
+preferring `groundedReality` (present only for size L, and per its own manifest
+comment it outranks the ticket text) and falling back to raw ticket text for XS/S/M,
+where `groundedReality` is null by design. The conductor refuses to call harness-plan
+with fewer than `MIN_PLAN_INPUT_CHARS` (40) of input rather than let it size off a
+bare issue key.
+
+**plan → implement.** Pass each plan entry's **`path`** (the `.md`), not `jsonPath`.
+harness-implement derives the JSON companion itself and keeps the markdown as its
+fallback when the JSON is missing or malformed; handing it `jsonPath` collapses both
+to the same file and that fallback can never fire. Use `planPathFor(plan)`. The path
+stays repo-relative — implement joins it onto `repoPath` itself.
 
 ## Parsing the invocation
 
@@ -85,56 +128,39 @@ When `--parent` is passed (without `--resume`), this is a fresh run that acknowl
 ## How the wrapper fires the workflow
 
 ```js
-const [startTs, skillsCommit, runTs] = await Promise.all([
+const [startTs, skillsCommit, runTs, today] = await Promise.all([
   Bash('python3 -c "import time; print(int(time.time()*1000))"').then(r => r.trim()),
   Bash('git -C ~/Desktop/Repos/skills rev-parse HEAD 2>/dev/null || echo unknown').then(r => r.trim()),
   Bash('python3 -c "from datetime import datetime, timezone; print(datetime.now(timezone.utc).strftime(\'%Y%m%dT%H%M%SZ\'))"').then(r => r.trim()),
+  Bash('python3 -c "from datetime import datetime, timezone; print(datetime.now(timezone.utc).strftime(\'%Y-%m-%d\'))"').then(r => r.trim()),
 ])
 const runId = `${issueKey}-${runTs}`
-
-// repo: canonical name (e.g. 'webtarsthree') — from repoPath, NOT the worktree dir
-const repo = repoPath.split('/').pop()
-
-// Read weights-override.json for tonight's adjustments
-let weightsOverride = {}
-try {
-  weightsOverride = JSON.parse(await Read('/Users/206618626@bwt3.com/.claude/skills/harness-bridge/weights-override.json'))
-} catch {
-  await Write('/Users/206618626@bwt3.com/.claude/skills/harness-bridge/weights-override.json', '{}\n')
-  weightsOverride = {}
-}
-
-// Load initial weights for the weight-evolution report
-const initialWeights = JSON.parse(await Bash(`node --input-type=module -e "
-import { loadWeights } from '/Users/206618626@bwt3.com/.claude/skills/harness-bridge/lib/weights.js'
-import { CHECKS_A } from '/Users/206618626@bwt3.com/.claude/skills/harness-bridge/lib/checks-a.js'
-import { CHECKS_B } from '/Users/206618626@bwt3.com/.claude/skills/harness-bridge/lib/checks-b.js'
-console.log(JSON.stringify({ A: loadWeights(CHECKS_A, null), B: loadWeights(CHECKS_B, null) }))
-"`).then(r => r.trim()))
 
 const result = await Workflow({
   scriptPath: '/Users/206618626@bwt3.com/.claude/skills/harness-run/workflow.js',
   args: {
     issueKey,
-    repoPath,
+    repoPath,          // the REAL repo — the workflow derives the worktree path from it
     baseBranch,
-    homeDir: '/Users/206618626@bwt3.com',
-    repo,
     runTs,
     runId,
+    today,             // calendar date; every child telemetry record's `ts`
     skillsCommit,
     startTs,
-    weightsOverride,
-    initialWeights,
+    cloudId:          cloudId || 'fandango.atlassian.net',
     parentRunId:      parentRunId || null,
     resumeFromState:  resumeFromState || null,
   },
 })
 ```
 
-After Workflow returns, print `result.summaryBox` and `result.weightReport` verbatim.
+`today` is required — the workflow throws without it. It is what lands in each child record's `ts` field (a calendar date per the telemetry-v2 schema); `runTs` is the compact stamp used in filenames and is only a fallback.
 
-If `result.finalStatus === 'EXIT'`, print the exit phase, flags, and skeptic reasons clearly — do NOT advance.
+Do NOT pass `repo` — the workflow derives the canonical repo name from `repoPath` and forwards it to every child as `repoName`, so child telemetry says `webtarsthree` rather than the worktree directory name.
+
+After Workflow returns, print `result.summaryBox` verbatim.
+
+If `result.finalStatus === 'FAILED'`, print `result.exitPhase` and the failing stage record clearly — the worktree is left in place for inspection, and no PR was opened.
 
 If `result.stateFilePath` is set, print:
 ```
@@ -143,13 +169,25 @@ To resume: /harness-run <issueKey> --repo <repoPath> --base <baseBranch> --resum
 To continue as new run: /harness-run <issueKey> --repo <repoPath> --base <baseBranch> --parent <result.runId>
 ```
 
-## Weight agency
-
-Before the first bridge call, the workflow reads `weightsOverride` from the wrapper args. To adjust mid-run: compute the new map with `applyWeightChange` semantics (±15 per check, floor 1, ceiling 60, renormalize to 100), write it back to `weights-override.json` under its handoff key, and pass updated `weightsOverride` to the next bridge call. All changes surface in the final `weightEvolutionReport`.
-
 ## Telemetry
 
-Each child skill writes its own telemetry record independently. harness-run does not write a separate telemetry record — the run summary is printed from `result.summaryBox`. The individual records in `~/Desktop/Repos/harness-telemetry/v2/` are the authoritative per-stage records.
+One record per stage in `~/Desktop/Repos/harness-telemetry/v2/`, named
+`{repo}__{skill}__{ticket}__{runTs}.jsonl`. Those per-stage records are authoritative; harness-run writes no record of its own — the run summary is printed from `result.summaryBox`.
+
+Because the conductor calls child `workflow.js` files directly, it does what each child's SKILL.md wrapper would otherwise do:
+
+| Field | Who sets it | How |
+|---|---|---|
+| `repo` | conductor → child `repoName` | canonical repo name, not the worktree dir |
+| `ts` | conductor → child `today` | calendar date (`2026-07-27`) |
+| `runId` / `parentRunId` | conductor | shared across all stages, so records link |
+| `durationMs` | conductor | epoch-ms stamps either side of the `workflow()` call |
+| `tokens.total.output` | conductor | `budget.spent()` delta around the call |
+| `status` / `outcome` | child workflow | lifecycle value, and the derived `success`/`partial`/`failed` |
+
+`status` and `outcome` are separate axes and must not be conflated — `assembleRunSummary` reads `outcome` only and never falls back to `status`.
+
+Still unmeasured per stage: `tokens.total.subagentTokens`, `input`, and the cache split. Those come from the `<usage>` block of a `Workflow` completion notification, which the conductor does not see for a nested `workflow()` call. They are recoverable after the fact from the run's `agent-*.jsonl` transcripts.
 
 ## Getting past a barrier
 
