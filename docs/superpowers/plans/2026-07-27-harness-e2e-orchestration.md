@@ -35,7 +35,11 @@
 |---|---|
 | `SKILL.md` | Invocation, I/O contract, verdict handling, telemetry wrapper |
 | `workflow.js` | Load artifact → score → hole-poker agent → stamp `-gated.json` → write telemetry |
-| `lib/confidence.js` | `CHECKS_A`, `CHECKS_B` (each `{id,weight,fn}`), `scoreArtifact`, `THRESHOLD`, `assertWeightsSum` |
+| `lib/confidence.js` | **Facade** — owns `scoreArtifact`, `THRESHOLD`, `assertWeightsSum`; re-exports `CHECKS_A`/`CHECKS_B`. New handoff = new `checks-*.js` registered here; public interface never changes. |
+| `lib/checks-common.js` | Shared pure helpers (`clamp01`, `mean`) imported by every handoff's check file |
+| `lib/checks-a.js` | Handoff A (intake→plan) check functions + `CHECKS_A` (`[{id,weight,fn}]`, Σ=100) |
+| `lib/checks-b.js` | Handoff B (plan→implement) check functions + `CHECKS_B` (`[{id,weight,fn}]`, Σ=100) |
+| `fixtures/` | `intake-manifest-{clean,dirty}.json`, `plan-{clean,dirty}.json` — golden inputs the check tests score against |
 | `lib/gated.js` | `stampManifest`, `gatedPathFor` |
 | `lib/verdict.js` | `verdictFor(finalScore, retriesUsed)` → `{verdict, action}` |
 | `lib/weights.js` | `loadWeights`, `applyWeightChange` (bounds+renormalize), `makeWeightChange` |
@@ -63,11 +67,21 @@
 ## Interface Index (locked signatures — later tasks rely on these)
 
 ```js
-// harness-bridge/lib/confidence.js
-export const THRESHOLD = 85
-export const CHECKS_A  // [{ id:string, weight:int, fn:(artifact)=>number[0..1] }]
-export const CHECKS_B
+// harness-bridge/lib/checks-common.js — shared pure helpers (handoff-agnostic)
+export const clamp01 = x => Math.max(0, Math.min(1, x))
+export const mean = arr => arr.length ? arr.reduce((s, x) => s + x, 0) / arr.length : 1  // vacuous 1 for empty populations
 export function assertWeightsSum(checks)         // throws if Σweight !== 100
+
+// harness-bridge/lib/checks-a.js  — Handoff A check fns
+export const CHECKS_A  // [{ id:string, weight:int, fn:(artifact)=>number[0..1] }], Σweight===100
+// harness-bridge/lib/checks-b.js  — Handoff B check fns
+export const CHECKS_B  // same shape, Σweight===100
+
+// harness-bridge/lib/confidence.js — the PUBLIC facade (this signature is what every downstream task imports)
+export const THRESHOLD = 85
+export { CHECKS_A } from './checks-a.js'                    // re-exported
+export { CHECKS_B } from './checks-b.js'                    // re-exported
+export { assertWeightsSum, clamp01, mean } from './checks-common.js'  // re-exported
 export function scoreArtifact(artifact, handoff, weightsOverride)
   // handoff: 'A'|'B'; weightsOverride: {checkId:weight}|null
   // → { score:int0..100, perCheck:[{id,value,weight,contribution}] }
@@ -227,14 +241,15 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 ```
 
 ---
-## Task 3: Scaffold the harness-bridge skill (models + telemetry libs)
+## Task 3: Scaffold the harness-bridge skill (models + telemetry libs + fixtures)
 
 **Files:**
 - Create: `harness-bridge/lib/models.js`, `harness-bridge/lib/telemetry.js`
+- Create: `harness-bridge/fixtures/intake-manifest-clean.json`, `harness-bridge/fixtures/intake-manifest-dirty.json`, `harness-bridge/fixtures/plan-clean.json`, `harness-bridge/fixtures/plan-dirty.json`
 - Test: `harness-bridge/lib/models.test.js`
 
 **Interfaces:**
-- Produces: `MODEL` (opus→claude-opus-5); telemetry path helpers mirroring harness-plan.
+- Produces: `MODEL` (opus→claude-opus-5); telemetry path helpers mirroring harness-plan; four golden fixtures the Handoff A/B check tests (Tasks 4–5) score against.
 
 - [ ] **Step 1: Create `harness-bridge/lib/models.js`**
 
@@ -272,40 +287,123 @@ import { MODEL } from './models.js'
 test('bridge opus seat is claude-opus-5', () => assert.equal(MODEL.opus, 'claude-opus-5'))
 ```
 
-- [ ] **Step 4: Run tests**
+- [ ] **Step 4: Create the four golden fixtures**
+
+These are the inputs Tasks 4–5 score. A `-clean` fixture must pass all its handoff's checks (score ≫ 85); a `-dirty` fixture must fail several (score ≪ 85). They encode the historical failure modes: `intake-manifest-dirty` has `files: []` on an L manifest with empty-`files` subtasks (bug #1), no grounding, and an unexecutable AC; `plan-dirty` has a prose-only task, an empty-`files` task, an over-broad task, and an unresolvable `dependsOn`.
+
+```bash
+mkdir -p harness-bridge/fixtures
+
+cat > harness-bridge/fixtures/intake-manifest-clean.json << 'EOF'
+{
+  "skill": "harness-intake",
+  "sourceIssue": "TARS-1271",
+  "sourceTitle": "Phase 5: Client - Migrate client HTTP layer",
+  "size": "M",
+  "workType": "migration",
+  "migrationPattern": "axios → clientFetch",
+  "scopePath": "src/client",
+  "acList": [
+    { "bullet": "118 client files migrated to use clientFetch", "researchType": "grep", "grepPattern": "axios", "searchScope": "src/client", "shellCommand": "grep -rl 'axios' src/client | wc -l", "verifiedCount": 118, "ticketClaimedCount": 118 },
+    { "bullet": "clientFetch wrapper exists and is importable", "researchType": "grep", "grepPattern": "clientFetch", "searchScope": "src/client/lib", "shellCommand": "grep -rl 'clientFetch' src/client/lib", "verifiedCount": 1 },
+    { "bullet": "All client tests pass", "researchType": "shell", "grepPattern": "", "searchScope": "src/client", "shellCommand": "npm test -- --filter client", "verifiedCount": null }
+  ],
+  "files": ["src/client/api/fetchMovies.ts", "src/client/api/fetchShowtimes.ts", "src/client/lib/clientFetch.ts"],
+  "execution": "sequential"
+}
+EOF
+
+cat > harness-bridge/fixtures/intake-manifest-dirty.json << 'EOF'
+{
+  "skill": "harness-intake",
+  "sourceIssue": "TARS-9999",
+  "sourceTitle": "Vague migration thing",
+  "size": "L",
+  "workType": "migration",
+  "migrationPattern": "old → new",
+  "scopePath": "src/somewhere",
+  "acList": [
+    { "bullet": "Do the migration", "researchType": "", "grepPattern": "", "searchScope": "", "shellCommand": "", "verifiedCount": null }
+  ],
+  "files": [],
+  "groups": [{ "subtasks": [{ "files": [] }, { "files": [] }] }],
+  "execution": "sequential"
+}
+EOF
+
+cat > harness-bridge/fixtures/plan-clean.json << 'EOF'
+{
+  "title": "Migrate client HTTP layer",
+  "size": "M",
+  "execution": "sequential",
+  "plans": [{ "id": "p1", "path": "docs/plans/p1.md", "jsonPath": "docs/plans/p1.json", "dependsOn": [] }],
+  "tasks": [
+    { "id": "t1", "title": "Replace axios import in fetchMovies", "description": "WHAT: Replace axios with clientFetch in fetchMovies.ts\nWHERE: src/client/api/fetchMovies.ts:3-15 — the import and usage site\nHOW: swap the import and call site:\n```typescript\nimport { clientFetch } from '../lib/clientFetch'\nconst response = await clientFetch('/api/movies', { method: 'GET' })\n```\nDONE: expect(fetchMovies()).resolves.toEqual(mockMovies)", "files": ["src/client/api/fetchMovies.ts", "src/client/lib/clientFetch.ts"], "tddRequired": true },
+    { "id": "t2", "title": "Replace axios import in fetchShowtimes", "description": "WHAT: Replace axios with clientFetch in fetchShowtimes.ts\nWHERE: src/client/api/fetchShowtimes.ts:1-10 — import line and fetch call\nHOW: same pattern as t1:\n```typescript\nimport { clientFetch } from '../lib/clientFetch'\nconst response = await clientFetch('/api/showtimes', { method: 'GET' })\n```\nDONE: expect(fetchShowtimes()).resolves.toEqual(mockShowtimes)", "files": ["src/client/api/fetchShowtimes.ts", "src/client/lib/clientFetch.ts"], "tddRequired": true }
+  ]
+}
+EOF
+
+cat > harness-bridge/fixtures/plan-dirty.json << 'EOF'
+{
+  "title": "Do some stuff",
+  "size": "M",
+  "execution": "sequential",
+  "plans": [{ "id": "p1", "path": "docs/plans/p1.md", "jsonPath": "docs/plans/p1.json", "dependsOn": ["pX"] }],
+  "tasks": [
+    { "id": "t1", "title": "Fix the thing", "description": "WHAT: fix it\nWHERE: somewhere\nHOW: do it", "files": [], "tddRequired": true },
+    { "id": "t2", "title": "Update tests", "description": "Update the tests to pass", "files": ["a.ts", "b.ts", "c.ts", "d.ts", "e.ts"], "tddRequired": false }
+  ]
+}
+EOF
+```
+
+- [ ] **Step 5: Run tests**
 
 Run: `cd /Users/206618626@bwt3.com/Desktop/Repos/skills && node --test harness-bridge/lib/models.test.js`
 Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 6: Commit**
 
 ```bash
-git add harness-bridge/lib/models.js harness-bridge/lib/telemetry.js harness-bridge/lib/models.test.js
-git commit -m "harness-bridge: scaffold models + telemetry libs
+git add harness-bridge/lib/models.js harness-bridge/lib/telemetry.js harness-bridge/lib/models.test.js harness-bridge/fixtures/
+git commit -m "harness-bridge: scaffold models + telemetry libs + golden fixtures
 
 Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 ```
 
 ---
 
-## Task 4: `lib/confidence.js` — shared helpers + Handoff A checks + weight assertion
+## Task 4: `lib/checks-common.js` + `lib/checks-a.js` — Handoff A checks + weight assertion
 
 **Files:**
-- Create: `harness-bridge/lib/confidence.js`
-- Test: `harness-bridge/lib/confidence.test.js`
+- Create: `harness-bridge/lib/checks-common.js`, `harness-bridge/lib/checks-a.js`
+- Test: `harness-bridge/lib/checks-a.test.js`
 
 **Interfaces:**
-- Produces: `THRESHOLD=85`, `CHECKS_A` (8 checks, Σweight=100), `assertWeightsSum`. `CHECKS_B` and `scoreArtifact` are added in Task 5.
+- Produces: `clamp01`, `mean`, `assertWeightsSum` (in `checks-common.js`); `CHECKS_A` (8 checks, Σweight=100, in `checks-a.js`). `CHECKS_B`, `scoreArtifact`, `THRESHOLD`, and the `confidence.js` facade are added in Task 5.
+- Rationale for the split: each handoff owns its own check file and its own test file, so adding a future handoff (implement→PR = Handoff C) is a new `checks-c.js` + `checks-c.test.js` — the `confidence.js` facade and every downstream import stay untouched.
 
-- [ ] **Step 1: Write failing tests (`harness-bridge/lib/confidence.test.js`)**
+- [ ] **Step 1: Write failing tests (`harness-bridge/lib/checks-a.test.js`)**
 
 ```js
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { THRESHOLD, CHECKS_A, assertWeightsSum } from './confidence.js'
+import { readFileSync } from 'node:fs'
+import { fileURLToPath } from 'node:url'
+import { dirname, join } from 'node:path'
+import { CHECKS_A } from './checks-a.js'
+import { assertWeightsSum } from './checks-common.js'
 
-test('threshold is 85', () => assert.equal(THRESHOLD, 85))
+const HERE = dirname(fileURLToPath(import.meta.url))
+const fixture = name => JSON.parse(readFileSync(join(HERE, '..', 'fixtures', name), 'utf8'))
+const scoreA = m => CHECKS_A.reduce((s, c) => s + c.fn(m) * c.weight, 0)  // local Σ for fixture-level assertions
+
 test('Handoff A weights sum to exactly 100', () => assert.equal(assertWeightsSum(CHECKS_A), true))
+
+// Fixture-level: the clean intake manifest clears the bar, the dirty one is far below it.
+test('clean intake fixture scores well above threshold (85)', () => assert.ok(scoreA(fixture('intake-manifest-clean.json')) >= 85))
+test('dirty intake fixture scores well below threshold (85)', () => assert.ok(scoreA(fixture('intake-manifest-dirty.json')) < 50))
 
 const byId = (checks, id) => checks.find(c => c.id === id).fn
 
@@ -334,13 +432,26 @@ test('size-shape-consistency: L requires groups', () => {
 Run: `node --test harness-bridge/lib/confidence.test.js`
 Expected: FAIL — module not found.
 
-- [ ] **Step 3: Implement `harness-bridge/lib/confidence.js` (helpers + CHECKS_A)**
+- [ ] **Step 3: Implement `harness-bridge/lib/checks-common.js`**
 
 ```js
-export const THRESHOLD = 85
+// harness-bridge/lib/checks-common.js — handoff-agnostic pure helpers
+export const clamp01 = x => Math.max(0, Math.min(1, x))
+export const mean = arr => arr.length ? arr.reduce((s, x) => s + x, 0) / arr.length : 1 // vacuous 1 for empty populations
 
-const clamp01 = x => Math.max(0, Math.min(1, x))
-const mean = arr => arr.length ? arr.reduce((s, x) => s + x, 0) / arr.length : 1 // vacuous 1 for empty populations
+export function assertWeightsSum(checks) {
+  const sum = checks.reduce((s, c) => s + c.weight, 0)
+  if (sum !== 100) throw new Error(`weights sum to ${sum}, expected 100`)
+  return true
+}
+```
+
+- [ ] **Step 4: Implement `harness-bridge/lib/checks-a.js`**
+
+```js
+// harness-bridge/lib/checks-a.js — Handoff A (intake → plan) checks
+import { clamp01, mean, assertWeightsSum } from './checks-common.js'
+
 const FILE_RE = /[\w./-]+\.[a-z]{1,4}\b/gi
 
 function subtasksOf(m) { return (m.groups || []).flatMap(g => g.subtasks || []) }
@@ -438,45 +549,42 @@ export const CHECKS_A = [
   { id: 'scope-grounded',              weight: 5,  fn: scopeGrounded },
   { id: 'size-shape-consistency',      weight: 3,  fn: sizeShapeConsistencyA },
 ]
-
-export function assertWeightsSum(checks) {
-  const sum = checks.reduce((s, c) => s + c.weight, 0)
-  if (sum !== 100) throw new Error(`weights sum to ${sum}, expected 100`)
-  return true
-}
-assertWeightsSum(CHECKS_A)
+assertWeightsSum(CHECKS_A)  // fail fast at module load if weights drift off 100
 ```
 
-- [ ] **Step 4: Run tests**
+- [ ] **Step 5: Run tests**
 
-Run: `node --test harness-bridge/lib/confidence.test.js`
+Run: `node --test harness-bridge/lib/checks-a.test.js`
 Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 6: Commit**
 
 ```bash
-git add harness-bridge/lib/confidence.js harness-bridge/lib/confidence.test.js
-git commit -m "harness-bridge: confidence Handoff A checks (Σ=100)
+git add harness-bridge/lib/checks-common.js harness-bridge/lib/checks-a.js harness-bridge/lib/checks-a.test.js
+git commit -m "harness-bridge: checks-common + Handoff A checks (Σ=100)
 
 Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 ```
 
 ---
-## Task 5: `lib/confidence.js` — Handoff B checks + `scoreArtifact`
+## Task 5: `lib/checks-b.js` + `lib/confidence.js` facade — Handoff B checks + `scoreArtifact`
 
 **Files:**
-- Modify: `harness-bridge/lib/confidence.js` (append CHECKS_B + scoreArtifact)
-- Test: `harness-bridge/lib/confidence.test.js` (append)
+- Create: `harness-bridge/lib/checks-b.js`, `harness-bridge/lib/confidence.js`
+- Test: `harness-bridge/lib/checks-b.test.js`, `harness-bridge/lib/confidence.test.js`
 
 **Interfaces:**
-- Consumes: `CHECKS_A`, `assertWeightsSum` from Task 4.
-- Produces: `CHECKS_B` (8 checks, Σweight=100), `scoreArtifact(artifact, handoff, weightsOverride)`.
+- Consumes: `clamp01`, `mean`, `assertWeightsSum` from `checks-common.js`; `CHECKS_A` from `checks-a.js`.
+- Produces: `CHECKS_B` (8 checks, Σweight=100, in `checks-b.js`); the public facade `confidence.js` exporting `THRESHOLD=85`, `scoreArtifact(artifact, handoff, weightsOverride)`, and re-exporting `CHECKS_A`/`CHECKS_B`/`assertWeightsSum`. **This facade is the locked public interface — no downstream task imports the `checks-*` files directly.**
 - B artifact shape: `{ tasks:[{id,title,description,files[],tddRequired,acceptanceCriteria}], plans:[{id,dependsOn[]}], execution, size }`.
 
-- [ ] **Step 1: Append failing tests**
+- [ ] **Step 1: Write failing tests for `checks-b.js` (`harness-bridge/lib/checks-b.test.js`)**
 
 ```js
-import { CHECKS_B, scoreArtifact } from './confidence.js'
+import { test } from 'node:test'
+import assert from 'node:assert/strict'
+import { CHECKS_B } from './checks-b.js'
+import { assertWeightsSum } from './checks-common.js'
 
 test('Handoff B weights sum to exactly 100', () => assert.equal(assertWeightsSum(CHECKS_B), true))
 
@@ -495,27 +603,55 @@ test('task-spec-completeness: full task passes, prose-only fails', () => {
 test('manifest-dag-consistency: unresolvable dependsOn fails', () => {
   assert.ok(bId('manifest-dag-consistency')({ plans: [{ id: 'p1', dependsOn: ['pX'] }], execution: 'sequential' }) < 1)
 })
+```
+
+- [ ] **Step 2: Write failing tests for the `confidence.js` facade (`harness-bridge/lib/confidence.test.js`)**
+
+```js
+import { test } from 'node:test'
+import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
+import { fileURLToPath } from 'node:url'
+import { dirname, join } from 'node:path'
+import { THRESHOLD, CHECKS_A, CHECKS_B, scoreArtifact, assertWeightsSum } from './confidence.js'
+
+const HERE = dirname(fileURLToPath(import.meta.url))
+const fixture = name => JSON.parse(readFileSync(join(HERE, '..', 'fixtures', name), 'utf8'))
+
+test('threshold is 85', () => assert.equal(THRESHOLD, 85))
+test('facade re-exports both handoffs, each Σ=100', () => {
+  assert.equal(assertWeightsSum(CHECKS_A), true)
+  assert.equal(assertWeightsSum(CHECKS_B), true)
+})
 test('scoreArtifact returns 0..100 with perCheck contributions summing to score', () => {
-  const r = scoreArtifact({ size: 'S', files: [], acList: [{ researchType: 'grep', grepPattern: 'axios', verifiedCount: 5 }], migrationPattern: 'axios → clientFetch', scopePath: 'src' }, 'A', null)
+  const r = scoreArtifact(fixture('intake-manifest-clean.json'), 'A', null)
   assert.ok(r.score >= 0 && r.score <= 100)
   assert.equal(r.score, Math.round(r.perCheck.reduce((s, p) => s + p.contribution, 0)))
 })
+test('fixture-level: clean clears the bar, dirty falls short — both handoffs', () => {
+  assert.ok(scoreArtifact(fixture('intake-manifest-clean.json'), 'A', null).score >= 85)
+  assert.ok(scoreArtifact(fixture('intake-manifest-dirty.json'), 'A', null).score < 50)
+  assert.ok(scoreArtifact(fixture('plan-clean.json'), 'B', null).score >= 85)
+  assert.ok(scoreArtifact(fixture('plan-dirty.json'), 'B', null).score < 50)
+})
 test('scoreArtifact honors weightsOverride', () => {
-  const art = { tasks: [{ files: ['a'], description: 'x' }] }
+  const art = fixture('plan-dirty.json')
   const base = scoreArtifact(art, 'B', null).score
   const boosted = scoreArtifact(art, 'B', { 'task-files-present-bounded': 60, 'task-spec-completeness': 0 }).score
   assert.notEqual(base, boosted)
 })
 ```
 
-- [ ] **Step 2: Run to verify it fails**
+- [ ] **Step 3: Run both to verify they fail**
 
-Run: `node --test harness-bridge/lib/confidence.test.js`
-Expected: FAIL — `CHECKS_B`/`scoreArtifact` not exported.
+Run: `node --test harness-bridge/lib/checks-b.test.js harness-bridge/lib/confidence.test.js`
+Expected: FAIL — `checks-b.js`/`confidence.js` not found.
 
-- [ ] **Step 3: Append to `harness-bridge/lib/confidence.js`**
+- [ ] **Step 4: Create `harness-bridge/lib/checks-b.js`**
 
 ```js
+import { clamp01, mean, assertWeightsSum } from './checks-common.js'
+
 // ── Handoff B (plan → implement) ─────────────────────────────────────────────
 function failsQualityContract(desc, tddRequired) {
   const d = desc || ''
@@ -612,7 +748,24 @@ export const CHECKS_B = [
   { id: 'concern-atomicity',           weight: 3,  fn: concernAtomicity },
   { id: 'size-shape-consistency',      weight: 3,  fn: sizeShapeConsistencyB },
 ]
-assertWeightsSum(CHECKS_B)
+assertWeightsSum(CHECKS_B)  // fail fast at module load if weights drift off 100
+```
+
+- [ ] **Step 5: Create the public facade `harness-bridge/lib/confidence.js`**
+
+This is the ONLY module downstream code (workflow.js, later tasks) imports for scoring. Per-handoff check files stay private behind it — adding Handoff C later means a new `checks-c.js` + one re-export line here, with no change to any consumer.
+
+```js
+import { clamp01 } from './checks-common.js'
+import { CHECKS_A } from './checks-a.js'
+import { CHECKS_B } from './checks-b.js'
+
+export const THRESHOLD = 85
+
+// Re-export so consumers import everything scoring-related from one place.
+export { CHECKS_A } from './checks-a.js'
+export { CHECKS_B } from './checks-b.js'
+export { assertWeightsSum, clamp01, mean } from './checks-common.js'
 
 export function scoreArtifact(artifact, handoff, weightsOverride = null) {
   const checks = handoff === 'A' ? CHECKS_A : CHECKS_B
@@ -629,16 +782,16 @@ export function scoreArtifact(artifact, handoff, weightsOverride = null) {
 }
 ```
 
-- [ ] **Step 4: Run tests**
+- [ ] **Step 6: Run tests**
 
-Run: `node --test harness-bridge/lib/confidence.test.js`
+Run: `node --test harness-bridge/lib/checks-b.test.js harness-bridge/lib/confidence.test.js`
 Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 7: Commit**
 
 ```bash
-git add harness-bridge/lib/confidence.js harness-bridge/lib/confidence.test.js
-git commit -m "harness-bridge: confidence Handoff B checks + scoreArtifact
+git add harness-bridge/lib/checks-b.js harness-bridge/lib/confidence.js harness-bridge/lib/checks-b.test.js harness-bridge/lib/confidence.test.js
+git commit -m "harness-bridge: Handoff B checks (Σ=100) + confidence.js public facade
 
 Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 ```
@@ -1587,7 +1740,7 @@ catch { await Write('/Users/206618626@bwt3.com/.claude/skills/harness-bridge/wei
 
 Pass that per-handoff slice as the bridge's `weightsOverride` arg (Task 11). To adjust mid-run, compute the new map with `applyWeightChange`, write it back to `weights-override.json` under its handoff key, record a `makeWeightChange({...})` event into the run's `allWeightChanges[]`, and pass it to the next gate call.
 
-- Edit only `harness-bridge/weights-override.json` (the defaults in `lib/confidence.js` are NEVER edited).
+- Edit only `harness-bridge/weights-override.json` (the default `weight:` literals in `lib/checks-a.js` / `lib/checks-b.js` are NEVER edited).
 - Use `applyWeightChange` semantics: ±15 per adjustment, floor 1, ceiling 60, renormalize to exactly 100.
 - Log every change as a `weightChanges[]` event `{handoff, checkId, oldWeight, newWeight, reason, triggeringRunId, ts}` on the bridge telemetry record.
 - Adjustments are for tonight's run only and are surfaced in the final report for human review.

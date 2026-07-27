@@ -23,6 +23,6 @@ Execute the implementation plan at `docs/superpowers/plans/2026-07-27-harness-e2
 - Any NEVER-list category (irreversible-destructive, security-auth-permission, cost-over-threshold, public-api-contract, out-of-scope, legal-compliance) → STOP and surface, do not self-decide.
 - If either confidence gate EXITs (second miss), STOP and surface the weak checks + skeptic reasons; do not open a PR.
 
-**Weight agency (tonight only):** you may adjust bridge weights mid-run if a gate is visibly miscalibrated — but only via `harness-bridge/weights-override.json` (never edit `lib/confidence.js` defaults), bounded ±15 per change / floor 1 / ceiling 60 / renormalize to 100, and log every change as a `weightChanges[]` event. At the very end, print the weight-evolution report (initial → final per handoff, every change with its reason).
+**Weight agency (tonight only):** you may adjust bridge weights mid-run if a gate is visibly miscalibrated — but only via `harness-bridge/weights-override.json` (never edit the default `weight:` literals in `lib/checks-a.js` / `lib/checks-b.js`), bounded ±15 per change / floor 1 / ceiling 60 / renormalize to 100, and log every change as a `weightChanges[]` event. At the very end, print the weight-evolution report (initial → final per handoff, every change with its reason).
 
 **When done:** report the draft PR URL, the run-summary box, the weight-evolution report, and confirm the five telemetry records (intake, bridge×N, plan, implement) exist. That's what I'll review.
