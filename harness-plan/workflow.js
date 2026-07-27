@@ -151,7 +151,7 @@ function writeAuditRecord(status, extra = {}) { return Promise.resolve(_buildAud
 const researcherModel = 'anthropic.claude-sonnet-4-6'
 const synthModel      = 'anthropic.claude-sonnet-4-6'
 const haikuModel      = 'anthropic.claude-haiku-4-5-20251001'
-const opusModel       = 'claude-opus-4-8'
+const opusModel       = 'claude-opus-5'
 // architectModel and decomposeModel hoisted — set from either manifestEntry or Intake path
 
 // ===== PURE (mirrors lib/) =====

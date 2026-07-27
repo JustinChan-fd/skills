@@ -20,7 +20,7 @@ describe('COST_RATES', () => {
 
 describe('rateFor', () => {
   it('returns opus rates for opus model ids', () => {
-    assert.deepEqual(rateFor('claude-opus-4-8'), COST_RATES.opus)
+    assert.deepEqual(rateFor('claude-opus-5'), COST_RATES.opus)
   })
   it('returns haiku rates for haiku model ids', () => {
     assert.deepEqual(rateFor('anthropic.claude-haiku-4-5-20251001'), COST_RATES.haiku)
@@ -52,7 +52,7 @@ describe('computeCost', () => {
 
   it('pure opus: 1M input + 1M output = $30.00', () => {
     const { rateLockedUsd } = computeCost({
-      agentCountByModel: { 'claude-opus-4-8': 1 },
+      agentCountByModel: { 'claude-opus-5': 1 },
       inputTokens: 1_000_000,
       outputTokensTotal: 1_000_000,
     })

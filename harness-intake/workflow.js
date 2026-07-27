@@ -424,7 +424,7 @@ function _buildAuditRecord(status, extra = {}) {
   return _buildV2Record(status, extra)
 }
 
-const opusModel   = 'claude-opus-4-8'
+const opusModel   = 'claude-opus-5'
 const sonnetModel = 'anthropic.claude-sonnet-4-6'
 const haikuModel  = 'anthropic.claude-haiku-4-5-20251001'
 

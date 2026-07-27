@@ -22,7 +22,7 @@ if (!input)    throw new Error('harness-intake-v2 requires input')
 if (!repoPath) throw new Error('harness-intake-v2 requires repoPath')
 
 // ─── Models ───────────────────────────────────────────────────────────────────
-const opusModel   = 'claude-opus-4-8'
+const opusModel   = 'claude-opus-5'
 const sonnetModel = 'anthropic.claude-sonnet-4-6'
 const haikuModel  = 'anthropic.claude-haiku-4-5-20251001'
 

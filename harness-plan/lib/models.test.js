@@ -19,6 +19,11 @@ test('MODEL.opus is not the stale claude-opus-4-6-v1 id', () => {
   assert.ok(!MODEL.opus.includes('4-6'), `stale opus id still present: ${MODEL.opus}`)
 })
 
-test('MODEL.opus matches expected current id', () => {
-  assert.equal(MODEL.opus, 'claude-opus-4-8')
+test('opus seat points at claude-opus-5', () => {
+  assert.equal(MODEL.opus, 'claude-opus-5')
+})
+
+test('sonnet and haiku seats unchanged', () => {
+  assert.equal(MODEL.sonnet, 'anthropic.claude-sonnet-4-6')
+  assert.equal(MODEL.haiku, 'claude-haiku-4-5-20251001')
 })
