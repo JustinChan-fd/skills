@@ -43,6 +43,37 @@ test('resolveWorktreeTarget: reused is false when nothing was actually carried o
   assert.equal(resolveWorktreeTarget({}, DERIVED).reused, false)
 })
 
+test('resolveWorktreeTarget: collapses a literal ".." segment carried in the checkpoint', () => {
+  // Bridge-era checkpoints stored worktreePath as `${repoPath}/../wt-<...>`. A literal
+  // `..` breaks the homeDir regex the child telemetry-path builders run against
+  // repoPath, which is why the fresh-run derivation resolves the parent dir explicitly.
+  const got = resolveWorktreeTarget(
+    { worktreePath: '/Users/me/Desktop/Repos/webtarsthree/../wt-TARS-1271-20260727T194141Z' },
+    DERIVED,
+  )
+  assert.equal(got.worktreePath, '/Users/me/Desktop/Repos/wt-TARS-1271-20260727T194141Z')
+  assert.ok(!got.worktreePath.includes('..'))
+})
+
+test('resolveWorktreeTarget: collapses multiple ".." segments', () => {
+  const got = resolveWorktreeTarget({ worktreePath: '/a/b/../c/d/../wt-x' }, DERIVED)
+  assert.equal(got.worktreePath, '/a/c/wt-x')
+})
+
+test('resolveWorktreeTarget: a path with no ".." is left byte-identical', () => {
+  const got = resolveWorktreeTarget({ worktreePath: '/Repos/wt-clean' }, DERIVED)
+  assert.equal(got.worktreePath, '/Repos/wt-clean')
+})
+
+test('resolveWorktreeTarget: normalized checkpoint path equal to derived still reports reused=false', () => {
+  const got = resolveWorktreeTarget(
+    { worktreePath: '/Repos/webtarsthree/../wt-TARS-1271-20260727T220000Z', runBranch: DERIVED.runBranch },
+    DERIVED,
+  )
+  assert.equal(got.worktreePath, DERIVED.worktreePath)
+  assert.equal(got.reused, false)
+})
+
 test('resolveWorktreeTarget: never mutates the derived object', () => {
   const derived = { ...DERIVED }
   resolveWorktreeTarget(CHECKPOINT, derived)

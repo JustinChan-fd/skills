@@ -70,10 +70,23 @@ function normalizeResumeStage(stage) {
   return LEGACY_STAGE_ALIASES[key] || stage
 }
 
+// Bridge-era checkpoints stored worktreePath as `${repoPath}/../wt-<...>`. A literal
+// `..` segment breaks the homeDir regex the child telemetry-path builders run against
+// repoPath, so collapse it the way the fresh-run derivation already does.
+function collapseParentSegments(p) {
+  if (!p || !p.includes('..')) return p
+  const out = []
+  for (const seg of p.split('/')) {
+    if (seg === '..' && out.length && out[out.length - 1] !== '..') out.pop()
+    else out.push(seg)
+  }
+  return out.join('/')
+}
+
 // Mirror of lib/run-state.js — a resumed run must reuse the worktree the original run
 // provisioned, since runTs (and therefore the derived worktree name) is new every time.
 function resolveWorktreeTarget(state, derived) {
-  const worktreePath = (state && state.worktreePath) || derived.worktreePath
+  const worktreePath = collapseParentSegments((state && state.worktreePath) || derived.worktreePath)
   const runBranch    = (state && state.runBranch)    || derived.runBranch
   return {
     worktreePath,

@@ -62,12 +62,25 @@ export function shouldSkipStage(resumeNextStage, currentStage, laterStages, requ
   return !!requiredArtifact
 }
 
+// Bridge-era checkpoints stored worktreePath as `${repoPath}/../wt-<...>`. A literal
+// `..` segment breaks the homeDir regex the child telemetry-path builders run against
+// repoPath, so collapse it the way the fresh-run derivation already does.
+function collapseParentSegments(p) {
+  if (!p || !p.includes('..')) return p
+  const out = []
+  for (const seg of p.split('/')) {
+    if (seg === '..' && out.length && out[out.length - 1] !== '..') out.pop()
+    else out.push(seg)
+  }
+  return out.join('/')
+}
+
 // A resumed run derives worktreePath/runBranch from its OWN runTs, which is new on
 // every invocation — so the derived name never matches the worktree the original run
 // provisioned. Since resuming also skips Provision, every later stage would read from
 // a directory that does not exist. Prefer whatever the checkpoint recorded.
 export function resolveWorktreeTarget(state, derived) {
-  const worktreePath = (state && state.worktreePath) || derived.worktreePath
+  const worktreePath = collapseParentSegments((state && state.worktreePath) || derived.worktreePath)
   const runBranch    = (state && state.runBranch)    || derived.runBranch
   return {
     worktreePath,
