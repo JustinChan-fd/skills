@@ -1,0 +1,28 @@
+# Clean-session run prompt
+
+Paste the block below into a fresh Claude Code session started in `~/Desktop/Repos/skills`.
+
+---
+
+Execute the implementation plan at `docs/superpowers/plans/2026-07-27-harness-e2e-orchestration.md`.
+
+**Read these first, in order:** the plan doc (top to bottom — the header's Global Constraints, Repos & Branches, and Interface Index are binding), then the design doc it references at `docs/superpowers/specs/2026-07-27-harness-e2e-orchestration-design.md`. Ignore everything under `docs/superpowers/plans/_superseded/` — those are archived drafts with a conflicting interface design.
+
+**Execution method:** Use `superpowers:subagent-driven-development` (fresh subagent per task, review between tasks). Tasks 1–15 build and test the harness in THIS `skills` repo; do them in order. Each task ends green (`npm test`) and is committed on the branch below before moving on.
+
+**Branch:** The build branch `harness/e2e-orchestration` already exists and has the plan committed — stay on it. Do NOT push or PR the skills repo unless I ask; the build lands locally and is exercised by Task 16.
+
+**Phase 0 probe (do this before Task 1):** confirm whether `workflow.js` can `import` from `./lib/`. Create `harness-bridge/lib/_probe.js` (`export const ok = 1`) and a scratch Workflow script that imports it. If the import resolves, proceed as written. If it does NOT, mirror each `workflow.js`'s pure logic into a `// ===== PURE (mirrors lib/) =====` block and keep `lib/` authoritative for tests (as the existing skills already do). Delete `_probe.js` after.
+
+**Task 16 is the live run — HARD GUARDRAILS, do not cross without my explicit approval:**
+- Runs in `~/Desktop/Repos/webtarsthree`, NOT skills. Branch from `origin/feat/migrate-native-fetch-from-axios` (the epic feature branch — NEVER master/main) via an isolated git worktree; never touch my dirty local branches.
+- Invoke the pipeline as a skill: `/harness-run TARS-1271 --repo ~/Desktop/Repos/webtarsthree --base feat/migrate-native-fetch-from-axios`. Always fire harnesses as skills; never launch a `workflow.js` directly.
+- Output is a **DRAFT** PR only: push to `harness/TARS-1271-*`, open a DRAFT PR with base `feat/migrate-native-fetch-from-axios`. **NEVER merge, NEVER force-push, NEVER touch main/master. Only webtarsthree, only TARS-1271.**
+- **Stop on first success:** once the draft PR is open + `npm test` green in the worktree + telemetry flowed to `~/Desktop/Repos/harness-telemetry/v2/`, STOP. Do not iterate further.
+- **$500 hard spend ceiling** as a backstop.
+- Any NEVER-list category (irreversible-destructive, security-auth-permission, cost-over-threshold, public-api-contract, out-of-scope, legal-compliance) → STOP and surface, do not self-decide.
+- If either confidence gate EXITs (second miss), STOP and surface the weak checks + skeptic reasons; do not open a PR.
+
+**Weight agency (tonight only):** you may adjust bridge weights mid-run if a gate is visibly miscalibrated — but only via `harness-bridge/weights-override.json` (never edit `lib/confidence.js` defaults), bounded ±15 per change / floor 1 / ceiling 60 / renormalize to 100, and log every change as a `weightChanges[]` event. At the very end, print the weight-evolution report (initial → final per handoff, every change with its reason).
+
+**When done:** report the draft PR URL, the run-summary box, the weight-evolution report, and confirm the five telemetry records (intake, bridge×N, plan, implement) exist. That's what I'll review.
