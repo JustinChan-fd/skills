@@ -6,7 +6,11 @@ Paste the block below into a fresh Claude Code session started in `~/Desktop/Rep
 
 Execute the implementation plan at `docs/superpowers/plans/2026-07-27-harness-e2e-orchestration.md`.
 
-**Read these first, in order:** the plan doc (top to bottom — the header's Global Constraints, Repos & Branches, and Interface Index are binding), then the design doc it references at `docs/superpowers/specs/2026-07-27-harness-e2e-orchestration-design.md`. Ignore everything under `docs/superpowers/plans/_superseded/` — those are archived drafts with a conflicting interface design.
+**The only files you need — read these first, in order:**
+1. The plan: `docs/superpowers/plans/2026-07-27-harness-e2e-orchestration.md` (read top to bottom — the header's Global Constraints, Repos & Branches, and Interface Index are binding).
+2. The design doc it references: `docs/superpowers/specs/2026-07-27-harness-e2e-orchestration-design.md`.
+
+`docs/superpowers/plans/` contains exactly these two files (the plan above and this run prompt). There is no other plan, no draft series, no alternate interface design — if you find yourself reading anything else as a source of truth for the interface, stop; this plan's Interface Index is authoritative.
 
 **Execution method:** Use `superpowers:subagent-driven-development` (fresh subagent per task, review between tasks). Tasks 1–15 build and test the harness in THIS `skills` repo; do them in order. Each task ends green (`npm test`) and is committed on the branch below before moving on.
 
