@@ -22,8 +22,12 @@ export function assembleRunSummary(records) {
   }))
   const totalCostUsd = +stages.reduce((s, x) => s + (x.costUsd || 0), 0).toFixed(4)
   const totalDurationMs = stages.reduce((s, x) => s + (x.durationMs || 0), 0)
-  const exited = stages.some(x => x.outcome === 'EXIT')
-  const failed = stages.some(x => x.outcome === 'FAILED' || x.outcome === 'CRASHED')
+  // Normalize outcomes to lowercase for comparison; original values are preserved in stages[].outcome
+  const outcomes = stages.map(x => (x.outcome == null ? null : String(x.outcome).toLowerCase()))
+  const withOutcome = outcomes.filter(o => o !== null)
+  if (withOutcome.length === 0) return { stages, totalCostUsd, totalDurationMs, finalStatus: 'UNKNOWN' }
+  const exited  = outcomes.some(o => o === 'exit')
+  const failed  = outcomes.some(o => o === 'failed' || o === 'crashed' || o === 'partial')
   const finalStatus = exited ? 'EXIT' : failed ? 'FAILED' : 'COMPLETE'
   return { stages, totalCostUsd, totalDurationMs, finalStatus }
 }

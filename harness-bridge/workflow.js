@@ -269,14 +269,42 @@ function _stampManifest(artifact, { confidence, verdict, flags = [], probeResult
 // -- lib/weights.js -------------------------------------------------------------
 function _normalizeTo100(weights) {
   const ids = Object.keys(weights)
+  const n = ids.length
+  if (n === 0) return {}
   const total = ids.reduce((s, id) => s + weights[id], 0)
-  if (total === 0) return { ...weights }
+  // All-zero (or fully-zero-after-floor): equal split so every weight is valid
+  if (total === 0) {
+    const base = Math.floor(100 / n)
+    const out = {}
+    ids.forEach((id, i) => { out[id] = base })
+    // Distribute remainder 1 point at a time to the first (100 % n) entries
+    const rem = 100 - base * n
+    for (let i = 0; i < rem; i++) out[ids[i]]++
+    return out
+  }
+  // Proportional distribution
   const out = {}
   let acc = 0
   ids.forEach((id, i) => {
     if (i === ids.length - 1) out[id] = 100 - acc
     else { const v = Math.round(weights[id] * 100 / total); out[id] = v; acc += v }
   })
+  // Floor every weight at 1: take excess off the largest weights (most room)
+  const underflowIds = ids.filter(id => out[id] < 1)
+  if (underflowIds.length > 0) {
+    const deficit = underflowIds.reduce((s, id) => s + (1 - out[id]), 0)
+    for (const id of underflowIds) out[id] = 1
+    // Take deficit from largest weights, reducing each by at most (weight - 1)
+    const sorted = ids.filter(id => !underflowIds.includes(id)).sort((a, b) => out[b] - out[a])
+    let remaining = deficit
+    for (const id of sorted) {
+      if (remaining <= 0) break
+      const room = out[id] - 1
+      const take = Math.min(room, remaining)
+      out[id] -= take
+      remaining -= take
+    }
+  }
   return out
 }
 function _loadWeights(defaultChecks, override) {
@@ -285,6 +313,9 @@ function _loadWeights(defaultChecks, override) {
   if (!override) return base
   const merged = { ...base }
   for (const [id, w] of Object.entries(override)) if (id in merged) merged[id] = w
+  // Clamp each merged weight to [1,60] before normalizing so huge/negative overrides
+  // cannot produce zero or negative weights via the proportional distribution.
+  for (const id of Object.keys(merged)) merged[id] = Math.max(1, Math.min(60, merged[id]))
   return _normalizeTo100(merged)
 }
 
