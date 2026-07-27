@@ -290,6 +290,8 @@ try {
       today: currentDate,
       manifestEntry: manifestEntry || null,
       forceplan: forcePlan || false,
+      refine: refinePayload || null,
+      gatedIntake: gatedIntake || null,   // MUST be passed; set by --intake or --refine (manifest supremacy)
       startTs,
       runId,
       runTs,

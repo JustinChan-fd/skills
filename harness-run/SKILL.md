@@ -60,10 +60,14 @@ const runBranch = `harness/${issueKey}-${runTs}`
 
 // Capture initial weights BEFORE any override is applied — this makes the initial→final
 // weight-evolution report meaningful at the end of the run.
+// You are a conductor driving tools, not a JS module — `import` will not run here.
+// Shell out to node to read the frozen defaults out of lib/:
+const initialWeights = JSON.parse(await Bash(`node --input-type=module -e "
 import { loadWeights } from '/Users/206618626@bwt3.com/.claude/skills/harness-bridge/lib/weights.js'
-import { CHECKS_A }    from '/Users/206618626@bwt3.com/.claude/skills/harness-bridge/lib/checks-a.js'
-import { CHECKS_B }    from '/Users/206618626@bwt3.com/.claude/skills/harness-bridge/lib/checks-b.js'
-const initialWeights = { A: loadWeights(CHECKS_A, null), B: loadWeights(CHECKS_B, null) }
+import { CHECKS_A } from '/Users/206618626@bwt3.com/.claude/skills/harness-bridge/lib/checks-a.js'
+import { CHECKS_B } from '/Users/206618626@bwt3.com/.claude/skills/harness-bridge/lib/checks-b.js'
+console.log(JSON.stringify({ A: loadWeights(CHECKS_A, null), B: loadWeights(CHECKS_B, null) }))
+"`).then(r => r.trim()))
 let allWeightChanges = []
 
 await Bash(`git -C ${repoPath} fetch origin ${baseBranch}`)
@@ -80,7 +84,7 @@ For each stage in `SEQUENCE` (from `lib/conductor.js`):
 
 1. **Child skill** (intake/plan/implement): invoke as a slash-skill and pass `repoPath` and `baseBranch` as **Workflow args** — NOT as `--repo`/`--base` CLI flags (only harness-intake accepts `--repo`; harness-plan and harness-implement take `repoPath` as a named Workflow arg). For harness-implement, also pass `branchName: runBranch` explicitly so its worktree is created on the same branch that Phase 0 provisioned. harness-implement creates its own nested worktree under `<repoPath>/.claude/worktrees/<planKey>` on `runBranch`; the commits land there — so the push and the draft PR must come from that worktree, not from the Phase-0 worktree. harness-implement's "ask the user one question" step (`harness-implement/SKILL.md:48`) is **pre-answered** by `baseBranch` — do NOT stop to ask; pass `baseBranch` directly. Capture each child's manifest path and telemetry record.
 2. **Bridge stage**: invoke `/harness-bridge` with the upstream artifact path + `handoff` + `retriesUsed` + current `weightsOverride`. Read `result.verdict`:
-   - `actionForVerdict(verdict, retriesUsed).next === 'advance'` → pass `result.gatedPath` to the next child.
+   - `actionForVerdict(verdict, retriesUsed).next === 'advance'` → pass `result.gatedPath` to the next child. **For Handoff A that means invoking `/harness-plan <issue> --intake <result.gatedPath>`** — the `--intake` flag is the ONLY way the gated manifest reaches `args.gatedIntake` and becomes authoritative over the ticket text (manifest supremacy). Passing `gatedPath` any other way silently drops it and the gate becomes a no-op.
    - `=== 'refine'` → re-run the upstream child with `--refine` (passing `result.flags`, `result.probeResults`, and the gated intake path for plan), then re-gate with `retriesUsed: 1`.
    - `=== 'stop'` → halt; print the weak checks + skeptic reasons; do NOT advance.
 
