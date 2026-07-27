@@ -19,16 +19,33 @@ Phase 0  provision worktree (off origin/<base>)
   ↓
 harness-intake        → intake-manifest.json
   ↓  harness-bridge (Handoff A)   PROCEED / RE_ASK→refine intake / EXIT
-harness-plan          → plan -manifest.json + p1.json
+harness-plan          → plan-manifest.json + p1.json
   ↓  harness-bridge (Handoff B)   PROCEED / RE_ASK→refine plan / EXIT
 harness-implement     → code + tests
   ↓
 guardrailed DRAFT PR + run summary + weight-evolution report
 ```
 
+## Parsing the invocation
+
+Before Phase 0, derive every variable the rest of the runbook uses from the invocation line `/harness-run <jira-key> [--repo <path>] [--base <branch>]`:
+
+```js
+// Parse the invocation — these four variables are used throughout the runbook.
+const issueKey  = argv[0]                                         // e.g. 'TARS-1271'
+const repoPath  = flags.repo  || null                             // e.g. '/Users/206618626@bwt3.com/Desktop/Repos/webtarsthree'
+const baseBranch = flags.base || 'feat/migrate-native-fetch-from-axios'
+// runTs: UTC timestamp, same format as harness-plan/harness-implement
+const runTs = await Bash('python3 -c "from datetime import datetime, timezone; print(datetime.now(timezone.utc).strftime(\'%Y%m%dT%H%M%SZ\'))"').then(r => r.trim())
+```
+
+`repoPath` must not be null — if `--repo` was omitted, STOP and surface: "harness-run requires --repo <absolute-path-to-target-repo>".
+
+`baseBranch` must not be empty. If it is somehow unset, STOP and surface rather than letting origin/HEAD resolve to master — this directly triggers the **NEVER master/main** guardrail.
+
 ## Guardrails (NEVER cross without explicit human approval)
 
-- **Draft PR only.** Push to a `harness/<ISSUE>-<slug>` branch; open a DRAFT PR with **base = the feature branch passed via `--base`** (default `feat/migrate-native-fetch-from-axios` for TARS-1271). NEVER merge, NEVER force-push, NEVER touch main/master.
+- **Draft PR only.** Push to a `harness/<ISSUE>-<runTs>` branch; open a DRAFT PR with **base = the feature branch passed via `--base`** (default `feat/migrate-native-fetch-from-axios` for TARS-1271). NEVER merge, NEVER force-push, NEVER touch main/master.
 - **Isolated worktree.** Base off `origin/<base>`; never touch the user's dirty local branches.
 - **Fire children as skills.** Never launch a child `workflow.js` directly.
 - **Stop on first success.** Once the PR lands + `npm test` green + telemetry flowed, STOP iterating.
@@ -38,19 +55,30 @@ guardrailed DRAFT PR + run summary + weight-evolution report
 ## Phase 0 — Provision the worktree
 
 ```js
-// resolve repoPath (webtarsthree for TARS-1271) and base branch
-const base = flags.base || 'feat/migrate-native-fetch-from-axios'
-const slug = `${issueKey.toLowerCase()}-e2e`
-await Bash(`git -C ${repoPath} fetch origin ${base}`)
-await Bash(`git -C ${repoPath} worktree add -b harness/${issueKey}-${runTs} ../wt-${issueKey}-${runTs} origin/${base}`)
-// all subsequent child skills run with --repo pointing at the worktree path
+// Single branch name for this entire run — used everywhere below.
+const runBranch = `harness/${issueKey}-${runTs}`
+
+// Capture initial weights BEFORE any override is applied — this makes the initial→final
+// weight-evolution report meaningful at the end of the run.
+import { loadWeights } from '/Users/206618626@bwt3.com/.claude/skills/harness-bridge/lib/weights.js'
+import { CHECKS_A }    from '/Users/206618626@bwt3.com/.claude/skills/harness-bridge/lib/checks-a.js'
+import { CHECKS_B }    from '/Users/206618626@bwt3.com/.claude/skills/harness-bridge/lib/checks-b.js'
+const initialWeights = { A: loadWeights(CHECKS_A, null), B: loadWeights(CHECKS_B, null) }
+let allWeightChanges = []
+
+await Bash(`git -C ${repoPath} fetch origin ${baseBranch}`)
+await Bash(`git -C ${repoPath} worktree add -b ${runBranch} ../wt-${issueKey}-${runTs} origin/${baseBranch}`)
+const worktreePath = `${repoPath}/../wt-${issueKey}-${runTs}`
+// All subsequent child skills receive repoPath and baseBranch as Workflow args (not --repo flags).
+// Only harness-intake accepts a --repo CLI flag; harness-plan and harness-implement take repoPath
+// as a Workflow arg named repoPath.
 ```
 
 ## Walking the sequence
 
 For each stage in `SEQUENCE` (from `lib/conductor.js`):
 
-1. **Child skill** (intake/plan/implement): invoke as a slash-skill with `--repo <worktreePath>`, capture its manifest path and telemetry record.
+1. **Child skill** (intake/plan/implement): invoke as a slash-skill and pass `repoPath` and `baseBranch` as **Workflow args** — NOT as `--repo`/`--base` CLI flags (only harness-intake accepts `--repo`; harness-plan and harness-implement take `repoPath` as a named Workflow arg). For harness-implement, also pass `branchName: runBranch` explicitly so its worktree is created on the same branch that Phase 0 provisioned. harness-implement creates its own nested worktree under `<repoPath>/.claude/worktrees/<planKey>` on `runBranch`; the commits land there — so the push and the draft PR must come from that worktree, not from the Phase-0 worktree. harness-implement's "ask the user one question" step (`harness-implement/SKILL.md:48`) is **pre-answered** by `baseBranch` — do NOT stop to ask; pass `baseBranch` directly. Capture each child's manifest path and telemetry record.
 2. **Bridge stage**: invoke `/harness-bridge` with the upstream artifact path + `handoff` + `retriesUsed` + current `weightsOverride`. Read `result.verdict`:
    - `actionForVerdict(verdict, retriesUsed).next === 'advance'` → pass `result.gatedPath` to the next child.
    - `=== 'refine'` → re-run the upstream child with `--refine` (passing `result.flags`, `result.probeResults`, and the gated intake path for plan), then re-gate with `retriesUsed: 1`.
@@ -70,7 +98,7 @@ catch { await Write('/Users/206618626@bwt3.com/.claude/skills/harness-bridge/wei
 //   weightsOverride: (weightsOverride[handoff] && Object.keys(weightsOverride[handoff]).length) ? weightsOverride[handoff] : null
 ```
 
-Pass that per-handoff slice as the bridge's `weightsOverride` arg (Task 11). To adjust mid-run, compute the new map with `applyWeightChange`, write it back to `weights-override.json` under its handoff key, record a `makeWeightChange({...})` event into the run's `allWeightChanges[]`, and pass it to the next gate call.
+Pass that per-handoff slice as the bridge's `weightsOverride` arg. To adjust mid-run, compute the new map with `applyWeightChange`, write it back to `weights-override.json` under its handoff key, record a `makeWeightChange({...})` event into the run's `allWeightChanges[]`, and pass it to the next gate call.
 
 - Edit only `harness-bridge/weights-override.json` (the default `weight:` literals in `lib/checks-a.js` / `lib/checks-b.js` are NEVER edited).
 - Use `applyWeightChange` semantics: ±15 per adjustment, floor 1, ceiling 60, renormalize to exactly 100.
