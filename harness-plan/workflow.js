@@ -430,16 +430,17 @@ let size, architectModel, decomposeModel
 let intakeResult = null
 
 // ── Manifest-supremacy sizing source ─────────────────────────────────────────
-// When a refine pass provides a gated intake manifest, that manifest outranks the ticket
-// for size and file scope. Used only within the manifestEntry fast path (below) and
-// in refineBlock for the architect prompt. Does NOT trigger the fast path on its own —
-// a refine pass without manifestEntry still runs normal Intake.
+// When a gated intake manifest is present (args.gatedIntake), it outranks the ticket
+// for size and file scope — whether this is a refine pass or a plain --intake pass.
+// Does NOT trigger the manifestEntry fast path on its own — a gated intake without a
+// split-manifest entry still runs normal Intake, but the Intake agent receives the
+// gated manifest's verified numbers as ground truth (see gatedIntakeBlock below).
 //
 // Field shape comparison:
 //   manifestEntry (split subtask):  { size, files, acList?, ... }
 //   gatedIntake (harness-bridge):   { size, files, acList, ... }
 //   Both carry .size and .files — compatible for sizing. Use .acList from whichever is present.
-const sizingSource = (refine && args.gatedIntake) ? args.gatedIntake : (manifestEntry || null)
+const sizingSource = args.gatedIntake || manifestEntry || null
 
 if (manifestEntry) {
   // ── manifestEntry fast path: skip Intake + Decompose entirely ──────────────
@@ -454,6 +455,23 @@ if (manifestEntry) {
 } else {
   // ── Normal path: Intake ────────────────────────────────────────────────────
   trackPhase('Intake')
+
+  // ── Gated intake block: injected into Intake agent prompt when --intake was passed ──
+  // Absent (empty string) when no gated manifest. Guards every field access against missing
+  // optional fields — gatedIntake.files may be absent on older manifests.
+  const g = args.gatedIntake
+  const gatedIntakeBlock = g ? `
+
+## GATED INTAKE MANIFEST — MANIFEST SUPREMACY
+A harness-bridge Handoff A gate has already verified this ticket. Its numbers are authoritative
+and OVERRIDE any count you infer from the ticket text. The HARD RULE about file count ≥ 30
+applies to the GATED numbers below, not to what the ticket text says.
+
+  Verified size:       ${g.size || '(unknown)'}
+  Verified file count: ${(g.files || []).length}
+  AC list:             ${(g.acList || []).length} item(s)
+
+Use these as ground truth. Do NOT downgrade size based on the ticket's own wording.` : ''
 
   intakeResult = await trackedAgent(
     `You are a sizing agent. Read the input, size the ticket, and discover the repo's layer taxonomy.
@@ -476,7 +494,7 @@ These layers are used by decompose to slice concerns correctly (e.g. "hooks laye
 If ls returns nothing, use an empty array.
 
 INPUT:
-${input}
+${input}${gatedIntakeBlock}
 
 Return your sizing decision with a one-sentence reasoning and the repo layer list.`,
     { label: 'intake', phase: 'Intake', model: researcherModel, effort: 'medium', schema: INTAKE_SCHEMA }

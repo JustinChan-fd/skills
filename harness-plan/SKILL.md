@@ -90,6 +90,8 @@ Concretely:
 /harness-plan --forceplan                         # run full pipeline even for XS tickets
 /harness-plan --manifest path/to/split-manifest.json --entry TARS-1275
                                                   # consume a harness-split subtask entry
+/harness-plan --intake path/to/intake-manifest-gated.json
+                                                  # non-refine path with gate-A gated manifest (manifest supremacy)
 /harness-plan --refine path/to/prior-plan-manifest.json
                                                   # re-plan after Handoff-B RE_ASK (manifest supremacy)
 ```
@@ -101,11 +103,20 @@ When the user invokes `/harness-plan [url] [flags]`:
 1. **`--grill-me`** — set `qaMode: true`, run grill-me Q&A before workflow.
 2. **`--forceplan`** — pass `forceplan: true` to workflow args; skips the XS fast path.
 3. **`--manifest <path> --entry <jiraKey>`** — read `splitManifestPath` from disk, find the subtask with `jiraKey` in `groups[*].subtasks[*]`, pass it as `manifestEntry` to workflow args. The `input` arg becomes the subtask's `description` field.
-4. **`--refine <priorPlanManifestPath>`** — re-plan mode after a Handoff-B RE_ASK. Loads the prior plan manifest + the bridge flags/probeResults, and (critically) the **gated intake manifest** (`*-intake-manifest-gated.json`). The architect re-sizes and re-specifies tasks treating the gated manifest as ground truth — if the ticket says "118 files" but the gated manifest verified 92, the plan uses 92. This is **manifest supremacy**: a gated manifest outranks the ticket.
+4. **`--intake <gatedIntakeManifestPath>`** — the **PROCEED output of harness-bridge Handoff A**. Read the gated intake manifest from disk and pass the parsed object as `args.gatedIntake`. This flag makes the gated manifest authoritative over the ticket text for size, file scope, and AC list (**manifest supremacy**). Does NOT require `--entry` and does NOT skip Intake — the normal Intake phase still runs but receives the gated manifest's verified numbers as ground truth, overriding any file count or size the ticket text claims. `--intake` and `--refine` may both be present (a refine pass also carries the same gated intake); when both are set, pass both.
+
+   ```js
+   // Read gatedIntake when --intake (or --refine with a gatedIntakePath) is set
+   const gatedIntake = intakePath || refinePayload?.gatedIntakePath
+     ? JSON.parse(await Read(intakePath || refinePayload.gatedIntakePath))
+     : null
+   ```
+
+5. **`--refine <priorPlanManifestPath>`** — re-plan mode after a Handoff-B RE_ASK. Loads the prior plan manifest + the bridge flags/probeResults, and (critically) the **gated intake manifest** (`*-intake-manifest-gated.json`). The architect re-sizes and re-specifies tasks treating the gated manifest as ground truth — if the ticket says "118 files" but the gated manifest verified 92, the plan uses 92. This is **manifest supremacy**: a gated manifest outranks the ticket.
 
    When `--refine` is present, the SKILL wrapper reads the gated intake manifest and passes it as `args.gatedIntake`:
    ```js
-   // Only read gatedIntake when --refine is set
+   // Only read gatedIntake when --refine is set (legacy path; prefer --intake for non-refine)
    const gatedIntake = refinePayload?.gatedIntakePath
      ? JSON.parse(await Read(refinePayload.gatedIntakePath))
      : null
@@ -145,7 +156,7 @@ const result = await Workflow({
     runTs,
     skillsCommit,
     refine: refinePayload || null,       // { flags, probeResults, priorPlanManifestPath, gatedIntakePath } | null
-    gatedIntake: gatedIntake || null,    // parsed gated intake manifest; null when not in refine mode
+    gatedIntake: gatedIntake || null,    // parsed gated intake manifest; set by --intake OR --refine (manifest supremacy)
   },
 })
 ```
