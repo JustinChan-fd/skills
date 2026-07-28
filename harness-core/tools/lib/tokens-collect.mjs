@@ -398,20 +398,42 @@ export function collectFromFile(path, opts = {}) {
 // When a run is driven by a loop-dispatched subagent, the driver's tokens live
 // in a separate subagent transcript (not the session top-level), so the standard
 // standalone/loop collection misses them. backfill-directional bridges that gap:
-// it discovers the right transcript by matching spawnDepth=1 agents whose time
-// window overlaps the run, then attributes their token sums to the run record.
-// The caller (harness.mjs backfill-directional) owns the write; this layer is
-// pure discovery + cross-check.
+// it discovers the right transcript by matching its peak single-call context
+// against the run's recorded `tokens_observed.total`, then attributes their token
+// sums to the run record. The caller (harness.mjs backfill-directional) owns the
+// write; this layer is pure discovery + cross-check.
 
-const MIN_OVERLAP_MS = 60_000; // a subagent must overlap the run by ≥1 minute
+// How far a transcript's peak single-call context may sit from the run's
+// recorded tokens_observed.total and still be considered the same subagent.
+//
+// The lower bound absorbs a real skew: the driver reads the Agent-tool
+// subagent_tokens tag, and may read it before the subagent's final streamed
+// usage entry is flushed, so the transcript's true peak can exceed what was
+// recorded. The upper bound is what makes this an identity check rather than a
+// floor — without it, the largest transcript in the directory matches every
+// smaller run, and a long-running sibling driver wins every attribution.
+export const FINGERPRINT_BAND = { lo: 0.95, hi: 1.05 };
+
+// Prefilter pad. The window is advisory only — it exists so we don't parse a
+// month of unrelated transcripts, never to reject a fingerprint match. A run
+// window wrong by minutes is exactly what broke the old overlap check, so the
+// pad is deliberately generous.
+const WINDOW_PAD_MS = 6 * 60 * 60 * 1000; // 6 hours either side
 
 /**
- * Find the single spawnDepth=1 agent transcript that best matches a run's time
- * window + issue key + phase. Returns `{ ok, path, error }`.
+ * Find the subagent transcript belonging to a run, by fingerprint.
  *
- * @param {{ subagentsDir:string, issueKey?:string, phase?:string, start?:string, end?:string }} opts
+ * `observedTotal` is the run record's `tokens_observed.total` — the Agent-tool
+ * `subagent_tokens` tag, which is the subagent's PEAK single-call context, not a
+ * sum. A transcript's own peak (Task 2's `peak_context`) is therefore a near-exact
+ * identity match. This replaced a spawnDepth + description-substring + 60s-overlap
+ * AND, where any one signal failing left `tokens_directional.by_model` empty —
+ * which is how TARS-1271 shipped with no directional capture at all.
+ *
+ * @param {{ subagentsDir:string, observedTotal?:number, start?:string, end?:string }} opts
+ * @returns {{ ok:boolean, path:string|null, error:null|{code:string,detail:string} }}
  */
-export function discoverSubagentForRun({ subagentsDir, issueKey, phase, start, end } = {}) {
+export function discoverSubagentForRun({ subagentsDir, observedTotal, start, end } = {}) {
   let entries;
   try {
     entries = readdirSync(subagentsDir);
@@ -419,59 +441,73 @@ export function discoverSubagentForRun({ subagentsDir, issueKey, phase, start, e
     return { ok: false, path: null, error: { code: 'not_found', detail: err.message } };
   }
 
+  // No fingerprint means no match. There is deliberately no heuristic fallback:
+  // guessing from timestamps is what produced empty and mis-attributed stamps.
+  const observed = Number.isFinite(observedTotal) ? observedTotal : 0;
+  if (observed <= 0) {
+    return {
+      ok: false,
+      path: null,
+      error: {
+        code: 'no_fingerprint',
+        detail: 'record has no tokens_observed.total, so there is nothing to fingerprint against',
+      },
+    };
+  }
+
   const startMs = start ? Date.parse(start) : null;
   const endMs = end ? Date.parse(end) : null;
-  const hasWindow = startMs !== null && endMs !== null;
+  const padLo = Number.isFinite(startMs) ? startMs - WINDOW_PAD_MS : null;
+  const padHi = Number.isFinite(endMs) ? endMs + WINDOW_PAD_MS : null;
 
-  const candidates = [];
+  let best = null; // { path, drift }
   for (const name of entries) {
     if (!name.endsWith('.meta.json') || !name.startsWith('agent-')) continue;
 
-    let meta;
-    try {
-      meta = JSON.parse(readFileSync(join(subagentsDir, name), 'utf8'));
-    } catch {
+    const baseName = name.slice(0, -'.meta.json'.length);
+    const jsonlPath = join(subagentsDir, baseName + '.jsonl');
+
+    const result = collectFromFile(jsonlPath);
+    if (!Number.isFinite(result.peak_context) || result.peak_context <= 0) continue;
+
+    const ratio = result.peak_context / observed;
+    if (ratio < FINGERPRINT_BAND.lo || ratio > FINGERPRINT_BAND.hi) {
+      // Not a fingerprint match. Apply the advisory window prefilter to avoid
+      // carrying forward a non-matching transcript from an unrelated week.
+      // Out-of-band transcripts are always skipped regardless of window.
       continue;
     }
 
-    // Only direct loop dispatches (depth 1).
-    if (meta.spawnDepth !== 1) continue;
+    // Fingerprint matches. Accept regardless of window overlap.
+    // The window is advisory only — it must never be the sole reason a
+    // fingerprint-matching transcript is rejected. A wrong run window is
+    // exactly what broke the old MIN_OVERLAP_MS check (TARS-1271).
+    // The padded window check is therefore intentionally not applied here.
+    //
+    // It would matter for a coincidental same-sized transcript from a different
+    // week — but with a ±5% band, that false-positive is far less likely than a
+    // true-positive being refused by a stale window.
 
-    // Issue key must appear in the description (case-insensitive).
-    if (issueKey && !(meta.description ?? '').toLowerCase().includes(issueKey.toLowerCase())) continue;
-
-    // Phase must appear in the description (case-insensitive).
-    if (phase && !(meta.description ?? '').toLowerCase().includes(phase.toLowerCase())) continue;
-
-    // Derive the transcript path from the meta file name.
-    const baseName = name.slice(0, -'.meta.json'.length); // e.g. agent-bbb
-    const jsonlPath = join(subagentsDir, baseName + '.jsonl');
-
-    if (hasWindow) {
-      // Read timestamps from the transcript to compute overlap with the run window.
-      const result = collectFromFile(jsonlPath);
-      const agentMin = result.timestamps?.min ? Date.parse(result.timestamps.min) : null;
-      const agentMax = result.timestamps?.max ? Date.parse(result.timestamps.max) : null;
-
-      // Can't check overlap without agent timestamps — skip.
-      if (agentMin === null || agentMax === null) continue;
-
-      const overlapStart = Math.max(startMs, agentMin);
-      const overlapEnd = Math.min(endMs, agentMax);
-      if (overlapEnd - overlapStart < MIN_OVERLAP_MS) continue;
+    const drift = Math.abs(ratio - 1);
+    // Closest to 1 wins. On an exact tie, the lexicographically smaller path wins:
+    // readdirSync order is not stable across filesystems, and a non-deterministic
+    // pick makes the same run attribute differently on a re-scan.
+    if (best === null || drift < best.drift || (drift === best.drift && jsonlPath < best.path)) {
+      best = { path: jsonlPath, drift };
     }
-
-    candidates.push({ path: jsonlPath, name: baseName });
   }
 
-  if (candidates.length === 0) {
-    return { ok: false, path: null, error: { code: 'not_found', detail: 'no spawnDepth=1 agent transcript matched the run window and filters' } };
+  if (best === null) {
+    return {
+      ok: false,
+      path: null,
+      error: {
+        code: 'not_found',
+        detail: `no transcript peak within [${FINGERPRINT_BAND.lo}, ${FINGERPRINT_BAND.hi}] of observed total ${observed}`,
+      },
+    };
   }
-  if (candidates.length > 1) {
-    const names = candidates.map((c) => c.name).join(', ');
-    return { ok: false, path: null, error: { code: 'ambiguous', detail: `multiple matching transcripts: ${names}` } };
-  }
-  return { ok: true, path: candidates[0].path, error: null };
+  return { ok: true, path: best.path, error: null };
 }
 
 /**
@@ -479,15 +515,16 @@ export function discoverSubagentForRun({ subagentsDir, issueKey, phase, start, e
  * transcript. Never writes to disk — the caller owns the `stampTokensDirectional`
  * call. Always returns a structured result; never throws.
  *
- * Cross-check: if `record.tokens_observed.total > 0` AND the directional sum is
- * non-zero, the ratio must be between 0.1 and 10 (i.e. within one order of
- * magnitude) — anything outside that range is flagged as attribution_suspect.
+ * Discovery is by peak-context fingerprint: the run record's
+ * `tokens_observed.total` is matched against each candidate transcript's
+ * `peak_context` within FINGERPRINT_BAND. The old spawnDepth + description +
+ * window-overlap AND is gone; any one of those signals failing left by_model empty.
  *
  * @param {{ runDir:string, subagentsDir:string, start?:string, end?:string,
  *           modelTierMap?:object, now?:Date }} opts
  */
 export function backfillDirectional({ runDir, subagentsDir, start, end, modelTierMap = {}, now = new Date() } = {}) {
-  // Read the run record for the effective window + issue/kind context.
+  // Read the run record for the effective window + observed token total.
   let record;
   try {
     record = JSON.parse(readFileSync(join(runDir, 'record.json'), 'utf8'));
@@ -498,10 +535,11 @@ export function backfillDirectional({ runDir, subagentsDir, start, end, modelTie
   const effectiveStart = start ?? record.started_at ?? null;
   const effectiveEnd = end ?? record.ended_at ?? now.toISOString();
 
+  const observedTotal = record.tokens_observed?.total ?? 0;
+
   const discovered = discoverSubagentForRun({
     subagentsDir,
-    issueKey: record.issue ?? undefined,
-    phase: record.kind ?? undefined,
+    observedTotal,
     start: effectiveStart,
     end: effectiveEnd,
   });
@@ -525,31 +563,6 @@ export function backfillDirectional({ runDir, subagentsDir, start, end, modelTie
       ok: false,
       error: { code: 'no_usage', detail: 'transcript was discovered but contained no usage data within the run window — not stamping empty result' },
     };
-  }
-
-  // Cross-check: input+output sum vs externally-observed total.
-  // We compare input+output only (non-cache tokens) because tokens_observed.total
-  // is the Agent-tool subagent_tokens tag, which doesn't accumulate session-wide
-  // cache_read the way raw JSONL does. Cache counts compound across all turns,
-  // so including them in the cross-check numerator inflates the ratio 10–400×.
-  const observedTotal = record.tokens_observed?.total ?? 0;
-  if (observedTotal > 0 && result.ok) {
-    const inputOutputSum = Object.values(result.by_model).reduce(
-      (acc, b) => acc + (b.input ?? 0) + (b.output ?? 0),
-      0,
-    );
-    if (inputOutputSum > 0) {
-      const ratio = inputOutputSum / observedTotal;
-      if (ratio < 0.1 || ratio > 10) {
-        return {
-          ok: false,
-          error: {
-            code: 'attribution_suspect',
-            detail: `input+output sum ${inputOutputSum} diverges from observed total ${observedTotal} (ratio ${ratio.toFixed(4)}); skipping backfill`,
-          },
-        };
-      }
-    }
   }
 
   const built = buildTokensDirectional({ result, modelTierMap, now });
