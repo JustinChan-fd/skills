@@ -10,6 +10,56 @@
 // Every failure mode (garbage JSONL, missing file, empty transcript) returns a
 // structured `{ ok: false, error }` result rather than throwing: token
 // collection must never crash the run it is enriching.
+//
+// TOKEN DATA PROVENANCE — sources retrieved 2026-07-28
+// (re-verify before treating as current; docs are dated snapshots)
+//
+// 1. Messages API — usage object
+//    https://platform.claude.com/docs/en/api/messages
+//    "Billing and rate-limit usage. Anthropic's API bills and rate-limits by
+//    token counts." → the numbers are billing-grade, not estimates.
+//    Caveat: "the token counts in usage will not match one-to-one with the
+//    exact visible content of an API request or response."
+//    Total-input formula our cost math depends on:
+//      total_input_tokens = input_tokens
+//                         + cache_read_input_tokens
+//                         + cache_creation_input_tokens
+//
+// 2. Prompt caching
+//    https://platform.claude.com/docs/en/build-with-claude/prompt-caching
+//    cache_creation_input_tokens: "tokens written to the cache when creating
+//      a new entry"
+//    cache_read_input_tokens: "tokens retrieved from the cache for this
+//      request"
+//    input_tokens: only tokens after the last cache breakpoint — do NOT
+//      simplify cost math to input_tokens alone; that undercounts heavily on
+//      cached runs.
+//
+// 3. Claude Code subagents & cache
+//    https://code.claude.com/docs/en/prompt-caching
+//    "A subagent starts its own conversation with its own system prompt and
+//    tool set… builds its own cache." → driver tokens live in a subagent
+//    transcript, not the top-level session transcript. This is why
+//    standalone mode (discoverStandaloneTranscript) misses them and why the
+//    backfill-directional command exists.
+//
+// 4. Monitoring usage — transcript location + stability caveat
+//    https://code.claude.com/docs/en/monitoring-usage
+//    Transcripts are persisted at "~/.claude/projects/*/*.jsonl".
+//    CRITICAL: "The transcript entry format is internal to Claude Code and
+//    changes between versions, so a pipeline that joins on these fields can
+//    break on any release; treat the joins as version-specific rather than
+//    a stable contract." Transcript parsing here is a pragmatic,
+//    version-specific source — NOT a stable contract.
+//
+// 5. Recommended future migration (TODO — do not implement now):
+//    Claude Code's OpenTelemetry exporter emits documented metrics
+//    claude_code.token.usage and claude_code.cost.usage; api_request events
+//    carry input_tokens / output_tokens / cache_read_tokens /
+//    cache_creation_tokens / cost_usd_micros keyed by session.id. This is
+//    the stable contract to migrate to. See docs/notes/otel-token-migration.md
+//    for context. // TODO(otel): migrate directional collection off transcript
+//    parsing once the OTel exporter is confirmed stable.
 import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
