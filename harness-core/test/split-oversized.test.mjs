@@ -25,18 +25,30 @@
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
+import { execFileSync } from 'node:child_process'
+import { mkdtempSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { splitOversizedTasks } from '../tools/lib/split-oversized.mjs'
+import { loadSchema, validate } from '../tools/lib/validate.mjs'
 
-/** A task with n files under one directory, plus the fields the splitter must carry over. */
+const CLI = new URL('../tools/harness.mjs', import.meta.url).pathname
+
+/**
+ * A plan UNIT with n locations under one directory, plus the fields the splitter must carry over.
+ *
+ * Field names are the plan schema's, not the old prose plan's: the splitter reads plan.json,
+ * whose units are additionalProperties:false, so `files`/`groupId`/`acceptanceCriteria` were
+ * keys that never existed on the artifact and the splitter silently no-opped on every real run.
+ */
 const taskWith = (n, dir = 'src/client', extra = {}) => ({
   id: 'T05',
   title: 'Migrate axios to fetch',
-  description: 'WHAT: migrate\nWHERE: src/client/api.js:12\nHOW: ```js\nfetch()\n```\nDONE: grep -r axios src/ returns nothing',
   block: 'sequential',
-  groupId: 'G3',
-  files: Array.from({ length: n }, (_, i) => `${dir}/f${i}.js`),
-  tddRequired: true,
-  acceptanceCriteria: ['no axios imports remain'],
+  group_id: 'G3',
+  locations: Array.from({ length: n }, (_, i) => `${dir}/f${i}.js`),
+  tdd_required: true,
+  done_criteria: ['no axios imports remain'],
   ...extra,
 })
 
@@ -51,8 +63,8 @@ test('a task at or under the cap passes through by identity', () => {
   }
 })
 
-test('an empty files[] task is untouched', () => {
-  // Guards harness-plan's XS fast path, which hardcodes files: [] with groupId G1 and
+test('an empty locations[] unit is untouched', () => {
+  // Guards harness-plan's XS fast path, which hardcodes locations: [] with group_id G1 and
   // block:'sequential'. A splitter that treated 0 as "unknown, split anyway" would rewrite the
   // one task shape that is deliberately fileless.
   const t = taskWith(0)
@@ -61,8 +73,8 @@ test('an empty files[] task is untouched', () => {
   assert.equal(out[0], t)
 })
 
-test('a task with no files key at all is untouched', () => {
-  const t = { id: 'T1', title: 'x', description: 'y', groupId: 'G1', block: 'sequential' }
+test('a task with no locations key at all is untouched', () => {
+  const t = { id: 'T1', title: 'x', group_id: 'G1', block: 'sequential' }
   assert.deepEqual(splitOversizedTasks([t]), [t])
 })
 
@@ -77,7 +89,7 @@ test('the cap is inclusive — 8 passes, 9 splits', () => {
 test('102 files split into at least 13 chunks, none over the cap', () => {
   const out = splitOversizedTasks([taskWith(102)])
   assert.ok(out.length >= 13, `expected >=13 chunks, got ${out.length}`)
-  for (const c of out) assert.ok(c.files.length <= 8, `chunk ${c.id} has ${c.files.length} files`)
+  for (const c of out) assert.ok(c.locations.length <= 8, `chunk ${c.id} has ${c.locations.length} locations`)
 })
 
 test('the parent task is dropped, not kept alongside its chunks', () => {
@@ -88,29 +100,29 @@ test('the parent task is dropped, not kept alongside its chunks', () => {
 test('chunk files are the parent files exactly: no drops, no duplicates', () => {
   const parent = taskWith(102)
   const out = splitOversizedTasks([parent])
-  const all = out.flatMap(c => c.files)
-  assert.equal(all.length, 102, 'file count changed')
-  assert.equal(new Set(all).size, 102, 'a file appears in more than one chunk')
-  assert.deepEqual([...all].sort(), [...parent.files].sort())
+  const all = out.flatMap(c => c.locations)
+  assert.equal(all.length, 102, 'location count changed')
+  assert.equal(new Set(all).size, 102, 'a location appears in more than one chunk')
+  assert.deepEqual([...all].sort(), [...parent.locations].sort())
 })
 
 test('chunks are disjoint, so the DAG guard never downgrades them', () => {
   // downgradeConflictingGroups flips a whole group to sequential when two parallel tasks in it
-  // share a file. Overlapping chunks would silently undo the entire point of splitting.
+  // share a location. Overlapping chunks would silently undo the entire point of splitting.
   const out = splitOversizedTasks([taskWith(50)])
   const seen = new Set()
-  for (const c of out) for (const f of c.files) {
+  for (const c of out) for (const f of c.locations) {
     assert.ok(!seen.has(f), `${f} is in two chunks — the group will downgrade to sequential`)
     seen.add(f)
   }
 })
 
-test('every chunk inherits the parent groupId and is parallel', () => {
-  // Inheriting groupId is what puts the chunks on harness-implement's group-parallel path and
+test('every chunk inherits the parent group_id and is parallel', () => {
+  // Inheriting group_id is what puts the chunks on harness-implement's group-parallel path and
   // keeps them landing as ONE commit.
   const out = splitOversizedTasks([taskWith(30)])
   for (const c of out) {
-    assert.equal(c.groupId, 'G3', `chunk ${c.id} left its group`)
+    assert.equal(c.group_id, 'G3', `chunk ${c.id} left its group`)
     assert.equal(c.block, 'parallel', `chunk ${c.id} is not parallel`)
   }
 })
@@ -169,7 +181,7 @@ test('a non-array argument returns an empty array rather than throwing', () => {
 test('files are grouped by directory before packing', () => {
   const t = {
     ...taskWith(0),
-    files: [
+    locations: [
       'src/campaigns/a.js', 'src/campaigns/b.js', 'src/campaigns/c.js',
       'src/admin/x.js', 'src/admin/y.js',
       'src/reports/r.js', 'src/reports/s.js', 'src/reports/t.js', 'src/reports/u.js',
@@ -177,32 +189,32 @@ test('files are grouped by directory before packing', () => {
   }
   const out = splitOversizedTasks([t], 4)
   for (const c of out) {
-    const dirs = new Set(c.files.map(f => f.slice(0, f.lastIndexOf('/'))))
-    assert.equal(dirs.size, 1, `chunk ${c.id} mixes directories: ${c.files.join(', ')}`)
+    const dirs = new Set(c.locations.map(f => f.slice(0, f.lastIndexOf('/'))))
+    assert.equal(dirs.size, 1, `chunk ${c.id} mixes directories: ${c.locations.join(', ')}`)
   }
 })
 
 test('one directory exceeding the cap falls back to index splitting within it', () => {
-  const t = { ...taskWith(0), files: Array.from({ length: 19 }, (_, i) => `src/client/f${i}.js`) }
+  const t = { ...taskWith(0), locations: Array.from({ length: 19 }, (_, i) => `src/client/f${i}.js`) }
   const out = splitOversizedTasks([t], 8)
-  assert.equal(out.length, 3, `19 files at cap 8 should be 3 chunks, got ${out.length}`)
-  assert.deepEqual(out.map(c => c.files.length), [8, 8, 3])
+  assert.equal(out.length, 3, `19 locations at cap 8 should be 3 chunks, got ${out.length}`)
+  assert.deepEqual(out.map(c => c.locations.length), [8, 8, 3])
 })
 
 test('small directories pack together rather than each becoming its own chunk', () => {
   // Otherwise 12 one-file directories become 12 agents, each paying full context setup to edit
   // a single file — the opposite failure from the one being fixed.
-  const t = { ...taskWith(0), files: Array.from({ length: 12 }, (_, i) => `src/d${i}/only.js`) }
+  const t = { ...taskWith(0), locations: Array.from({ length: 12 }, (_, i) => `src/d${i}/only.js`) }
   const out = splitOversizedTasks([t], 8)
   assert.ok(out.length <= 2, `12 single-file dirs should pack into <=2 chunks, got ${out.length}`)
 })
 
 test('chunk titles carry the scope and a count derived from the array', () => {
-  // T05's title claimed "~76 files" for a 102-entry array. Counts come from files.length or
+  // T05's title claimed "~76 files" for a 102-entry array. Counts come from locations.length or
   // they are wrong again.
   const out = splitOversizedTasks([taskWith(20)])
   for (const c of out) {
-    assert.match(c.title, new RegExp(`\\b${c.files.length}\\b`), `chunk ${c.id} title omits its real count: ${c.title}`)
+    assert.match(c.title, new RegExp(`\\b${c.locations.length}\\b`), `chunk ${c.id} title omits its real count: ${c.title}`)
     assert.ok(c.title.startsWith('Migrate axios to fetch'), 'parent title lost')
   }
 })
@@ -217,11 +229,10 @@ test('description, rules, table and snippets are copied verbatim to every chunk'
   })
   const out = splitOversizedTasks([t])
   for (const c of out) {
-    assert.equal(c.description, t.description)
     assert.deepEqual(c.conversionRules, t.conversionRules)
     assert.deepEqual(c.conversionTable, t.conversionTable)
     assert.equal(c.snippets, t.snippets)
-    assert.equal(c.tddRequired, true)
+    assert.equal(c.tdd_required, true)
   }
 })
 
@@ -233,12 +244,12 @@ test('absent optional fields are not invented on the chunks', () => {
   }
 })
 
-test('dependsOn is inherited from the parent and siblings do not depend on each other', () => {
+test('depends_on is inherited from the parent and siblings do not depend on each other', () => {
   // Sibling dependencies would serialize the chunks and undo the split.
-  const out = splitOversizedTasks([taskWith(20, 'src/client', { dependsOn: ['T04'] })])
+  const out = splitOversizedTasks([taskWith(20, 'src/client', { depends_on: ['T04'] })])
   for (const c of out) {
-    assert.deepEqual(c.dependsOn, ['T04'], `chunk ${c.id} lost or gained a dependency`)
-    for (const sib of out) assert.ok(!(c.dependsOn || []).includes(sib.id), 'sibling dependency introduced')
+    assert.deepEqual(c.depends_on, ['T04'], `chunk ${c.id} lost or gained a dependency`)
+    for (const sib of out) assert.ok(!(c.depends_on || []).includes(sib.id), 'sibling dependency introduced')
   }
 })
 
@@ -247,38 +258,38 @@ test('dependsOn is inherited from the parent and siblings do not depend on each 
 // so no chunk could verify itself and every chunk's assertion would fail until the last one
 // finished — verifying nothing intermediate.
 
-test('a scoped path in the parent DONE is replaced by the chunk files', () => {
-  const t = { ...taskWith(0), files: Array.from({ length: 12 }, (_, i) => `src/client/f${i}.js`),
-    acceptanceCriteria: ['grep -r "axios" src/ returns nothing'] }
+test('a scoped path in the parent DONE is replaced by the chunk locations', () => {
+  const t = { ...taskWith(0), locations: Array.from({ length: 12 }, (_, i) => `src/client/f${i}.js`),
+    done_criteria: ['grep -r "axios" src/ returns nothing'] }
   const out = splitOversizedTasks([t], 8)
-  const first = out[0].acceptanceCriteria.join('\n')
+  const first = out[0].done_criteria.join('\n')
   assert.ok(!/\bsrc\/\s/.test(first + ' '), `chunk 1 still asserts over the whole tree: ${first}`)
-  assert.ok(out[0].files.some(f => first.includes(f)), 'chunk 1 DONE names none of its own files')
+  assert.ok(out[0].locations.some(f => first.includes(f)), 'chunk 1 done_criteria names none of its own locations')
 })
 
-test('each chunk DONE names only its own files, never a sibling\'s', () => {
+test('each chunk done_criteria names only its own locations, never a sibling\'s', () => {
   const out = splitOversizedTasks([{ ...taskWith(0),
-    files: Array.from({ length: 16 }, (_, i) => `src/client/f${i}.js`),
-    acceptanceCriteria: ['grep -r "axios" src/client returns nothing'] }], 8)
+    locations: Array.from({ length: 16 }, (_, i) => `src/client/f${i}.js`),
+    done_criteria: ['grep -r "axios" src/client returns nothing'] }], 8)
   out.forEach((c, i) => {
-    const text = c.acceptanceCriteria.join('\n')
+    const text = c.done_criteria.join('\n')
     for (const sib of out) {
       if (sib === c) continue
-      for (const f of sib.files) {
-        if (c.files.includes(f)) continue
-        assert.ok(!text.includes(f), `chunk ${i + 1} asserts over sibling file ${f}`)
+      for (const f of sib.locations) {
+        if (c.locations.includes(f)) continue
+        assert.ok(!text.includes(f), `chunk ${i + 1} asserts over sibling location ${f}`)
       }
     }
   })
 })
 
-test('an unsubstitutable DONE becomes a per-file loop over the chunk files', () => {
+test('an unsubstitutable done_criteria becomes a per-location loop over the chunk locations', () => {
   // No path to swap, so the assertion has to be synthesized rather than left repo-wide.
   const out = splitOversizedTasks([{ ...taskWith(0),
-    files: ['src/a/x.js', 'src/a/y.js', 'src/a/z.js'],
-    acceptanceCriteria: ['no axios imports remain anywhere'] }], 2)
-  const first = out[0].acceptanceCriteria.join('\n')
-  assert.ok(out[0].files.some(f => first.includes(f)), `chunk DONE mentions no chunk file: ${first}`)
+    locations: ['src/a/x.js', 'src/a/y.js', 'src/a/z.js'],
+    done_criteria: ['no axios imports remain anywhere'] }], 2)
+  const first = out[0].done_criteria.join('\n')
+  assert.ok(out[0].locations.some(f => first.includes(f)), `chunk done_criteria mentions no chunk location: ${first}`)
 })
 
 test('the parent repo-wide assertion is retained exactly once, on the last chunk', () => {
@@ -286,17 +297,73 @@ test('the parent repo-wide assertion is retained exactly once, on the last chunk
   // pass once every sibling is done — which is true only for the last chunk.
   const parentDone = 'grep -r "axios" src/ returns nothing'
   const out = splitOversizedTasks([{ ...taskWith(0),
-    files: Array.from({ length: 24 }, (_, i) => `src/client/f${i}.js`),
-    acceptanceCriteria: [parentDone] }], 8)
-  const carriers = out.filter(c => c.acceptanceCriteria.includes(parentDone))
+    locations: Array.from({ length: 24 }, (_, i) => `src/client/f${i}.js`),
+    done_criteria: [parentDone] }], 8)
+  const carriers = out.filter(c => c.done_criteria.includes(parentDone))
   assert.equal(carriers.length, 1, `parent assertion appears on ${carriers.length} chunks, want exactly 1`)
   assert.equal(carriers[0], out[out.length - 1], 'the closure check is not on the last chunk')
 })
 
-test('a task with no acceptanceCriteria still splits and gets an array', () => {
-  const t = { id: 'T9', title: 'x', description: 'd', groupId: 'G1', block: 'sequential',
-    files: Array.from({ length: 10 }, (_, i) => `src/z/f${i}.js`) }
+test('a task with no done_criteria still splits and gets an array', () => {
+  const t = { id: 'T9', title: 'x', group_id: 'G1', block: 'sequential',
+    locations: Array.from({ length: 10 }, (_, i) => `src/z/f${i}.js`) }
   const out = splitOversizedTasks([t], 4)
   assert.ok(out.length > 1)
-  for (const c of out) assert.ok(Array.isArray(c.acceptanceCriteria))
+  for (const c of out) assert.ok(Array.isArray(c.done_criteria))
+})
+
+test('a 9-location unit splits and every chunk validates against the plan schema', () => {
+  // The whole reason this task exists: chunks that the plan schema rejects cannot be written
+  // back to plan.json, so a splitter that produced `files`/`groupId` keys was unusable even
+  // once it fired.
+  const out = splitOversizedTasks([taskWith(9)], 4)
+  assert.ok(out.length > 1, `9 locations at cap 4 should split, got ${out.length}`)
+  const schema = loadSchema('plan')
+  const errors = validate(schema, {
+    run_id: 'R1',
+    units: out,
+    order: out.map(c => c.id),
+    schema_version: '1.0.0',
+  })
+  assert.deepEqual(errors, [], `chunks are not schema-valid: ${JSON.stringify(errors)}`)
+})
+
+test('a NEW: location groups by its real directory, keeping the prefix in locations', () => {
+  // dirOf on the raw string yields "NEW: src/a", a directory key no existing file can share,
+  // so new files scattered into their own chunks away from the code they sit next to.
+  const t = { ...taskWith(0), locations: [
+    'src/a/one.js', 'src/a/two.js', 'src/a/three.js',
+    'NEW: src/a/four.js', 'src/b/five.js', 'src/b/six.js',
+  ] }
+  const out = splitOversizedTasks([t], 4)
+  const withNew = out.find(c => c.locations.some(l => l.startsWith('NEW: ')))
+  assert.ok(withNew, 'the NEW: location vanished')
+  assert.ok(withNew.locations.includes('NEW: src/a/four.js'), 'the NEW: prefix was stripped from locations')
+  for (const c of out) {
+    const dirs = new Set(c.locations.map(l => {
+      const bare = l.replace(/^NEW:\s*/, '')
+      return bare.slice(0, bare.lastIndexOf('/'))
+    }))
+    assert.equal(dirs.size, 1, `chunk ${c.id} mixes directories: ${c.locations.join(', ')}`)
+  }
+})
+
+test('the CLI split-tasks case reads units and emits units', () => {
+  // harness.mjs read plan.tasks, which the plan schema does not define — the command returned
+  // an empty array for every real plan.json ever passed to it.
+  const dir = mkdtempSync(join(tmpdir(), 'split-cli-'))
+  const file = join(dir, 'plan.json')
+  writeFileSync(file, JSON.stringify({
+    run_id: 'R1',
+    units: [taskWith(12, 'src/client')],
+    order: ['T05'],
+    schema_version: '1.0.0',
+  }))
+  const out = JSON.parse(execFileSync(process.execPath, [CLI, 'split-tasks', '--plan', file], { encoding: 'utf8' }))
+  assert.ok(Array.isArray(out.units), `expected a units[] in the CLI output, got ${Object.keys(out).join(', ')}`)
+  assert.equal(out.units.length, 2, `12 locations at cap 8 should be 2 units, got ${out.units.length}`)
+  assert.deepEqual(out.units.flatMap(u => u.locations).sort(), taskWith(12).locations.sort())
+  assert.deepEqual(validate(loadSchema('plan'), {
+    run_id: 'R1', units: out.units, order: out.units.map(u => u.id), schema_version: '1.0.0',
+  }), [], 'CLI output units are not schema-valid')
 })

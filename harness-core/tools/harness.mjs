@@ -172,13 +172,15 @@ try {
       emit({ order: orderPlansByDeps(plans) });
     }
     case 'split-tasks': {
-      // Split any task whose files[] exceeds the per-task cap into same-group
-      // parallel siblings (directory-coherent chunks) so implement lands them
-      // as one commit without one agent grinding 100 files serially.
+      // Split any unit whose locations[] exceeds the per-task cap into same-group parallel
+      // siblings (directory-coherent chunks) so implement lands them as one commit without one
+      // agent grinding 100 files serially. Keys are the plan schema's (`units`, `locations`):
+      // this read was `plan.tasks` against a schema that has no `tasks`, so the command
+      // returned an empty array for every plan.json it was ever given.
       const v = opts({ plan: { type: 'string' }, cap: { type: 'string' } });
       const plan = JSON.parse(readFileSync(v.plan, 'utf8'));
-      const tasks = splitOversizedTasks(plan.tasks ?? [], v.cap !== undefined ? Number(v.cap) : undefined);
-      emit({ tasks });
+      const units = splitOversizedTasks(plan.units ?? [], v.cap !== undefined ? Number(v.cap) : undefined);
+      emit({ units });
     }
     case 'validate': {
       const v = opts({ schema: { type: 'string' }, file: { type: 'string' } });
@@ -473,7 +475,7 @@ try {
           'jira-normalize': '--file <issue.json>  (normalize a saved getJiraIssue response into the neutral intake shape {key,summary,description,issue_type,change_type,parent_key,project_key,input}; exit 1 if malformed)',
           'github-normalize': '--file <issue.json> [--repo <slug>]  (normalize a saved `gh issue view --json number,title,body,labels` response into the SAME neutral intake shape as jira-normalize; --repo becomes project_key; exit 1 if malformed)',
           'plan-order': '--manifest <plan-manifest.json>  (topologically order plans[] by dependsOn; { order:[...] }; exit 1 on cycle/unknown dep)',
-          'split-tasks': '--plan <plan.json> [--cap <n>]  (split any task whose files[] exceeds the cap into same-group parallel chunks; { tasks:[...] })',
+          'split-tasks': '--plan <plan.json> [--cap N]   split oversized units by locations[]',
           validate: '--schema <name> --file <path>',
           audit: '--target <path> --event <json>  (ts auto-stamped if omitted)',
           gate: '--size S|M|L --rounds <n> --result pass|advisory-fail|blocking-fail [--score <0..1>] [--delta <n>]',

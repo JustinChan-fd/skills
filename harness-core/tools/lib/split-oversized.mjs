@@ -1,6 +1,6 @@
 // Deterministic enforcement of the per-task file bound.
 //
-// Splitting an oversized task's files[] into same-group parallel siblings is a
+// Splitting an oversized task's locations[] into same-group parallel siblings is a
 // mechanical operation that prompt prose could not hold: an architect facing
 // 102 files rationalizes past a flat "1-3 files" rule that supplies neither
 // reason nor method, and a schema maxItems just makes the agent retry blind. So
@@ -9,8 +9,8 @@
 //   "Many applications require the deterministic reliability that only code can provide."
 //
 // harness-implement already runs same-group tasks concurrently, downgrades to
-// sequential only when two parallel tasks in a group share a file, and lands
-// one commit per group. Same groupId + block:'parallel' + disjoint files[]
+// sequential only when two parallel tasks in a group share a location, and lands
+// one commit per group. Same group_id + block:'parallel' + disjoint locations[]
 // rides all three — no new orchestration.
 // Folded from the legacy harness-plan skill's lib/split-oversized.js. That
 // skill and its Workflow inline mirror are both deleted — this is the single
@@ -19,10 +19,18 @@
 /** The per-task file cap: `cap` files pass, `cap + 1` splits. Matches intake's noOversized check (">8 files"). */
 export const FILE_CAP = 8;
 
-/** Directory portion of a path, '' for a bare filename. */
+/**
+ * Directory portion of a location, '' for a bare filename.
+ *
+ * The `NEW: ` prefix is stripped first. plan.json locations use it to mark a file the unit
+ * creates, and lastIndexOf('/') on the raw string returns "NEW: src/a" — a grouping key no
+ * existing file in src/a can ever match, so every new file became its own chunk, separated
+ * from exactly the code it needs to sit beside.
+ */
 function dirOf(f) {
-  const i = String(f).lastIndexOf('/');
-  return i === -1 ? '' : String(f).slice(0, i);
+  const s = String(f).replace(/^NEW:\s*/, '');
+  const i = s.lastIndexOf('/');
+  return i === -1 ? '' : s.slice(0, i);
 }
 
 /**
@@ -84,19 +92,19 @@ function chunkFiles(files, cap) {
 /**
  * Rewrite the parent's DONE assertions so each chunk can verify itself.
  *
- * Load-bearing. A repo-wide grep DONE cannot pass until all files convert, so no chunk could
+ * Load-bearing. A repo-wide grep DONE cannot pass until all locations convert, so no chunk could
  * verify itself and every assertion would fail until the last sibling finished — verifying
  * nothing intermediate.
  *
  * Three strategies, in order:
- *   1. Substitute the chunk's files for a path argument in the parent's criterion.
- *   2. If no path is substitutable, synthesize a per-file loop over the chunk's files.
+ *   1. Substitute the chunk's locations for a path argument in the parent's criterion.
+ *   2. If no path is substitutable, synthesize a per-location loop over the chunk's locations.
  *   3. The last chunk additionally retains the parent's criteria verbatim as a closure check —
  *      it is the only chunk for which a repo-wide assertion can legitimately pass.
  */
-function scopeCriteria(criteria, chunkFilesList, isLast) {
+function scopeCriteria(criteria, chunkLocations, isLast) {
   const list = Array.isArray(criteria) ? criteria : [];
-  const fileList = chunkFilesList.join(' ');
+  const fileList = chunkLocations.join(' ');
 
   const scoped = list.map((c) => {
     const text = String(c);
@@ -115,14 +123,14 @@ function scopeCriteria(criteria, chunkFilesList, isLast) {
 }
 
 /**
- * Split any task whose files[] exceeds `cap` into same-group parallel siblings.
+ * Split any task whose locations[] exceeds `cap` into same-group parallel siblings.
  *
  * Tasks at or under the cap are returned BY IDENTITY, not copied — a fileless task (the XS fast
- * path hardcodes `files: []`) and a small task must come back as the very same object, so a
+ * path hardcodes locations: []) and a small task must come back as the very same object, so a
  * downstream `===` never silently stops matching.
  *
  * @param {object[]} tasks
- * @param {number} cap - inclusive; `cap` files pass, `cap + 1` splits
+ * @param {number} cap - inclusive; `cap` locations pass, `cap + 1` splits
  * @returns {object[]} tasks in input order, each oversized task replaced by its chunks
  */
 export function splitOversizedTasks(tasks, cap = FILE_CAP) {
@@ -130,22 +138,26 @@ export function splitOversizedTasks(tasks, cap = FILE_CAP) {
 
   const out = [];
   for (const task of tasks) {
-    const files = Array.isArray(task?.files) ? task.files : null;
-    if (!files || files.length <= cap) {
+    // plan.schema.json calls this `locations` and is additionalProperties:false, so `task.files`
+    // was undefined on every real plan.json — the guard below swallowed it and the splitter
+    // returned every unit untouched. That is why TARS-1271's T05 ran as one agent over 102
+    // entries.
+    const locations = Array.isArray(task?.locations) ? task.locations : null;
+    if (!locations || locations.length <= cap) {
       out.push(task);
       continue;
     }
 
-    const groups = chunkFiles(files, cap);
+    const groups = chunkFiles(locations, cap);
     groups.forEach((chunkList, i) => {
       const chunk = {
         ...task,
         id: `${task.id}${suffixFor(i)}`,
-        title: `${task.title} (${dirOf(chunkList[0]) || 'files'}, ${chunkList.length} files)`,
-        files: [...chunkList],
-        groupId: task.groupId,
+        title: `${task.title} (${dirOf(chunkList[0]) || 'files'}, ${chunkList.length} locations)`,
+        locations: [...chunkList],
+        group_id: task.group_id,
         block: 'parallel',
-        acceptanceCriteria: scopeCriteria(task.acceptanceCriteria, chunkList, i === groups.length - 1),
+        done_criteria: scopeCriteria(task.done_criteria, chunkList, i === groups.length - 1),
       };
       out.push(chunk);
     });

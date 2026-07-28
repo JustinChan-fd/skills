@@ -97,17 +97,22 @@ test('plan-order exits 1 on a circular dependency', () => {
 test('split-tasks splits an oversized task into same-group parallel chunks', () => {
   const dir = mkdtempSync(join(tmpdir(), 'harness-split-'));
   const file = join(dir, 'plan.json');
-  const files = Array.from({ length: 20 }, (_, i) => `src/client/f${i}.js`);
-  writeFileSync(file, JSON.stringify({ tasks: [
-    { id: 'T05', title: 'migrate', groupId: 'G3', block: 'sequential', files, acceptanceCriteria: ['no axios'] },
-  ] }));
+  const locations = Array.from({ length: 20 }, (_, i) => `src/client/f${i}.js`);
+  writeFileSync(file, JSON.stringify({
+    run_id: 'R1',
+    units: [
+      { id: 'T05', title: 'migrate', group_id: 'G3', block: 'sequential', locations, done_criteria: ['no axios'] },
+    ],
+    order: ['T05'],
+    schema_version: '1.0.0',
+  }));
   const r = run(['split-tasks', '--plan', file]);
   assert.equal(r.code, 0);
-  assert.ok(r.out.tasks.length > 1, 'oversized task should split');
-  for (const t of r.out.tasks) {
-    assert.ok(t.files.length <= 8, `chunk ${t.id} over cap`);
+  assert.ok(r.out.units.length > 1, 'oversized unit should split');
+  for (const t of r.out.units) {
+    assert.ok(t.locations.length <= 8, `chunk ${t.id} over cap`);
     assert.equal(t.block, 'parallel');
-    assert.equal(t.groupId, 'G3');
+    assert.equal(t.group_id, 'G3');
   }
 });
 
