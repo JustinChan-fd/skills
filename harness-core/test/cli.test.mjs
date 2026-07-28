@@ -87,11 +87,12 @@ test('init-run without --routing-policy leaves routing_policy null (every existi
   assert.equal(readRecord(init.out.run_dir).routing_policy, null);
 });
 
-test('record-observed-tokens exits 1 against a run that never finalized (still attempted)', () => {
+test('record-observed-tokens succeeds against any run status (including attempted)', () => {
   const targetDir = mkdtempSync(join(tmpdir(), 'harness-cli-'));
   const init = run(['init-run', '--target', targetDir, '--repo', 'myapp', '--kind', 'intake', '--source', 'adhoc']);
   const observe = run(['record-observed-tokens', '--run-dir', init.out.run_dir, '--total', '1000', '--tier', 'MID']);
-  assert.equal(observe.code, 1);
+  assert.equal(observe.code, 0);
+  assert.equal(observe.out.tokens_observed.total, 1000);
 });
 
 test('gate reads caps from routing config; shut exits 1', () => {

@@ -209,9 +209,9 @@ test('pre-tokens_observed records (schema_version 1.1.0, no tokens_observed) sti
   assert.deepEqual(validate(loadSchema('run-record'), old), []);
 });
 
-test('initRun defaults tokens_observed to null', () => {
+test('initRun does not pre-populate tokens_observed (absent until an orchestrator records it)', () => {
   const { runDir } = freshRun();
-  assert.equal(readRecord(runDir).tokens_observed, null);
+  assert.equal(readRecord(runDir).tokens_observed, undefined);
 });
 
 test('pre-routing_policy records (schema_version 1.4.0, no routing_policy) still validate', async () => {
@@ -228,9 +228,12 @@ test('initRun defaults routing_policy to null', () => {
   assert.equal(readRecord(runDir).routing_policy, null);
 });
 
-test('recordObservedTokens refuses a run that never finalized (still attempted)', () => {
+test('recordObservedTokens can record an observed total on any run (including attempted)', () => {
   const { runDir } = freshRun();
-  assert.throws(() => recordObservedTokens({ runDir, total: 500, tier: 'MID' }), /invalid_record|not been finalized/);
+  // An orchestrator may record the token total from an Agent-tool return
+  // before the subagent's own run-end has been called (e.g. a crashed run).
+  const record = recordObservedTokens({ runDir, total: 500, tier: 'MID' });
+  assert.equal(record.tokens_observed.total, 500);
 });
 
 test("recordObservedTokens adds the orchestrator's total ALONGSIDE the driver's own tokens_by_tier, without touching it", () => {

@@ -361,3 +361,145 @@ export function collectFromFile(path, opts = {}) {
   }
   return collectFromText(text, opts);
 }
+
+// ---- backfill: cross-run directional attribution ----
+//
+// When a run is driven by a loop-dispatched subagent, the driver's tokens live
+// in a separate subagent transcript (not the session top-level), so the standard
+// standalone/loop collection misses them. backfill-directional bridges that gap:
+// it discovers the right transcript by matching spawnDepth=1 agents whose time
+// window overlaps the run, then attributes their token sums to the run record.
+// The caller (harness.mjs backfill-directional) owns the write; this layer is
+// pure discovery + cross-check.
+
+const MIN_OVERLAP_MS = 60_000; // a subagent must overlap the run by ≥1 minute
+
+/**
+ * Find the single spawnDepth=1 agent transcript that best matches a run's time
+ * window + issue key + phase. Returns `{ ok, path, error }`.
+ *
+ * @param {{ subagentsDir:string, issueKey?:string, phase?:string, start?:string, end?:string }} opts
+ */
+export function discoverSubagentForRun({ subagentsDir, issueKey, phase, start, end } = {}) {
+  let entries;
+  try {
+    entries = readdirSync(subagentsDir);
+  } catch (err) {
+    return { ok: false, path: null, error: { code: 'not_found', detail: err.message } };
+  }
+
+  const startMs = start ? Date.parse(start) : null;
+  const endMs = end ? Date.parse(end) : null;
+  const hasWindow = startMs !== null && endMs !== null;
+
+  const candidates = [];
+  for (const name of entries) {
+    if (!name.endsWith('.meta.json') || !name.startsWith('agent-')) continue;
+
+    let meta;
+    try {
+      meta = JSON.parse(readFileSync(join(subagentsDir, name), 'utf8'));
+    } catch {
+      continue;
+    }
+
+    // Only direct loop dispatches (depth 1).
+    if (meta.spawnDepth !== 1) continue;
+
+    // Issue key must appear in the description (case-insensitive).
+    if (issueKey && !(meta.description ?? '').toLowerCase().includes(issueKey.toLowerCase())) continue;
+
+    // Phase must appear in the description (case-insensitive).
+    if (phase && !(meta.description ?? '').toLowerCase().includes(phase.toLowerCase())) continue;
+
+    // Derive the transcript path from the meta file name.
+    const baseName = name.slice(0, -'.meta.json'.length); // e.g. agent-bbb
+    const jsonlPath = join(subagentsDir, baseName + '.jsonl');
+
+    if (hasWindow) {
+      // Read timestamps from the transcript to compute overlap with the run window.
+      const result = collectFromFile(jsonlPath);
+      const agentMin = result.timestamps?.min ? Date.parse(result.timestamps.min) : null;
+      const agentMax = result.timestamps?.max ? Date.parse(result.timestamps.max) : null;
+
+      // Can't check overlap without agent timestamps — skip.
+      if (agentMin === null || agentMax === null) continue;
+
+      const overlapStart = Math.max(startMs, agentMin);
+      const overlapEnd = Math.min(endMs, agentMax);
+      if (overlapEnd - overlapStart < MIN_OVERLAP_MS) continue;
+    }
+
+    candidates.push({ path: jsonlPath, name: baseName });
+  }
+
+  if (candidates.length === 0) {
+    return { ok: false, path: null, error: { code: 'not_found', detail: 'no spawnDepth=1 agent transcript matched the run window and filters' } };
+  }
+  if (candidates.length > 1) {
+    const names = candidates.map((c) => c.name).join(', ');
+    return { ok: false, path: null, error: { code: 'ambiguous', detail: `multiple matching transcripts: ${names}` } };
+  }
+  return { ok: true, path: candidates[0].path, error: null };
+}
+
+/**
+ * Attribute directional token sums for a run from a discovered subagent
+ * transcript. Never writes to disk — the caller owns the `stampTokensDirectional`
+ * call. Always returns a structured result; never throws.
+ *
+ * Cross-check: if `record.tokens_observed.total > 0` AND the directional sum is
+ * non-zero, the ratio must be between 0.1 and 10 (i.e. within one order of
+ * magnitude) — anything outside that range is flagged as attribution_suspect.
+ *
+ * @param {{ runDir:string, subagentsDir:string, start?:string, end?:string,
+ *           modelTierMap?:object, now?:Date }} opts
+ */
+export function backfillDirectional({ runDir, subagentsDir, start, end, modelTierMap = {}, now = new Date() } = {}) {
+  // Read the run record for the effective window + issue/kind context.
+  let record;
+  try {
+    record = JSON.parse(readFileSync(join(runDir, 'record.json'), 'utf8'));
+  } catch (err) {
+    return { ok: false, error: { code: 'not_found', detail: `could not read record.json: ${err.message}` } };
+  }
+
+  const effectiveStart = start ?? record.started_at ?? null;
+  const effectiveEnd = end ?? record.ended_at ?? null;
+
+  const discovered = discoverSubagentForRun({
+    subagentsDir,
+    issueKey: record.issue ?? undefined,
+    phase: record.kind ?? undefined,
+    start: effectiveStart,
+    end: effectiveEnd,
+  });
+
+  if (!discovered.ok) return { ok: false, error: discovered.error };
+
+  const result = collectFromFile(discovered.path, { start: effectiveStart, end: effectiveEnd });
+
+  // Cross-check: directional sum vs externally-observed total.
+  const observedTotal = record.tokens_observed?.total ?? 0;
+  if (observedTotal > 0 && result.ok) {
+    const directionalSum = Object.values(result.by_model).reduce(
+      (sum, b) => sum + (b.input ?? 0) + (b.output ?? 0) + (b.cache_read ?? 0) + (b.cache_creation ?? 0),
+      0,
+    );
+    if (directionalSum > 0) {
+      const ratio = directionalSum / observedTotal;
+      if (ratio < 0.1 || ratio > 10) {
+        return {
+          ok: false,
+          error: {
+            code: 'attribution_suspect',
+            detail: `directional sum ${directionalSum} diverges from observed total ${observedTotal} (ratio ${ratio.toFixed(4)}); skipping backfill`,
+          },
+        };
+      }
+    }
+  }
+
+  const built = buildTokensDirectional({ result, modelTierMap, now });
+  return { ok: true, ...built, source: discovered.path, result };
+}

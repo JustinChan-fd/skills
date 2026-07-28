@@ -24,7 +24,7 @@ import { gateDecision } from './lib/gate.mjs';
 import { qualityScore } from './lib/quality.mjs';
 import { appendAudit, HarnessError } from './lib/audit.mjs';
 import { initRun, readRecord, phaseEnd, finalizeRun, recordObservedTokens, stampTokensDirectional, finalizeTokens } from './lib/record.mjs';
-import { collectForRun } from './lib/tokens-collect.mjs';
+import { collectForRun, backfillDirectional } from './lib/tokens-collect.mjs';
 import { preflight } from './lib/preflight.mjs';
 import { scanAnomalies } from './lib/anomalies.mjs';
 import { scanResidue } from './lib/residue.mjs';
@@ -121,7 +121,11 @@ try {
         'skills-commit': { type: 'string' },
       });
       const { runId, runDir } = initRun({
-        targetDir: v.target, repo: v.repo, kind: v.kind, source: v.source,
+        targetDir: v.target, repo: v.repo, kind: v.kind,
+        // Auto-lowercase the source so callers can pass 'issue-PROJ-1' and it
+        // round-trips cleanly through the run-id stem regex (which is lowercase-only).
+        // The real Jira key rides in --issue untouched; the source is just a slug.
+        source: v.source?.toLowerCase() ?? v.source,
         issue: v.issue ?? null, branch: v.branch ?? null,
         routingPolicy: v['routing-policy'] ?? null,
         parentRunId: v['parent-run-id'] ?? null,
@@ -356,6 +360,31 @@ try {
       const record = readRecord(v['run-dir']);
       emit({ ok: true, ...summary, tokens_directional: record.tokens_directional });
     }
+    case 'backfill-directional': {
+      const v = opts({
+        'run-dir': { type: 'string' },
+        'subagents-dir': { type: 'string' },
+        start: { type: 'string' },
+        end: { type: 'string' },
+      });
+      const { routing } = resolveConfig();
+      const bfResult = backfillDirectional({
+        runDir: v['run-dir'],
+        subagentsDir: v['subagents-dir'],
+        start: v.start,
+        end: v.end,
+        modelTierMap: routing.model_id_to_tier ?? {},
+        now: new Date(),
+      });
+      if (!bfResult.ok) {
+        emit({ ok: true, status: 'unresolved', reason: bfResult.error });
+      }
+      // Stamp the result onto record.json (additive — never touches tokens_observed).
+      stampTokensDirectional({ runDir: v['run-dir'], tokensDirectional: bfResult.tokens_directional });
+      const telemetry = telemetryFromConfig();
+      syncRun({ runDir: v['run-dir'], telemetry });
+      emit({ ok: true, status: 'resolved', by_model: bfResult.tokens_directional.by_model, source: bfResult.source });
+    }
     case 'preflight': {
       const v = opts({ phase: { type: 'string' }, 'run-dir': { type: 'string' } });
       const r = preflight({ phase: v.phase, runDir: v['run-dir'] });
@@ -445,6 +474,7 @@ try {
           'loop-record': '--target <path> --issue <n> --actions <json> --outcome <s> --anomalies-scan <path> [--pr-url <url>] [--phase-run <phase>=<run_dir> ...] [--ts <iso>]  (compose one tick\'s loop.jsonl line from the anomalies scan + each dispatched run\'s tokens_observed, and append it to <target>/.harness/loop.jsonl)',
           'record-observed-tokens': '--run-dir <dir> --total <n> --tier LOW|MID|HIGH [--source <str>]  (add an externally-observed token total ALONGSIDE a finalized run\'s own tokens_by_tier — additive, never overwrites; re-syncs telemetry)',
           'tokens-collect': '--run-dir <dir> [--transcript <path>] [--mode loop|standalone] [--subagents-dir <dir>] [--project-dir <dir>] [--cwd <str>] [--gap-cap-ms <n>]  (parse a transcript and stamp additive tokens_directional onto record.json; degrades to estimated-with-note, exit 0, never crashes)',
+          'backfill-directional': '--run-dir <dir> --subagents-dir <dir> [--start <iso>] [--end <iso>]  (backfill tokens_directional.by_model from a subagent transcript; exit 0 always, status resolved|unresolved)',
           quality: '--run-dir <dir>',
           config: '(no flags)',
           sweep: '--target <path>',

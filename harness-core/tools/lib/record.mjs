@@ -65,8 +65,6 @@ export function initRun({ targetDir, repo, kind, source, issue = null, branch = 
     status: 'attempted',
     reason: null,
     phases: [],
-    tokens_by_tier: {},
-    tokens_observed: null,
     routing_policy: routingPolicy ?? null,
     wall_ms: null,
     active_ms: null,
@@ -230,9 +228,6 @@ export function finalizeTokens(observations = []) {
 
 export function recordObservedTokens({ runDir, total, tier, source = 'agent_tool_usage_tag', now = new Date() }) {
   const record = readRecord(runDir);
-  if (record.status === 'attempted') {
-    throw new HarnessError('invalid_record', 'recordObservedTokens: run has not been finalized (run-end never called) — nothing to corroborate yet');
-  }
   record.tokens_observed = { total, tier, source, observed_at: now.toISOString() };
   // The already-synced copy in telemetry is missing this snapshot — clear
   // synced_at so the next sync (called by the caller, or a later sweep)
