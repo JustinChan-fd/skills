@@ -33,9 +33,11 @@ Run `/harness-intake` before every harness-plan invocation. Always.
 | Size | Output | Next step |
 |------|--------|-----------|
 | XS/S/M | `intake-manifest.json` — typed work classification + AC list | `/harness-plan --intake <path>` |
-| L | `intake-manifest.json` (with `groups[]`) — work classification + split subtasks | `/harness-plan --intake <path>` on each G1 subtask |
+| L | `intake-manifest.json` (with `groups[]`) — work classification + split subtasks | `/harness-plan --intake <path> --entry G1-1` per G1 subtask |
 
-The manifest is written to `{repoPath}/docs/manifests/`.
+The workflow writes the manifest itself, to `{repoPath}/docs/manifests/{repo}__harness-intake__{key}__{runTs}__manifest.json`, and returns the path as `result.intakeManifestPath`.
+
+**No Jira subtasks are created.** An L split produces subtasks addressed by `id` (`G1-1`, `G2-1`, …) that become phased commits on the implementation PR.
 
 ## Step-by-Step
 
@@ -258,89 +260,41 @@ try {
 
 Print `result.cliSummary` verbatim.
 
-### 6. Write intake-manifest.json
+### 6. The manifest is already written — do not write it again
 
-Always write the intake manifest, regardless of size. Use the absolute path — relative paths will fail:
+**The workflow writes its own manifest.** Its Debrief phase spawns a `write-manifest` haiku agent alongside `write-telemetry`, and returns the path it landed at as `result.intakeManifestPath`. Both artifacts of the run are written by the same phase, and the audit record carries `intakeManifestPath` so a dashboard row points at its own manifest.
 
-```js
-// Ensure directory exists
-await Bash(`mkdir -p ${repoPath}/docs/manifests`)
-const repo = repoPath.split('/').pop()
-const intakeManifestPath = `${repoPath}/docs/manifests/${repo}__harness-intake__${issueKey || 'intake'}__${runTs}__manifest.json`
-// Write result.intakeManifest as prettified JSON using the Write tool
-// Path must be absolute: ${repoPath}/docs/manifests/... NOT docs/manifests/...
-```
+> **Why this moved into the workflow (2026-07-27).** This step used to hand you a path template and ask you to write `result.intakeManifest` with the Write tool — the same shape as the telemetry append, and the same failure. Losing the manifest is the worse of the two: `harness-plan --intake` reads that exact path and there is no second copy, so the run is stranded rather than merely unaudited. It also produced the fabricated TARS-1271 manifest (`fileCount`, `notes` — keys that exist nowhere in this codebase), because when the write is prose, an agent that cannot find the real artifact improvises a plausible one.
+
+What is left for you: print `result.intakeManifestPath`, and if it is null, say so — the workflow logged the failure and the manifest is still in `result.intakeManifest`, so it can be written by hand as a recovery step rather than lost.
 
 ### 7. XS/S/M exit — direct to harness-plan
 
-If `result.splitRequired === false`:
-
-Print the next step clearly:
-```
-Intake complete. Run:
-  /harness-plan --intake docs/manifests/{today}-{issueKey}-intake-manifest.json
-```
-
-Stop here. Do not create Jira subtasks.
+If `result.splitRequired === false`, the `next:` line of `result.cliSummary` already names the manifest path and the command. Print it and stop.
 
 ### 8. L path — quality gate
 
 If `result.splitRequired === true` and `result.qualityIssues.length > 0`:
-Surface issues, ask whether to continue or adjust.
+Surface issues, ask whether to continue or adjust. This is the only gate on the L path.
 
-### 9. L path — confirmation gate
+### 9. L path — print the next commands
 
-```
-Create these {N} subtasks in Jira under {issueKey}?
+There is **no Jira subtask creation and no confirmation gate.** Decomps are phased commits on the PR, so nothing needs creating before planning starts, and there is nothing irreversible to confirm.
 
-[G1 — run in parallel]
-  {title}  ({N} files)  → {size}
-  ...
+> **Why the gate is gone (2026-07-27).** Steps 9–11 used to ask for confirmation, call `createJiraIssue` once per subtask, then inject `jiraKey`/`jiraUrl` into the manifest. That existed to give each subtask an addressable handle for `--entry`. Since decomps land as phased commits rather than Jira issues, the loop minted issues nobody read, and the gate blocked the intake→plan handoff on a human round-trip for a decision with no downside. The handle is now `id` (`G1-1`, `G1-2`, `G2-1`, …), stamped by the workflow — deterministic, stable across a retitle, and legible as a CLI argument.
 
-[G2 — after all G1 complete]
-  ...
-```
-
-Wait for explicit confirmation before creating anything.
-
-### 10. L path — create Jira subtasks
-
-```js
-mcp__atlassian__createJiraIssue({
-  cloudId,
-  projectKey: issueKey.split('-')[0],
-  issueTypeName: 'Subtask',
-  summary: subtask.title,
-  description: subtask.description,
-  contentFormat: 'markdown',
-  additional_fields: { parent: { key: issueKey } },
-})
-```
-
-Collect created keys + URLs.
-
-### 11. L path — write intake-manifest.json (with groups)
-
-Inject `jiraKey` + `jiraUrl` per subtask in `result.intakeManifest.groups[*].subtasks[*]`, then write:
-
-```js
-const repo = repoPath.split('/').pop()
-const intakeManifestPath = `${repoPath}/docs/manifests/${repo}__harness-intake__${issueKey}__${runTs}__manifest.json`
-// Write result.intakeManifest (already contains groups[]) as prettified JSON
-```
-
-### 12. Print next steps
+`result.cliSummary` already contains one ready-to-run command per G1 subtask, with the real manifest path and the real ids. Print it verbatim; do not rewrite it into placeholders.
 
 ```
-Subtasks created under {issueKey}.
+[G1 — independent, can run concurrently]
+  /harness-plan --intake <result.intakeManifestPath> --entry G1-1
+  /harness-plan --intake <result.intakeManifestPath> --entry G1-2
 
-[G1 — run these in parallel]
-  /harness-plan --intake docs/manifests/{today}-{key}-intake-manifest.json --entry {TARS-XXXX}
-  ...
-
-[G2 — after all G1 plans are implemented]
-  /harness-plan --intake docs/manifests/{today}-{key}-intake-manifest.json --entry {TARS-YYYY}
+[G2/G3 — after G1's commits land]
+  ... same shape, --entry G2-1 …
 ```
+
+G1 carries no `dependsOn`, so those commands are runnable immediately. G2/G3 are gated on G1's commits, so they are named but not offered as commands yet.
 
 ## Manifest Contracts
 
@@ -371,7 +325,9 @@ Subtasks created under {issueKey}.
 harness-plan reads this via `--intake` flag and skips its own Intake phase entirely.
 
 ### intake-manifest.json — L path (with groups)
-Same top-level fields as XS/S/M, plus a `groups[]` array with subtasks carrying `scopePath`, `files[]`, `jiraKey`, `jiraUrl`. There is no separate split-manifest file.
+Same top-level fields as XS/S/M, plus a `groups[]` array. Each subtask carries `id`, `title`, `description`, `scopePath`, `files[]`, `groupId`, `dependsOn`, `targetSize`, and the propagated `migrationPattern`/`size`. There is no separate split-manifest file.
+
+`id` is the handle `/harness-plan --entry` takes: `G1-1`, `G1-2`, `G2-1` — per-group and 1-based, so `G2-1` reads as "first task of the second wave". It replaced `jiraKey` when Jira subtask creation was removed; nothing mints keys any more, and the only alternative handle was the subtask title, which is long, punctuated, and rewritten whenever the split agent rewords.
 
 ## Getting past a barrier
 

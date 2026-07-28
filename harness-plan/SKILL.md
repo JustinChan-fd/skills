@@ -88,10 +88,10 @@ Concretely:
 /harness-plan
 /harness-plan --grill-me                          # force Q&A regardless of size
 /harness-plan --forceplan                         # run full pipeline even for XS tickets
-/harness-plan --manifest path/to/split-manifest.json --entry TARS-1275
-                                                  # consume a harness-split subtask entry
-/harness-plan --intake path/to/intake-manifest-gated.json
-                                                  # non-refine path with gate-A gated manifest (manifest supremacy)
+/harness-plan --intake path/to/intake-manifest.json --entry G1-1
+                                                  # plan ONE subtask of an L intake manifest
+/harness-plan --intake path/to/intake-manifest.json
+                                                  # plan the whole ticket (manifest supremacy)
 /harness-plan --refine path/to/prior-plan-manifest.json
                                                   # re-plan after Handoff-B RE_ASK (manifest supremacy)
 ```
@@ -102,8 +102,36 @@ When the user invokes `/harness-plan [url] [flags]`:
 
 1. **`--grill-me`** — set `qaMode: true`, run grill-me Q&A before workflow.
 2. **`--forceplan`** — pass `forceplan: true` to workflow args; skips the XS fast path.
-3. **`--manifest <path> --entry <jiraKey>`** — read `splitManifestPath` from disk, find the subtask with `jiraKey` in `groups[*].subtasks[*]`, pass it as `manifestEntry` to workflow args. The `input` arg becomes the subtask's `description` field.
-4. **`--intake <gatedIntakeManifestPath>`** — the **PROCEED output of harness-bridge Handoff A**. Read the gated intake manifest from disk and pass the parsed object as `args.gatedIntake`. This flag makes the gated manifest authoritative over the ticket text for size, file scope, and AC list (**manifest supremacy**). Does NOT require `--entry` and does NOT skip Intake — the normal Intake phase still runs but receives the gated manifest's verified numbers as ground truth, overriding any file count or size the ticket text claims. `--intake` and `--refine` may both be present (a refine pass also carries the same gated intake); when both are set, pass both.
+3. **`--entry <id>`** — plan ONE subtask of the manifest given by `--intake` (or the legacy `--manifest`). The id is a subtask's `id` field: `G1-1`, `G1-2`, `G2-1` — assigned deterministically by harness-intake, group then position. Resolve it with `resolveManifestEntry` from `lib/manifest-entry.js`; do **not** hand-write the lookup (see the note below). Pass the resolved object as `args.manifestEntry`, and its `description` as `args.input`.
+
+   `--entry` requires a manifest flag. Alone it has nothing to resolve against — STOP and say so.
+
+   ```js
+   import { resolveManifestEntry, listEntryIds } from './lib/manifest-entry.js'
+
+   const { entry, error } = resolveManifestEntry(gatedIntake, entryKey)
+   if (error) throw new Error(error)   // names the ids that DO exist
+   const manifestEntry = entry         // groundedReality/migrationPattern/sourceIssue already stitched in
+   ```
+
+   > **Do not inline this lookup.** It used to read
+   > `.flatMap(g => g.subtasks).find(s => s.jiraKey === entryKey)`, and both halves broke: nothing
+   > mints a `jiraKey` since harness-intake stopped creating Jira subtasks (decomps are phased
+   > commits on the PR), and `undefined === undefined` is true — so a missing `--entry` matched
+   > **subtask #1** and the run planned the wrong scope with no warning. `resolveManifestEntry`
+   > refuses an empty key, matches on `id` before any legacy `jiraKey`, and stitches the
+   > manifest-level ground truth onto the entry so the researcher never gets a stripped subtask.
+
+4. **`--intake <intakeManifestPath>`** — the manifest harness-intake wrote (its summary prints the exact path; the workflow writes it, no agent transcription involved). Read it from disk and pass the parsed object as `args.gatedIntake`. This makes the manifest authoritative over the ticket text for size, file scope, and AC list (**manifest supremacy**).
+
+   Two shapes, by whether `--entry` came with it:
+
+   | Invocation | Decompose strategy | Sized off |
+   |---|---|---|
+   | `--intake` + `--entry G1-1` | `manifest-entry` — plan that one subtask | the **subtask's** `targetSize`/`files` |
+   | `--intake` alone | `gated-intake-groups` — fan out over every group | the manifest's `size`/`files` |
+
+   Both run the normal Intake phase; `--intake` never skips it, it feeds it verified numbers that override any count the ticket text claims. `--intake` and `--refine` may both be present (a refine pass carries the same manifest); when both are set, pass both.
 
    ```js
    // Read gatedIntake when --intake (or --refine with a gatedIntakePath) is set
@@ -122,26 +150,25 @@ When the user invokes `/harness-plan [url] [flags]`:
      : null
    ```
 
-Example invocation with manifest entry:
+Example invocation with manifest entry (`/harness-plan --intake <path> --entry G1-1`):
 ```js
-const splitManifest = JSON.parse(fs.readFileSync(splitManifestPath, 'utf8'))
-const subtask = splitManifest.groups
-  .flatMap(g => g.subtasks)
-  .find(s => s.jiraKey === entryKey)
+import { resolveManifestEntry, deriveIssueKey } from './lib/manifest-entry.js'
 
-// Stitch top-level groundedReality into the subtask so the workflow researcher gets it
-const manifestEntry = {
-  ...subtask,
-  groundedReality: subtask.groundedReality || splitManifest.groundedReality || null,
-  migrationPattern: subtask.migrationPattern || splitManifest.migrationPattern || null,
-}
+const gatedIntake = JSON.parse(await Read(intakePath))
+const { entry: manifestEntry, error } = resolveManifestEntry(gatedIntake, entryKey)
+if (error) throw new Error(error)
 
 const [startTs, skillsCommit, runTs] = await Promise.all([
   Bash('python3 -c "import time; print(int(time.time()*1000))"').then(r => r.trim()),
   Bash('git -C ~/Desktop/Repos/skills rev-parse HEAD 2>/dev/null || git -C ~/.claude/skills rev-parse HEAD 2>/dev/null || echo unknown').then(r => r.trim()),
   Bash('python3 -c "from datetime import datetime, timezone; print(datetime.now(timezone.utc).strftime(\'%Y%m%dT%H%M%SZ\'))"').then(r => r.trim()),
 ])
-const runId = `${entryKey || 'plan'}-${runTs}`
+// `deriveIssueKey`, not `entryKey` — a runId must be globally unique and joinable to a ticket.
+// `entryKey` is now `G1-1`, which restarts at G1-1 in every manifest, so `G1-1-<runTs>` collides
+// across unrelated runs and joins to nothing. The same derivation runs inside the workflow for
+// the telemetry filename, so both agree by construction.
+// (Under harness-run the conductor passes its own runId in args, so all three stages share one.)
+const runId = `${deriveIssueKey({ input: manifestEntry?.description, entry: manifestEntry })}-${runTs}`
 
 const result = await Workflow({
   scriptPath: '/Users/206618626@bwt3.com/.claude/skills/harness-plan/workflow.js',
@@ -169,7 +196,8 @@ Sizing is determined by the Intake phase inside the workflow — the assistant d
 |------|---------|--------------|
 | **Auto** | Intake returns XS/S + no ambiguity | Workflow fires immediately |
 | **XS fast path** | Intake returns XS + no `--forceplan` | Skip Research→Coverage, write minimal plan directly |
-| **Manifest entry** | `--manifest` flag or `manifestEntry` arg | Skip Intake + Decompose, inject files/scopePath/pattern |
+| **Manifest entry** | `--entry <id>` resolved, i.e. `manifestEntry` arg set | Skip Intake + Decompose, inject the subtask's files/scopePath/pattern. Wins over the groups fan-out below, and the **subtask's** size/files win over the manifest's. |
+| **Gated intake groups** | `--intake` with `groups[]` and **no** `--entry` | Fan out one concern per subtask across all groups; sized off the manifest |
 | **Confirm** | Intake returns M, or any ambiguity | One approval gate before commit |
 | **Grill me** | Intake returns L, or `--grill-me` flag | Q&A first, then workflow fires |
 

@@ -433,6 +433,103 @@ ${patchCmd}
 Report "TELEMETRY_OK" or "TELEMETRY_ERROR: <reason>". If step 1 fails, say so explicitly —
 a silent failure here is the bug this agent exists to fix.`
 }
+// ----- manifest-write.js mirror -----
+/**
+ * Stamp a deterministic `id` onto every subtask: `G1-1`, `G1-2`, `G2-1`, …
+ *
+ * Per-group and 1-based, so the id states which wave the task belongs to and where it sits
+ * inside it — `G2-1` reads as "first task of the second wave". A global counter would render
+ * that same task `G2-3` and the id would carry no wave information.
+ *
+ * The subtask's own `groupId` wins over the enclosing group's. `propagateManifestFields` sets
+ * it per subtask and the group wrapper is derived FROM it, so if the two ever disagree the
+ * subtask's value is what harness-plan actually reads.
+ *
+ * An existing id is left alone: a second pass over an already-identified manifest must be a
+ * no-op, or ids that `dependsOn` and `--entry` already point at get silently renumbered.
+ *
+ * Mutates in place and returns the same array — the workflow passes `groups` straight into
+ * `intakeManifest`, so a returned clone would leave the manifest on disk id-less.
+ */
+function _assignSubtaskIds(groups) {
+  if (!Array.isArray(groups)) return groups
+  for (const group of groups) {
+    const subtasks = group?.subtasks
+    if (!Array.isArray(subtasks)) continue
+    let n = 0
+    for (const s of subtasks) {
+      n++
+      if (!s || typeof s !== 'object' || s.id) continue
+      s.id = `${s.groupId || group?.groupId || 'G?'}-${n}`
+    }
+  }
+  return groups
+}
+
+/**
+ * Where the intake manifest goes.
+ *
+ * Same `__`-delimited convention as buildTelemetryPath, so both artifacts of one run carry
+ * the same four segments and sort together:
+ *   {repoPath}/docs/manifests/{repo}__harness-intake__{key}__{ts}__manifest.json
+ *
+ * Absolute by construction. SKILL.md asked for that in prose ("Path must be absolute … NOT
+ * docs/manifests/") because a relative path resolves against whatever cwd the main agent
+ * happened to hold; prose could not enforce it, a function can.
+ *
+ * repoName is preferred over the repoPath tail so a conductor worktree run writes
+ * `webtarsthree__…` rather than `wt-TARS-1271-…__…`.
+ */
+function _buildManifestPath({ repoPath, repoName, issueKey, timestamp }) {
+  const repo = repoName || (repoPath || '').replace(/\/$/, '').split('/').pop() || 'repo'
+  const key  = issueKey || 'intake'
+  const ts   = timestamp || 'unknown-ts'
+  return `${repoPath}/docs/manifests/${repo}__harness-intake__${key}__${ts}__manifest.json`
+}
+
+/**
+ * The prompt for the Debrief manifest-write agent.
+ *
+ * The manifest is stated as pretty-printed JSON data for the agent to write with the Write
+ * tool — never interpolated into a shell command. Manifest strings come from ticket text and
+ * agent output, so `$(…)`, backticks and quotes all pass through here; as data they are inert.
+ *
+ * Pretty-printed on purpose: this file is read by humans reviewing a split and by
+ * `harness-plan --intake`, and a one-line 13KB JSON blob is hostile to the former.
+ *
+ * States OVERWRITE explicitly, which is the opposite of the telemetry prompt's APPEND. One
+ * manifest is one JSON document per run and appending to it produces a file no parser
+ * accepts; the telemetry file is JSONL and overwriting it destroys prior runs. Getting the
+ * two backwards corrupts one artifact or the other, so neither leaves it implied.
+ *
+ * @returns {string|null} null when there is nothing to write, so the caller can skip the
+ *   agent rather than spawn one to write nothing.
+ */
+function _buildManifestWritePrompt({ manifestPath, manifest }) {
+  if (!manifestPath || !manifest) return null
+
+  return `Write this skill's intake manifest to disk. One step.
+
+Write the JSON below to exactly this absolute path, using the Write tool:
+  ${manifestPath}
+
+Create the parent directory first if it does not exist (mkdir -p "$(dirname '${manifestPath}')").
+
+OVERWRITE the file if it already exists — this is one JSON document describing one run, not
+a log. Do NOT append: appending produces a file no JSON parser will accept, and
+\`harness-plan --intake\` reads this path directly.
+
+Write the content verbatim, exactly as given. Do not reformat, re-key, summarize, add fields,
+or "fix" anything — every field here is part of the handoff contract with harness-plan, and a
+dropped key becomes a silently missing scope boundary downstream:
+
+${JSON.stringify(manifest, null, 2)}
+
+Report "MANIFEST_OK <path>" or "MANIFEST_ERROR: <reason>". If the write fails, say so
+explicitly — the whole downstream chain reads this file, so a silent failure here strands the
+run with no way to continue.`
+}
+
 // ----- telemetry-validate.js mirror -----
 // Graded in Debrief, logged, never fatal. lib/inline-mirror.test.js compares every
 // declaration below against lib/telemetry-validate.js on shared fixtures.
@@ -649,6 +746,41 @@ async function _writeAuditRecord({ telemetryPath, records, startTs }) {
   }
 }
 
+/**
+ * Write the intake manifest, and return the path it landed at.
+ *
+ * This used to be SKILL.md steps 6 and 11 — prose asking the main agent to write the manifest
+ * after Workflow() returned, which is the exact shape of the telemetry append that silently
+ * never happened for the whole bridge era. Losing the manifest is worse than losing a record:
+ * `harness-plan --intake` reads this path and there is no second copy, so the run is stranded
+ * rather than merely unaudited.
+ *
+ * Failure is logged loudly but never thrown. By the time this runs the split is computed and
+ * the summary printed, and discarding that to report a file-write error is strictly worse than
+ * saying the write failed and handing back the manifest in the return value.
+ */
+async function _writeIntakeManifest({ manifest, timestamp }) {
+  if (!manifest) return null
+  const manifestPath = _buildManifestPath({
+    repoPath,
+    repoName: args.repoName || null,
+    issueKey,
+    timestamp: timestamp || args.runTs || 'unknown-ts',
+  })
+  const prompt = _buildManifestWritePrompt({ manifestPath, manifest })
+  if (!prompt) {
+    log(`Manifest: nothing to write (path=${manifestPath ? 'ok' : 'missing'})`)
+    return null
+  }
+  try {
+    await agent(prompt, { label: 'write-manifest', phase: 'Debrief', model: 'claude-haiku-4-5-20251001', effort: 'low' })
+    log(`Manifest: wrote → ${manifestPath}`)
+  } catch (err) {
+    log(`⚠️  Manifest: write FAILED — ${err?.message || err}. harness-plan --intake has nothing to read; the manifest is in this run's return value under intakeManifest.`)
+  }
+  return manifestPath
+}
+
 // telemetryPath: built from args.runId + args.runTs passed by SKILL.md wrapper.
 // No timestamp agent needed — wrapper captures wall-clock before/after Workflow().
 let _telemetryPath = null
@@ -858,7 +990,7 @@ const SPLIT_SCHEMA = {
           dependsOn:          { type: 'array', items: { type: 'string' } },
           targetSize:         { type: 'string', enum: ['XS', 'S', 'M'] },
           isDeferred:         { type: 'boolean', description: 'true for non-file-migration work: additions, config, package changes, install steps — always G2' },
-          needsReview:        { type: 'boolean', description: 'true for auto-generated stubs where human must verify scope before Jira creation' },
+          needsReview:        { type: 'boolean', description: 'true for auto-generated stubs where a human must verify scope before this subtask is planned' },
         },
       },
     },
@@ -1370,12 +1502,16 @@ harness-intake
     intakeManifest,
   })
   log(skipSummary)
-  // The XS/S/M skip is a full run with a real record — it must write, same as the L path.
+  // The XS/S/M skip is a full run with a real record — it must write both artifacts, same as
+  // the L path. Manifest first, so the record can name the path it actually landed at.
+  const intakeManifestPath = await _writeIntakeManifest({ manifest: intakeManifest })
+  auditRecord.intakeManifestPath = intakeManifestPath
   await _writeAuditRecord({ telemetryPath: _telemetryPath, records: [auditRecord], startTs: args.startTs })
   return {
     splitRequired: false,
     size,
     intakeManifest,
+    intakeManifestPath,
     // Same key as the L path below, so a conductor reading `status` gets a value on
     // every path. This path is unconditionally COMPLETE — it is the clean XS/S/M
     // skip, and the audit record above is built with 'COMPLETE' to match.
@@ -1701,7 +1837,7 @@ for (const r of validAcResults) {
 const acBullets = acList.map(ac => ac.bullet)
 // Zero-file ACs: only create a stub if it's a migration concern (implies real file work).
 // Validation/cleanup/deferred ACs with no files are done-conditions — they belong as
-// acceptance criteria on an existing subtask, not as standalone Jira subtasks.
+// acceptance criteria on an existing subtask, not as standalone subtasks of their own.
 const doneConditionAcs = []
 for (const r of zeroCoverageAcs) {
   const { isMigration } = classifyAcBullet(r.acBullet)
@@ -1981,7 +2117,7 @@ if (!structuralPass) {
   if (!structuralScore.stubsUnder4) failures.push(`too many stubs (${mergeResult.subtasks.filter(s => s.needsReview).length} > 4)`)
   if (!structuralScore.hasMixedOrParallel) failures.push(`unexpected execution mode: ${mergeResult.execution}`)
   if (structuralScore.g1Count === 0) failures.push('no G1 subtasks produced')
-  log(`⚠️  STRUCTURAL VALIDATOR FAILED: ${failures.join(' | ')} — flag for review before Jira creation`)
+  log(`⚠️  STRUCTURAL VALIDATOR FAILED: ${failures.join(' | ')} — review the split before handing it to harness-plan`)
   qualityIssues.push(`structural: ${failures.join('; ')}`)
 } else {
   log(`✅ Structural validator passed — phase-c:${grepAcs.length}/${grepAcs.length} G1:${structuralScore.g1Count} deps:wired oversized:none stubs:${mergeResult.subtasks.filter(s => s.needsReview).length}`)
@@ -2002,13 +2138,19 @@ const groups = Object.entries(groupMap)
   .map(([groupId, subtasks]) => ({
     groupId,
     parallel: subtasks.every(s => s.canRunInParallel),
-    subtasks,  // jiraKey/jiraUrl added by SKILL.md after Jira creation
+    subtasks,
   }))
+
+// Stamp G1-1, G1-2, G2-1 … onto every subtask. This is the stable handle harness-plan's
+// `--entry` addresses and the one thing that survives a retitle: it replaces `jiraKey`, which
+// only existed because a createJiraIssue call minted it behind a human confirmation gate.
+// Decomps are phased commits on the PR now, so nothing mints keys and the alternative handle
+// would be the title — long, punctuated, and rewritten whenever the split agent rewords.
+_assignSubtaskIds(groups)
 
 const groundedReality = verifyResult?.groundedReality || null
 
 // intakeManifest for L — same contract as XS/S/M but adds groups[] for harness-plan fan-out.
-// SKILL.md injects jiraKey/jiraUrl per subtask before writing to disk.
 const intakeManifest = {
   skill: 'harness-intake',
   sourceIssue: issueKey || null,
@@ -2064,10 +2206,17 @@ const auditRecord = _buildAuditRecord(planStatus, {
 })
 
 // Build CLI group display lines
+// Write the manifest before the summary, so `next:` can name the real path rather than a
+// placeholder the user has to go find. Both artifacts of this run land in Debrief together.
+const intakeManifestPath = await _writeIntakeManifest({ manifest: intakeManifest })
+auditRecord.intakeManifestPath = intakeManifestPath
+
+// The id leads each line: it is what `--entry` takes, so the summary doubles as the list of
+// commands available to run next.
 const groupLines = groups.map(g => {
   const parallelLabel = g.parallel ? '— parallel' : '— sequential'
   const taskLines = g.subtasks.map(t =>
-    `    ${t.title.padEnd(55)}  ${String(t.estimatedFileCount).padStart(2)} files  → ${t.targetSize}`
+    `    ${(t.id || '?').padEnd(6)}${t.title.padEnd(52)}  ${String(t.estimatedFileCount).padStart(2)} files  → ${t.targetSize}`
   ).join('\n')
   return `  [${g.groupId} ${parallelLabel}]\n${taskLines}`
 }).join('\n\n')
@@ -2113,6 +2262,17 @@ const triageSizeLineLpath = triageSizeOverride
   ? `\n  triage:  estimated ${triageSizeOverride.triageSize} → verified ${triageSizeOverride.groundedSize} (ticket claims overridden by research)`
   : ''
 
+// G1 has no dependsOn, so every G1 subtask is runnable now — the next-step block lists one
+// command per id rather than telling the user to go read the manifest and work it out. G2/G3
+// are named but not printed as commands: they are gated on G1's commits landing.
+const g1Ids = (groups.find(g => g.groupId === 'G1')?.subtasks || []).map(s => s.id).filter(Boolean)
+const laterCount = groups.filter(g => g.groupId !== 'G1').reduce((n, g) => n + (g.subtasks?.length || 0), 0)
+const nextBlock = intakeManifestPath && g1Ids.length
+  ? `  next:     plan each G1 subtask — they are independent, so these can run concurrently:\n` +
+    g1Ids.map(id => `    /harness-plan --intake ${intakeManifestPath} --entry ${id}`).join('\n') +
+    (laterCount ? `\n            then ${laterCount} more in G2/G3 once G1's commits land.` : '')
+  : `  next:     /harness-plan --intake ${intakeManifestPath || '<manifest write failed — see log>'}`
+
 const cliSummary = `
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 harness-intake
@@ -2123,8 +2283,9 @@ harness-intake
   subtasks: ${mergeResult.subtasks.length}  ·  ${mergeResult.execution}${conflictLines ? '\n  framing:  corrected — ticket claims overridden by verified counts' : ''}
   quality:  ${qualityLine}
 ${groupLines}
-${doneConditionAcs.length > 0 ? `  done-conditions:\n${doneConditionAcs.map(ac => `    · ${ac.slice(0, 80)}`).join('\n')}\n` : ''}
-  next:     confirm → create Jira subtasks → /harness-plan each G1 subtask
+${doneConditionAcs.length > 0 ? `  done-conditions:\n${doneConditionAcs.map(ac => `    · ${ac.slice(0, 80)}`).join('\n')}\n` : ''}  manifest: ${intakeManifestPath || '⚠️  WRITE FAILED — see log above'}
+
+${nextBlock}
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`
 
 log(cliSummary)
@@ -2139,6 +2300,7 @@ return {
   migrationPattern,
   splitPlan: mergeResult,
   intakeManifest,
+  intakeManifestPath,
   totalFilesFound,
   qualityIssues,
   status: planStatus,

@@ -17,7 +17,9 @@ export const meta = {
 // input: raw text — Jira ticket, freeform description, rough notes
 // manifestEntry: one subtask from split-manifest.json groups[*].subtasks[*]
 //   When present: skip Intake + Decompose entirely — size/files/scopePath already known
-//   Required fields: { title, description, scopePath?, files?, migrationPattern?, size?, jiraKey? }
+//   Required fields: { title, description, scopePath?, files?, migrationPattern?, size?, id? }
+//   `id` is the G<n>-<i> handle --entry addresses; it replaced jiraKey when harness-intake
+//   stopped creating Jira subtasks. Legacy manifests carrying jiraKey still resolve.
 // forceplan: when true, skip XS fast path and run full pipeline even for XS
 // qaAnswers: string — collected Q&A answers from grill-me session (L-size or flag)
 // refine: { flags, probeResults, priorPlanManifestPath, gatedIntakePath } | null
@@ -62,7 +64,7 @@ function _buildV2Record(status, extra = {}) {
   // args.repoName is the canonical repo (e.g. 'webtarsthree'), passed by a conductor
   // whose repoPath is a worktree. Falls back to the path tail for standalone runs.
   const repo = args.repoName || (repoPath || '').replace(/\/$/, '').split('/').pop() || null
-  const issueKey = (input || '').match(/\b([A-Z]+-\d+)\b/)?.[1] || manifestEntry?.jiraKey || _slugFromInput(input)
+  const issueKey = _deriveIssueKey({ input, entry: manifestEntry })
   return {
     schemaVersion: '2.0',
     runId:         args.runId || null,
@@ -135,7 +137,7 @@ function _buildAuditRecord(status, extra = {}) {
   if (!_telemetryPath) {
     // issueKey precedence is plan-specific (ticket text → manifest key → slug); the path
     // assembly itself goes through the mirrored builder so it cannot drift from lib/.
-    const issueKey = (input || '').match(/\b([A-Z]+-\d+)\b/)?.[1] || manifestEntry?.jiraKey || _slugFromInput(input)
+    const issueKey = _deriveIssueKey({ input, entry: manifestEntry })
     _telemetryPath = _buildTelemetryPath({
       repoPath,
       repoName:  args.repoName || null,
@@ -237,11 +239,27 @@ const _PLAN_OUTCOME_MAP = {
 }
 function toOutcome(status) { return _PLAN_OUTCOME_MAP[status] ?? 'failed' }
 // lib/decompose-strategy.js — keep identical.
+// manifest-entry is FIRST: `--entry` is an explicit narrowing instruction, a manifest that
+// merely carries groups is not. See the lib file for why the ordering flipped.
 function selectDecomposeStrategy(args, size, manifestEntry) {
-  if (args?.gatedIntake?.groups?.length) return 'gated-intake-groups'
   if (manifestEntry) return 'manifest-entry'
+  if (args?.gatedIntake?.groups?.length) return 'gated-intake-groups'
   if (size === 'L' || size === 'M') return 'llm-decompose'
   return 'skip'
+}
+// lib/sizing-source.js — keep identical.
+function _selectSizingSource(args, manifestEntry) {
+  const gated = args && typeof args === 'object' ? args.gatedIntake : null
+  const entry = manifestEntry && typeof manifestEntry === 'object' ? manifestEntry : null
+  if (!gated && !entry) return null
+  const size = entry?.size || entry?.targetSize || gated?.size || 'S'
+  const files = Array.isArray(entry?.files) ? [...entry.files]
+    : Array.isArray(gated?.files) ? [...gated.files]
+    : []
+  const acList = Array.isArray(entry?.acList) ? [...entry.acList]
+    : Array.isArray(gated?.acList) ? [...gated.acList]
+    : []
+  return { size, files, acList }
 }
 // lib/plan-grouping.js — keep identical.
 const _FILE_BUDGET_CAP = 8
@@ -346,6 +364,38 @@ ${patchCmd}
 Report "TELEMETRY_OK" or "TELEMETRY_ERROR: <reason>". If step 1 fails, say so explicitly —
 a silent failure here is the bug this agent exists to fix.`
 }
+// ----- manifest-entry.js mirror -----
+/**
+ * The ticket key this run should be filed under.
+ *
+ * Precedence, and why each step is where it is:
+ *
+ *   1. A `[A-Z]+-\d+` in the input text — the most specific statement available, and what a
+ *      user typing a URL or pasting a ticket expects.
+ *   2. The entry's `sourceIssue` — the parent ticket the manifest was built from. This is the
+ *      step that was missing: the middle of the old chain was `manifestEntry?.jiraKey`, now
+ *      always undefined, so a subtask description that does not happen to quote its own ticket
+ *      key fell straight through to the slug. The record then lands under
+ *      `migrate-campaigns-to-clientfetch` and cannot be joined to TARS-1271 or to the intake
+ *      record of the same logical run — which defeats the shared runId.
+ *   3. A legacy `jiraKey`, for manifests written before subtask creation was removed.
+ *   4. A slug of the input.
+ *
+ * A subtask `id` is deliberately NOT in this chain. `G1-1` is not a ticket, and ids restart at
+ * G1-1 in every manifest, so filing telemetry under one would collide across unrelated runs.
+ *
+ * Never returns null: the value becomes a filename segment, and a null there yields
+ * `__null__` in a path the dashboard parses into four bad `__` segments.
+ */
+function _deriveIssueKey(opts) {
+  // Read off a local rather than destructuring in the signature: a parameter default only
+  // applies to `undefined`, so `_deriveIssueKey(null)` would throw on destructure. Callers pass
+  // `{input, entry: manifestEntry}` where manifestEntry is routinely null.
+  const { input, entry } = opts || {}
+  const fromText = String(input || '').match(/\b([A-Z]+-\d+)\b/)?.[1]
+  return fromText || entry?.sourceIssue || entry?.jiraKey || _slugFromInput(input)
+}
+
 // ----- telemetry-validate.js mirror -----
 // Graded in Debrief, logged, never fatal. lib/inline-mirror.test.js compares every
 // declaration below against lib/telemetry-validate.js on shared fixtures.
@@ -791,20 +841,24 @@ let intakeResult = null
 // gated manifest's verified numbers as ground truth (see gatedIntakeBlock below).
 //
 // Field shape comparison:
-//   manifestEntry (split subtask):  { size, files, acList?, ... }
-//   gatedIntake (harness-bridge):   { size, files, acList, ... }
-//   Both carry .size and .files — compatible for sizing. Use .acList from whichever is present.
-const sizingSource = args.gatedIntake || manifestEntry || null
+//   manifestEntry (named subtask):  { targetSize|size, files, acList?, ... }
+//   gatedIntake (intake manifest):  { size, files, acList, groups, ... }
+//
+// Merged field-by-field by _selectSizingSource, entry first — NOT `gatedIntake || manifestEntry`,
+// which is what this was. `--intake <manifest> --entry G1-1` supplies both, so the manifest won
+// and a run asked to plan one subtask sized itself off the whole ticket: L instead of S, 92 files
+// instead of 8. Supremacy is a verified manifest outranking ticket prose, not a manifest's
+// aggregate outranking a subtask drawn from that same manifest.
+const sizingSource = _selectSizingSource(args, manifestEntry)
 
 if (manifestEntry) {
   // ── manifestEntry fast path: skip Intake + Decompose entirely ──────────────
-  // harness-split already sized this subtask — trust it.
-  // On a refine pass (sizingSource = gatedIntake), use the gated manifest's size and files
-  // instead of the subtask's raw values — manifest supremacy.
+  // The named subtask was already sized and scoped by whoever produced the manifest — trust it,
+  // and prefer its own numbers over the manifest-wide ones it sits inside.
   size = sizingSource.size || 'S'
   architectModel = researcherModel
   decomposeModel = researcherModel
-  log(`Fast path: manifest entry — skipping Intake + Decompose. size=${size} files=${(sizingSource.files || []).length}${refine ? ' (manifest-supremacy: gated intake)' : ''}`)
+  log(`Fast path: manifest entry ${manifestEntry.id || manifestEntry.title || ''} — skipping Intake + Decompose. size=${size} files=${(sizingSource.files || []).length}${args.gatedIntake ? ' (of a gated intake manifest)' : ''}`)
   partialState.size = size
 } else {
   // ── Normal path: Intake ────────────────────────────────────────────────────
@@ -1716,7 +1770,8 @@ const manifestObj = {
   title: (input || '').split('\n')[0].slice(0, 80).trim(),
   size,
   execution,
-  sourceSubtask: manifestEntry?.jiraKey || null,
+  // Which intake subtask this plan covers: `G1-2`, or a legacy jiraKey on an older manifest.
+  sourceSubtask: manifestEntry?.id || manifestEntry?.jiraKey || null,
   plans: depsEntries.map(e => ({
     id: e.suffix,
     path: `docs/manifests/${e.fileName}`,

@@ -16,6 +16,9 @@ import { readFileSync } from 'node:fs'
 import { buildTelemetryPath, deriveTelemetryDir, repoNameFromPath, slugFromInput } from './telemetry.js'
 import { buildWriteAgentPrompt, buildDurationPatchCmd } from './telemetry-write.js'
 import { validateV2Record, classifyV2Record, pendingFieldsFor, REQUIRED_V2_KEYS } from './telemetry-validate.js'
+import { deriveIssueKey } from './manifest-entry.js'
+import { selectSizingSource } from './sizing-source.js'
+import { selectDecomposeStrategy } from './decompose-strategy.js'
 
 const WORKFLOW_SRC = readFileSync(new URL('../workflow.js', import.meta.url), 'utf8')
 
@@ -217,5 +220,75 @@ test('inline _pendingFieldsFor is byte-identical to lib pendingFieldsFor', () =>
   const inline = loadInline('_pendingFieldsFor')
   for (const c of [{ startTs: '1' }, { startTs: 1 }, { startTs: null }, { startTs: '' }, { startTs: 0 }, {}, null, undefined, 'nope', 42]) {
     assert.deepEqual(inline(c), pendingFieldsFor(c), `mirror drift for ${JSON.stringify(c)}`)
+  }
+})
+
+// ── The issue-key derivation (Jira-gate removal) ──────────────────────────────
+//
+// This one function decides the filename every telemetry record for the run lands under, and it
+// is called from two separate sites in workflow.js. Drift means the record is filed under a
+// different key than the tests describe — and the failure is a name nobody can join back to the
+// ticket, which reads as a missing record rather than a misfiled one.
+
+test('inline _deriveIssueKey is byte-identical to lib deriveIssueKey', () => {
+  const inline = loadInline('_deriveIssueKey', ['_slugFromInput'])
+  const cases = [
+    { input: 'TARS-1271: migrate the client', entry: { sourceIssue: 'MC-9' } },
+    { input: 'Migrate campaigns to clientFetch', entry: { sourceIssue: 'TARS-1271' } },
+    { input: 'do work', entry: { jiraKey: 'TARS-1275' } },
+    { input: 'do work', entry: { sourceIssue: 'TARS-1271', jiraKey: 'TARS-1275' } },
+    { input: 'do work', entry: { id: 'G1-1' } },
+    { input: 'Add dark mode to the dashboard', entry: null },
+    { input: '', entry: {} },
+    { input: null, entry: null },
+    {}, null, undefined,
+  ]
+  for (const c of cases) {
+    assert.equal(inline(c), deriveIssueKey(c), `mirror drift for ${JSON.stringify(c)}`)
+  }
+})
+
+// ── Which subtask, and sized off what ────────────────────────────────────────
+//
+// These two decide, respectively, how many subtasks a run plans and how big it thinks the one
+// it planned is. Both were wrong in the same way before this: they resolved `--intake` against
+// `--entry` by preferring the manifest, and both failures are silent — the run completes and
+// produces plausible output at the wrong scope. So drift here is not a crash, it is a plan for
+// work nobody asked for, which is precisely the kind of bug a mirror test exists to catch.
+
+test('inline selectDecomposeStrategy is byte-identical to the lib version', () => {
+  const inline = loadInline('selectDecomposeStrategy')
+  const GROUPS = { gatedIntake: { size: 'L', groups: [{ groupId: 'G1', subtasks: [{ id: 'G1-1' }] }] } }
+  const cases = [
+    [GROUPS, 'L', { id: 'G1-1' }],          // --intake --entry: the case that flipped
+    [GROUPS, 'S', { id: 'G1-1' }],
+    [GROUPS, 'L', null],                    // --intake alone: fan-out
+    [{ gatedIntake: { groups: [] } }, 'L', null],
+    [{ gatedIntake: null }, 'M', null],
+    [{}, 'L', null], [{}, 'M', null], [{}, 'S', null], [{}, 'XS', null],
+    [{}, 'S', { title: 'T1' }],
+    [null, 'XS', null], [undefined, undefined, undefined],
+  ]
+  for (const c of cases) {
+    assert.equal(inline(...c), selectDecomposeStrategy(...c), `mirror drift for ${JSON.stringify(c)}`)
+  }
+})
+
+test('inline _selectSizingSource is byte-identical to lib selectSizingSource', () => {
+  const inline = loadInline('_selectSizingSource')
+  const GATED = { size: 'L', files: ['a.js', 'b.js', 'c.js'], acList: ['x', 'y'] }
+  const cases = [
+    [{ gatedIntake: GATED }, { id: 'G1-1', size: 'S', files: ['a.js'] }],   // both: the bug
+    [{ gatedIntake: GATED }, { id: 'G1-1', targetSize: 'XS', files: [] }],  // explicit empty scope
+    [{ gatedIntake: GATED }, { id: 'G1-1' }],                               // no files key: inherit
+    [{ gatedIntake: GATED }, { id: 'G1-1', size: 'M', targetSize: 'XS', files: ['a.js'] }],
+    [{ gatedIntake: GATED }, { id: 'G1-1', acList: ['own'] }],
+    [{ gatedIntake: GATED }, null],
+    [{}, { id: 'G1-1', size: 'S', files: ['a.js'] }],
+    [{ gatedIntake: { size: 'M' } }, null],
+    [{}, null], [null, null], [undefined, undefined], [{ gatedIntake: null }, null],
+  ]
+  for (const c of cases) {
+    assert.deepEqual(inline(...c), selectSizingSource(...c), `mirror drift for ${JSON.stringify(c)}`)
   }
 })

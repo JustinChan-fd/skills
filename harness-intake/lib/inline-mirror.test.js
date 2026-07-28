@@ -16,6 +16,7 @@ import { readFileSync } from 'node:fs'
 import { buildTelemetryPath, deriveTelemetryDir, repoNameFromPath, slugFromInput } from './telemetry.js'
 import { buildWriteAgentPrompt, buildDurationPatchCmd } from './telemetry-write.js'
 import { validateV2Record, classifyV2Record, pendingFieldsFor, REQUIRED_V2_KEYS } from './telemetry-validate.js'
+import { assignSubtaskIds, buildManifestPath, buildManifestWritePrompt } from './manifest-write.js'
 
 const WORKFLOW_SRC = readFileSync(new URL('../workflow.js', import.meta.url), 'utf8')
 
@@ -208,6 +209,66 @@ test('inline _classifyV2Record agrees with lib classifyV2Record on every fixture
   const inline = loadInline('_classifyV2Record', ['_REQUIRED_V2_KEYS', '_OUTCOME_FOR_STATUS', '_DASH_FIELDS', '_STUB_KEY_FLOOR', '_validateV2Record'])
   for (const rec of VALIDATOR_CASES) {
     assert.deepEqual(inline(rec), classifyV2Record(rec), `mirror drift for ${label(rec)}`)
+  }
+})
+
+// ── The manifest write (Jira-gate removal) ────────────────────────────────────
+//
+// The manifest is the artifact the entire downstream chain keys off — no manifest, no
+// `--intake`, no harness-plan. It used to be written by the main agent from SKILL.md prose,
+// the same shape as the telemetry append that silently never ran. Now that it is an
+// in-workflow agent, a drifted mirror would mean the tested path and the written path are
+// different files.
+
+test('inline _assignSubtaskIds agrees with lib assignSubtaskIds', () => {
+  const inline = loadInline('_assignSubtaskIds')
+  const fixtures = () => [
+    [{ groupId: 'G1', subtasks: [{ title: 'a' }, { title: 'b' }] }, { groupId: 'G2', subtasks: [{}] }],
+    [{ groupId: 'G1', subtasks: [{ id: 'G1-7' }, {}] }],
+    [{ groupId: 'G1', subtasks: [{ groupId: 'G2' }] }],
+    [{ subtasks: [{}] }],
+    [{ subtasks: null }],
+    [{}],
+    [],
+  ]
+  const a = fixtures().map(g => JSON.stringify(inline(g)))
+  const b = fixtures().map(g => JSON.stringify(assignSubtaskIds(g)))
+  assert.deepEqual(a, b)
+  // Degenerate inputs must be inert on both sides, identically.
+  for (const bad of [null, undefined, 'nope', 42]) {
+    assert.equal(JSON.stringify(inline(bad)), JSON.stringify(assignSubtaskIds(bad)), `mirror drift for ${bad}`)
+  }
+})
+
+test('inline _buildManifestPath is byte-identical to lib buildManifestPath', () => {
+  const inline = loadInline('_buildManifestPath')
+  const cases = [
+    { repoPath: '/Users/me/Desktop/Repos/webtarsthree', issueKey: 'TARS-1271', timestamp: '20260728T022825Z' },
+    { repoPath: '/Users/me/Desktop/Repos/wt-TARS-1271-20260727T194141Z', repoName: 'webtarsthree', issueKey: 'TARS-1271', timestamp: 'ts' },
+    { repoPath: '/r/Desktop/Repos/x', issueKey: null, timestamp: 'ts' },
+    { repoPath: '/r/Desktop/Repos/x', issueKey: 'A-1' },
+    { repoPath: '/r/Desktop/Repos/x/', issueKey: 'A-1', timestamp: 'ts' },
+    { repoPath: '', issueKey: 'A-1', timestamp: 'ts' },
+  ]
+  for (const c of cases) {
+    assert.equal(inline(c), buildManifestPath(c), `mirror drift for ${JSON.stringify(c)}`)
+  }
+})
+
+test('inline _buildManifestWritePrompt is byte-identical to lib buildManifestWritePrompt', () => {
+  // A long template literal whose text IS the contract with the write agent — the most
+  // drift-prone shape there is, same as _buildWriteAgentPrompt above.
+  const inline = loadInline('_buildManifestWritePrompt')
+  const cases = [
+    { manifestPath: '/r/docs/manifests/m.json', manifest: { skill: 'harness-intake', size: 'M', groups: [] } },
+    { manifestPath: '/r/docs/manifests/m.json', manifest: { nested: { deep: [1, 2, { x: 'y' }] } } },
+    // Hostile payload: inert on both sides, identically.
+    { manifestPath: '/r/m.json', manifest: { sourceTitle: `$(id) \`whoami\` 'q' "d"` } },
+    { manifestPath: null, manifest: { a: 1 } },
+    { manifestPath: '/r/m.json', manifest: null },
+  ]
+  for (const c of cases) {
+    assert.equal(inline(c), buildManifestWritePrompt(c), `mirror drift for ${JSON.stringify(c).slice(0, 80)}`)
   }
 })
 
