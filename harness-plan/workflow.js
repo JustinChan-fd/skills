@@ -549,6 +549,148 @@ function _classifyV2Record(record, opts) {
   return { state: dashes.length ? 'PARTIAL' : 'FULL', dashes, pending, reasons, problems }
 }
 
+// ── BEGIN GENERATED: _splitOversizedTasks mirror of lib/split-oversized.js ──
+//
+// DO NOT EDIT BY HAND — run scripts/gen-split-mirror.mjs.
+/**
+ * Directory portion of a path, '' for a bare filename.
+ *
+ * A function declaration rather than an arrow const on purpose: the inline-mirror harness
+ * slices declarations out of workflow.js as text, and its const extractor can only balance a
+ * bracketed initialiser — an arrow body gets truncated at the first newline and the mirror
+ * fails to compile.
+ */
+function _dirOfPath(f) {
+  const i = String(f).lastIndexOf('/')
+  return i === -1 ? '' : String(f).slice(0, i)
+}
+
+/**
+ * Excel-style suffix: a…z, then aa, ab, … so ids stay unique past 26 chunks.
+ *
+ * A duplicate id is not cosmetic — harness-plan's revision loop and harness-implement both
+ * locate tasks with `findIndex(t => t.id === …)`, so two chunks sharing an id means one gets
+ * patched twice and the other never.
+ */
+function _chunkSuffixFor(n) {
+  let s = ''
+  let i = n
+  do { s = String.fromCharCode(97 + (i % 26)) + s; i = Math.floor(i / 26) - 1 } while (i >= 0)
+  return s
+}
+
+/**
+ * Group files by directory, then pack directories into chunks of at most `cap`.
+ *
+ * Directory-coherent rather than even N-way: files in one directory share imports and call
+ * shapes, so one agent amortizes what it learns across them. An even split scatters
+ * `campaigns/` across three agents that each rediscover the same pattern.
+ *
+ * A directory larger than `cap` is index-split within itself. Directories smaller than `cap`
+ * are packed together — otherwise 12 single-file directories become 12 agents each paying full
+ * context setup to edit one file, which is the opposite failure from the one being fixed.
+ */
+function _chunkFilesByDir(files, cap) {
+  const byDir = new Map()
+  for (const f of files) {
+    if (!byDir.has(_dirOfPath(f))) byDir.set(_dirOfPath(f), [])
+    byDir.get(_dirOfPath(f)).push(f)
+  }
+
+  const chunks = []
+  let current = []
+  for (const group of byDir.values()) {
+    if (group.length >= cap) {
+      // Big directory: flush what is packed, then split this one on its own.
+      if (current.length) { chunks.push(current); current = [] }
+      for (let i = 0; i < group.length; i += cap) chunks.push(group.slice(i, i + cap))
+      continue
+    }
+    if (current.length + group.length > cap) { chunks.push(current); current = [] }
+    current.push(...group)
+  }
+  if (current.length) chunks.push(current)
+  return chunks
+}
+
+/**
+ * Rewrite the parent's DONE assertions so each chunk can verify itself.
+ *
+ * Load-bearing. T05's DONE was a repo-wide grep that cannot pass until all 102 files convert,
+ * so no chunk could verify itself and every assertion failed until the last sibling finished —
+ * verifying nothing intermediate.
+ *
+ * Three strategies, in order:
+ *   1. Substitute the chunk's files for a path argument in the parent's criterion.
+ *   2. If no path is substitutable, synthesize a per-file loop over the chunk's files.
+ *   3. The last chunk additionally retains the parent's criteria verbatim as a closure check —
+ *      it is the only chunk for which a repo-wide assertion can legitimately pass.
+ */
+function _scopeChunkCriteria(criteria, chunkFilesList, isLast) {
+  const list = Array.isArray(criteria) ? criteria : []
+  const fileList = chunkFilesList.join(' ')
+
+  const scoped = list.map(c => {
+    const text = String(c)
+    // A bare path argument: `src/`, `src/client`, `./src/client/`. Deliberately does not match
+    // a filename (a criterion naming one file is already scoped).
+    const pathRe = /(^|\s)(\.?\/?(?:[\w.-]+\/)+[\w.-]*)(?=\s|$)/
+    const m = text.match(pathRe)
+    if (m && !/\.\w{1,4}$/.test(m[2])) {
+      return text.replace(pathRe, `$1${fileList}`)
+    }
+    return `${text} — verified over this task's files only: ${fileList}`
+  })
+
+  if (isLast && list.length) {
+    // Retained exactly once, and only here: a repo-wide check can only pass after every
+    // sibling has landed, which is true for the last chunk alone.
+    return [...scoped, ...list.map(String)]
+  }
+  return scoped
+}
+
+/**
+ * Split any task whose files[] exceeds `cap` into same-group parallel siblings.
+ *
+ * Tasks at or under the cap are returned BY IDENTITY, not copied — a fileless task (the XS fast
+ * path hardcodes `files: []`) and a small task must come back as the very same object, so a
+ * downstream `===` never silently stops matching.
+ *
+ * @param {object[]} tasks
+ * @param {number} cap - inclusive; `cap` files pass, `cap + 1` splits
+ * @returns {object[]} tasks in input order, each oversized task replaced by its chunks
+ */
+function _splitOversizedTasks(tasks, cap = _FILE_BUDGET_CAP) {
+  if (!Array.isArray(tasks)) return []
+
+  const out = []
+  for (const task of tasks) {
+    const files = Array.isArray(task?.files) ? task.files : null
+    if (!files || files.length <= cap) { out.push(task); continue }
+
+    const groups = _chunkFilesByDir(files, cap)
+    groups.forEach((chunkList, i) => {
+      const chunk = {
+        ...task,
+        id: `${task.id}${_chunkSuffixFor(i)}`,
+        title: `${task.title} (${_dirOfPath(chunkList[0]) || 'files'}, ${chunkList.length} files)`,
+        files: [...chunkList],
+        // Inherited unchanged: this is what rides harness-implement's group-parallel path and
+        // keeps the chunks landing as ONE commit.
+        groupId: task.groupId,
+        block: 'parallel',
+        acceptanceCriteria: _scopeChunkCriteria(task.acceptanceCriteria, chunkList, i === groups.length - 1),
+      }
+      // dependsOn is inherited by the spread. Siblings must NOT depend on each other — that
+      // would serialize them and undo the split.
+      out.push(chunk)
+    })
+  }
+  return out
+}
+// ── END GENERATED ──
+
 // ===== END PURE =====
 
 // The audit write, in code. Ported from harness-run/workflow.js:382 — the only place it has
@@ -920,19 +1062,41 @@ Return your sizing decision with a one-sentence reasoning and the repo layer lis
   partialState.concernCount = intakeResult.concernCount
 }
 
+// ─── Structural invariants: injected into the architect prompt on EVERY run ────
+//
+// These five were previously inside refineBlock, which is `refine ? … : ''`. `refine` is set
+// only by the bridge's Handoff-B refine loop, and the bridge has been parked since 2026-07-27 —
+// so the block evaluated to the empty string at every call, and the architect was never told
+// any of this. TARS-1271's T05 returning a 102-entry files[] was not an architect defying a
+// live rule; it was an architect that had never been given one.
+//
+// Four of the five are unconditional structural facts about a well-formed task, true on a first
+// pass exactly as on a refine pass. Only the weak-checks preamble is refine-specific, so only
+// that stays behind the flag.
+//
+// The file bound states the number AND the method. A flat "1–3 files" is what an architect
+// facing 102 files rationalizes past, because it supplies no mechanism; naming groupId +
+// parallel + disjoint files describes machinery that already exists in harness-implement.
+// Prompt text is still the secondary defence — `_splitOversizedTasks` enforces the bound
+// deterministically after the architect returns.
+const STRUCTURAL_INVARIANTS = `
+
+## STRUCTURAL INVARIANTS — every task, every run
+- task-spec-completeness → every task needs WHAT/WHERE/HOW and, when tddRequired, a literal DONE assertion + a fenced code snippet.
+- task-files-present-bounded → files[] MUST NOT exceed ${_FILE_BUDGET_CAP} entries; target 1–3 for non-mechanical work. If a concern touches more, emit MULTIPLE tasks sharing ONE groupId with block: "parallel" and DISJOINT files[] (no file in two tasks). They run concurrently and still land as a single commit, so a 102-file concern is 13+ tasks, not one. Each parallel sibling's DONE must be scoped to that sibling's own files — a repo-wide grep cannot pass until every sibling finishes, so it verifies nothing intermediate.
+- where-resolves-to-files → each WHERE names file:line that appears in that task's files[].
+- companion-edit-closure → if a task imports a module, the file that must change to satisfy that import is also in some task's files[] (e.g. the auth middleware index.js re-export).
+- concern-atomicity → one DONE per task; do not fold a distinct concern into another task.`
+
 // ─── Refine block: injected into architect prompt on --refine pass ────────────
-// Targets the Handoff-B flagged weak checks. Absent (empty string) on normal runs.
+// Refine-only content now — the flagged weak checks and the skeptic notes, which exist only on
+// a refine pass. The structural rules moved to STRUCTURAL_INVARIANTS above.
 const refineBlock = refine ? `
 
 ## REFINE PASS — the plan was gated below threshold at Handoff B
 Weak checks: ${(refine.flags || []).join(', ') || '(none named)'}.
 Skeptic notes: ${(refine.probeResults || []).map(p => `- ${p.reason}`).join('\n') || '(none)'}.
-Fix these specifically:
-- task-spec-completeness → every task needs WHAT/WHERE/HOW and, when tddRequired, a literal DONE assertion + a fenced code snippet.
-- task-files-present-bounded → every task carries 1–3 concrete files[]; split tasks that touch more.
-- where-resolves-to-files → each WHERE names file:line that appears in that task's files[].
-- companion-edit-closure → if a task imports a module, the file that must change to satisfy that import is also in some task's files[] (e.g. the auth middleware index.js re-export).
-- concern-atomicity → one DONE per task; do not fold a distinct concern into another task.
+Fix the named weak checks specifically, against the structural invariants above.
 
 ## MANIFEST SUPREMACY
 Use the GATED intake manifest as ground truth over the ticket for size and file scope:
@@ -1399,7 +1563,7 @@ ${JSON.stringify(architectResearch, null, 2)}
 
 ${securityNewSurface.length > 0 ? `NEW SECURITY SURFACE (address in tasks where relevant):
 ${securityNewSurface.map(s => `• ${s}`).join('\n')}` : ''}
-${qaAnswers ? `\nQA_ANSWERS:\n${qaAnswers}` : ''}${refineBlock}`,
+${qaAnswers ? `\nQA_ANSWERS:\n${qaAnswers}` : ''}${STRUCTURAL_INVARIANTS}${refineBlock}`,
       { label: `hp-architect:${concern.label}`, phase: 'Architect', model: architectModel, effort: 'high', schema: ARCHITECT_SCHEMA, agentType: 'hp-architect' }
     )
 
@@ -1495,6 +1659,32 @@ Return { output: "<stdout>" }`,
           }
           seen.add(f)
         }
+      }
+    }
+
+    // Bound per-task file count — deterministic, after the DAG guard, before the revision loop.
+    //
+    // The rule was prose-only (`task-files-present-bounded`) inside refineBlock, injected behind
+    // a `refine` flag falsy at every call since the bridge was removed. TARS-1271's T05 came
+    // back with a 102-entry files[] and became ONE developer agent doing 102 sequential edits.
+    //
+    // Position matters both ways. After the guard, so the parent's own file conflicts are still
+    // examined on the shape the architect actually returned (chunks are disjoint by
+    // construction, so the guard would find nothing on them). Before the revision loop, so
+    // failsQualityContract sees the chunk descriptions and repairs a thin chunk spec.
+    {
+      const beforeSplit = architectResult.tasks
+      const afterSplit = _splitOversizedTasks(beforeSplit, _FILE_BUDGET_CAP)
+      if (afterSplit.length !== beforeSplit.length) {
+        for (const parent of beforeSplit) {
+          const n = Array.isArray(parent.files) ? parent.files.length : 0
+          if (n <= _FILE_BUDGET_CAP) continue
+          const chunks = afterSplit.filter(t => t.id !== parent.id && String(t.id).startsWith(parent.id))
+          // Stated explicitly: the architect said 1 task and the plan carries N. Nothing else in
+          // the run accounts for that, so an unlogged split is an invisible rewrite.
+          log(`Split ${parent.id}: ${n} files → ${chunks.length} parallel chunks in ${parent.groupId}`)
+        }
+        architectResult.tasks = afterSplit
       }
     }
 

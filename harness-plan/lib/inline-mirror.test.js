@@ -19,6 +19,7 @@ import { validateV2Record, classifyV2Record, pendingFieldsFor, REQUIRED_V2_KEYS 
 import { deriveIssueKey } from './manifest-entry.js'
 import { selectSizingSource } from './sizing-source.js'
 import { selectDecomposeStrategy } from './decompose-strategy.js'
+import { splitOversizedTasks, FILE_CAP } from './split-oversized.js'
 
 const WORKFLOW_SRC = readFileSync(new URL('../workflow.js', import.meta.url), 'utf8')
 
@@ -291,4 +292,119 @@ test('inline _selectSizingSource is byte-identical to lib selectSizingSource', (
   for (const c of cases) {
     assert.deepEqual(inline(...c), selectSizingSource(...c), `mirror drift for ${JSON.stringify(c)}`)
   }
+})
+
+// ── The oversized-task splitter (Phase 3e) ────────────────────────────────────
+//
+// The most drift-sensitive mirror in this file, because it is the only one that REWRITES the
+// artifact rather than describing it. lib/ decides what the tests say a 102-file task becomes;
+// workflow.js decides what the architect's output actually becomes. If those disagree, the
+// suite proves a splitter that never ran, which is the same failure as the `logs/` path
+// assertion — green, and about the wrong copy of the code.
+//
+// Cases are chosen for the branches most likely to diverge when the mirror is retyped rather
+// than regenerated: the inclusive boundary, one directory over cap, many small directories,
+// the DONE rewrite in both its substitute and synthesize forms, and past-z ids.
+
+test('the inline _FILE_BUDGET_CAP equals lib FILE_CAP', () => {
+  // Three places already hold this number (here, lib/, intake's noOversized text). A mirror
+  // with its own cap silently splits at a different threshold than every test asserts.
+  const m = WORKFLOW_SRC.match(/const _FILE_BUDGET_CAP\s*=\s*(\d+)/)
+  assert.ok(m, 'workflow.js has no _FILE_BUDGET_CAP')
+  assert.equal(Number(m[1]), FILE_CAP)
+})
+
+const SPLIT_CASES = (() => {
+  const base = {
+    id: 'T05', title: 'Migrate axios to fetch', description: 'WHAT: x\nWHERE: y\nHOW: ```js\n1\n```\nDONE: z',
+    block: 'sequential', groupId: 'G3', tddRequired: true,
+  }
+  const files = (n, dir) => Array.from({ length: n }, (_, i) => `${dir}/f${i}.js`)
+  return [
+    // Boundary either side of the inclusive cap, and the fileless shapes.
+    [[{ ...base, files: files(8, 'src/client'), acceptanceCriteria: ['no axios remains'] }], 8],
+    [[{ ...base, files: files(9, 'src/client'), acceptanceCriteria: ['no axios remains'] }], 8],
+    [[{ ...base, files: [], acceptanceCriteria: [] }], 8],
+    [[{ ...base }], 8],
+    // One directory well over cap → index fallback inside it.
+    [[{ ...base, files: files(19, 'src/client'), acceptanceCriteria: ['grep -r "axios" src/ returns nothing'] }], 8],
+    // Many small directories → packing.
+    [[{ ...base, files: Array.from({ length: 12 }, (_, i) => `src/d${i}/only.js`), acceptanceCriteria: ['grep -r axios src/ is empty'] }], 8],
+    // Mixed directory sizes, the realistic shape.
+    [[{ ...base, files: [...files(11, 'src/campaigns'), ...files(3, 'src/admin'), ...files(6, 'src/reports')], acceptanceCriteria: ['no axios imports remain'] }], 8],
+    // DONE with nothing substitutable → synthesized per-file form.
+    [[{ ...base, files: files(6, 'src/a'), acceptanceCriteria: ['no axios imports remain anywhere'] }], 2],
+    // No criteria at all, and criteria that are not an array.
+    [[{ ...base, files: files(10, 'src/z') }], 4],
+    [[{ ...base, files: files(10, 'src/z'), acceptanceCriteria: 'a string' }], 4],
+    // Extra fields that must ride along verbatim, plus a parent dependency.
+    [[{ ...base, files: files(20, 'src/client'), acceptanceCriteria: ['x'], dependsOn: ['T04'],
+        conversionRules: { D: 'return res, not res.data' }, conversionTable: [['axios.get', 'fetch']], snippets: '```js\nfetch(u)\n```' }], 8],
+    // Past z, and multiple tasks in one array.
+    [[{ ...base, files: files(30, 'src/client'), acceptanceCriteria: ['x'] }], 1],
+    [[{ ...base, id: 'T01', files: files(2, 'src/a') }, { ...base, files: files(20, 'src/client'), acceptanceCriteria: ['x'] }], 8],
+    // Garbage inputs must be inert identically on both sides.
+    [[null], 8], [[], 8], [null, 8], ['tasks', 8], [undefined, undefined],
+  ]
+})()
+
+test('inline _splitOversizedTasks agrees with lib splitOversizedTasks on every case', () => {
+  const inline = loadInline('_splitOversizedTasks', ['_FILE_BUDGET_CAP', '_dirOfPath', '_chunkSuffixFor', '_chunkFilesByDir', '_scopeChunkCriteria'])
+  for (const [tasks, cap] of SPLIT_CASES) {
+    assert.deepEqual(
+      inline(tasks, cap), splitOversizedTasks(tasks, cap),
+      // label() rather than raw JSON.stringify: the garbage cases include undefined, which
+      // stringifies to undefined and then throws on .slice — a failure in the assertion message
+      // that masquerades as a failure in the code under test.
+      `mirror drift for cap ${cap} / ${label(tasks)}`
+    )
+  }
+})
+
+test('the inline splitter preserves identity for under-cap tasks, exactly as lib does', () => {
+  // deepEqual above cannot see the difference between a passed-through task and a rebuilt clone,
+  // and that distinction is asserted in split-oversized.test.js — so it must hold in the mirror
+  // too or the two copies differ in a way the comparison is blind to.
+  const inline = loadInline('_splitOversizedTasks', ['_FILE_BUDGET_CAP', '_dirOfPath', '_chunkSuffixFor', '_chunkFilesByDir', '_scopeChunkCriteria'])
+  const t = { id: 'T1', title: 'x', description: 'd', groupId: 'G1', block: 'sequential', files: ['a/b.js'] }
+  assert.equal(inline([t], 8)[0], t, 'the inline splitter rebuilt an under-cap task')
+})
+
+test('the splitter is called after the DAG guard and before the revision loop', () => {
+  // Order is load-bearing in both directions. After the guard: chunks are disjoint by
+  // construction, so running the guard on them would find nothing to do — but running the guard
+  // BEFORE the split leaves the parent's own conflicts unexamined. Before the revision loop:
+  // failsQualityContract must see the chunk descriptions, or a thin chunk spec ships unrepaired.
+  const guard = WORKFLOW_SRC.indexOf('// DAG file-conflict guard')
+  const split = WORKFLOW_SRC.indexOf('_splitOversizedTasks(')
+  const revision = WORKFLOW_SRC.indexOf('const MAX_REVISIONS')
+  assert.ok(guard !== -1, 'DAG guard comment moved — this positional check needs updating')
+  assert.ok(revision !== -1, 'revision loop moved — this positional check needs updating')
+  const callSite = WORKFLOW_SRC.indexOf('_splitOversizedTasks(', split + 1)
+  assert.ok(callSite !== -1, 'no call to _splitOversizedTasks — the mirror exists but nothing invokes it')
+  assert.ok(callSite > guard, 'the split runs before the DAG guard')
+  assert.ok(callSite < revision, 'the split runs after the revision loop — thin chunk specs would ship unrepaired')
+})
+
+test('the split is logged, so an invisible rewrite is impossible', () => {
+  // The architect said 1 task and the plan contains 13. Nothing else in the run explains that,
+  // so it has to be stated at the point it happens.
+  const around = WORKFLOW_SRC.slice(
+    WORKFLOW_SRC.indexOf('_splitOversizedTasks(', WORKFLOW_SRC.indexOf('// DAG file-conflict guard')),
+  )
+  assert.match(around.slice(0, 900), /log\(/, 'the split emits no log line')
+})
+
+test('the split result is assigned back onto the task list', () => {
+  // The mutant this exists to kill: compute afterSplit, log it, and never assign it. Every other
+  // check in this file still passes — the mirror agrees, the call is positioned right, the log
+  // fires — and the plan ships with the 102-file task intact. That is the same shape as the
+  // `logs/` assertion being green over a function nobody called, so it needs its own assertion.
+  const call = WORKFLOW_SRC.indexOf('_splitOversizedTasks(', WORKFLOW_SRC.indexOf('// DAG file-conflict guard'))
+  assert.ok(call !== -1, 'no call to _splitOversizedTasks')
+  const block = WORKFLOW_SRC.slice(call, WORKFLOW_SRC.indexOf('const MAX_REVISIONS'))
+  const assigned = block.match(/^\s*architectResult\.tasks\s*=\s*(\w+)/m)
+  assert.ok(assigned, 'the split result is never assigned to architectResult.tasks — the plan keeps the oversized task')
+  // And it must be the split output, not a re-assignment of the original.
+  assert.match(assigned[1], /split|chunk/i, `assigned from '${assigned[1]}', which is not the split result`)
 })
