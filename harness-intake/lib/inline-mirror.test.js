@@ -15,6 +15,7 @@ import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import { buildTelemetryPath, deriveTelemetryDir, repoNameFromPath, slugFromInput } from './telemetry.js'
 import { buildWriteAgentPrompt, buildDurationPatchCmd } from './telemetry-write.js'
+import { validateV2Record, classifyV2Record, REQUIRED_V2_KEYS } from './telemetry-validate.js'
 
 const WORKFLOW_SRC = readFileSync(new URL('../workflow.js', import.meta.url), 'utf8')
 
@@ -46,12 +47,42 @@ function extractFn(src, name) {
   return null
 }
 
-/** Compile the named inline function plus its inline dependencies, and return it. */
+/**
+ * Slice a top-level `const NAME = <literal>` out of source text.
+ *
+ * The validator's mirror is not all functions — REQUIRED_V2_KEYS, OUTCOME_FOR_STATUS,
+ * DASH_FIELDS and STUB_KEY_FLOOR are consts, and extractFn cannot see them. Balances
+ * whatever bracket the initialiser opens with; for a scalar (`= 20`) it takes the line.
+ */
+function extractConst(src, name) {
+  const m = src.match(new RegExp(`const ${name}\\s*=\\s*`))
+  if (!m) return null
+  const start = m.index + m[0].length
+  const open = src[start]
+  const close = { '[': ']', '{': '}', '(': ')' }[open]
+  if (!close) {
+    const eol = src.indexOf('\n', start)
+    return src.slice(m.index, eol === -1 ? src.length : eol)
+  }
+  let depth = 0
+  for (let j = start; j < src.length; j++) {
+    if (src[j] === open) depth++
+    else if (src[j] === close && --depth === 0) return src.slice(m.index, j + 1)
+  }
+  return null
+}
+
+/**
+ * Compile the named inline declaration plus its inline dependencies, and return it.
+ *
+ * A dependency may be a function or a const; both are tried, because the caller should not
+ * have to know which form the mirror happens to use.
+ */
 function loadInline(name, deps = []) {
   const parts = [...deps, name].map(n => {
-    const fn = extractFn(WORKFLOW_SRC, n)
-    assert.ok(fn, `workflow.js has no inline function ${n}() — the mirror is missing, not merely drifted`)
-    return fn
+    const decl = extractFn(WORKFLOW_SRC, n) || extractConst(WORKFLOW_SRC, n)
+    assert.ok(decl, `workflow.js has no inline ${n} — the mirror is missing, not merely drifted`)
+    return decl
   })
   return new Function(`${parts.join('\n')}\nreturn ${name}`)()
 }
@@ -128,5 +159,54 @@ test('inline _buildWriteAgentPrompt is byte-identical to lib buildWriteAgentProm
   ]
   for (const c of cases) {
     assert.equal(inline(c), buildWriteAgentPrompt(c), `mirror drift for ${JSON.stringify(c).slice(0, 80)}`)
+  }
+})
+
+// ── The validator (Phase 1e) ──────────────────────────────────────────────────
+//
+// The validator is what turns "did this stage run?" from an inference into an assertion, so
+// a drifted mirror would mean the shipped run is graded by different rules than the suite.
+// REQUIRED_V2_KEYS is the highest-risk piece: a key added to lib/ and not to the mirror
+// makes production quietly stop checking it.
+
+/**
+ * Fixtures spanning all three states plus the garbage inputs, since a mirror that agrees on
+ * clean records and diverges on a stub is the case that matters — a stub is the only input
+ * production is guaranteed to see when something has gone wrong.
+ */
+/** Fixture label for assertion messages. String(undefined) is safe where JSON.stringify is not. */
+function label(rec) {
+  return String(JSON.stringify(rec)).slice(0, 90)
+}
+
+const VALIDATOR_CASES = [
+  { schemaVersion: '2.0', runId: 'r', skill: 'harness-intake', skillsSchemaVersion: 'spec-v8', skillsCommit: 'abc', emitTrigger: 'workflow', billingMode: 'api', ts: '2026-07-27', status: 'COMPLETE', outcome: 'success', sourceIssue: 'X-1', repo: 'r', repoPath: '/p', durationMs: 1000, size: 'S', tokens: { total: { output: 10 } }, agentCount: { byModel: {} }, cost: { rateLockedUsd: 0.5 } },
+  { schemaVersion: '2.0', runId: 'r', skill: 'harness-intake', skillsSchemaVersion: 'spec-v8', skillsCommit: 'abc', emitTrigger: 'workflow', billingMode: 'api', ts: '2026-07-27', status: 'COMPLETE', outcome: 'success', sourceIssue: 'X-1', repo: 'r', repoPath: '/p', durationMs: null, size: 'S', tokens: { total: { output: null } }, agentCount: { byModel: {} }, cost: { rateLockedUsd: null } },
+  { schemaVersion: '2.0', runId: 'r', skill: 'x', status: 'FAILED', outcome: 'success' },
+  { runId: 'r', skill: 'harness-plan', outcome: 'success', tokens: { total: { output: null } }, cost: { rateLockedUsd: null } },
+  { schemaVersion: '1.0', runId: 'r' },
+  { schemaVersion: '2.0', status: 'NOT_A_STATUS', outcome: 'success' },
+  { tokens: 'not an object', cost: 42 },
+  {}, null, undefined, 'a string', 42, [],
+]
+
+test('the inline REQUIRED_V2_KEYS list is identical to lib, in the same order', () => {
+  const m = WORKFLOW_SRC.match(/const _REQUIRED_V2_KEYS = \[([\s\S]*?)\]/)
+  assert.ok(m, 'workflow.js has no inline _REQUIRED_V2_KEYS — the mirror is missing')
+  const inline = new Function(`return [${m[1]}]`)()
+  assert.deepEqual(inline, REQUIRED_V2_KEYS)
+})
+
+test('inline _validateV2Record agrees with lib validateV2Record on every fixture', () => {
+  const inline = loadInline('_validateV2Record', ['_REQUIRED_V2_KEYS', '_OUTCOME_FOR_STATUS'])
+  for (const rec of VALIDATOR_CASES) {
+    assert.deepEqual(inline(rec), validateV2Record(rec), `mirror drift for ${label(rec)}`)
+  }
+})
+
+test('inline _classifyV2Record agrees with lib classifyV2Record on every fixture', () => {
+  const inline = loadInline('_classifyV2Record', ['_REQUIRED_V2_KEYS', '_OUTCOME_FOR_STATUS', '_DASH_FIELDS', '_STUB_KEY_FLOOR', '_validateV2Record'])
+  for (const rec of VALIDATOR_CASES) {
+    assert.deepEqual(inline(rec), classifyV2Record(rec), `mirror drift for ${label(rec)}`)
   }
 })

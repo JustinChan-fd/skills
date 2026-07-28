@@ -433,6 +433,126 @@ ${patchCmd}
 Report "TELEMETRY_OK" or "TELEMETRY_ERROR: <reason>". If step 1 fails, say so explicitly —
 a silent failure here is the bug this agent exists to fix.`
 }
+// ----- telemetry-validate.js mirror -----
+// Graded in Debrief, logged, never fatal. lib/inline-mirror.test.js compares every
+// declaration below against lib/telemetry-validate.js on shared fixtures.
+const _REQUIRED_V2_KEYS = [
+  'schemaVersion', 'runId', 'skill', 'skillsSchemaVersion', 'skillsCommit',
+  'emitTrigger', 'billingMode', 'ts', 'status', 'outcome', 'sourceIssue',
+  'repo', 'repoPath', 'durationMs', 'tokens', 'agentCount', 'cost',
+]
+
+/**
+ * status → the single acceptable outcome. Two axes, never conflated: status is the
+ * lifecycle value, outcome is the three-way roll-up the dashboard's RESULT column and
+ * assembleRunSummary read. Collapsing them is what made RESULT unreadable.
+ */
+const _OUTCOME_FOR_STATUS = {
+  COMPLETE: 'success',
+  COMPLETE_FRAMING_CORRECTED: 'success',
+  COMPLETE_WITH_STUBS: 'success',
+  PROPOSED_WITH_GAPS: 'partial',
+  PARTIAL: 'partial',
+  FAILED: 'failed',
+  CRASHED: 'failed',
+}
+
+/** The three fields the dashboard renders as a dash when null. See flagCell in index.html. */
+const _DASH_FIELDS = [
+  ['durationMs', r => r?.durationMs],
+  ['tokens.total.output', r => r?.tokens?.total?.output],
+  ['cost.rateLockedUsd', r => r?.cost?.rateLockedUsd],
+]
+
+/**
+ * Below this key count a record is a stub regardless of what it contains.
+ *
+ * Derived from the contract, NOT from observed key counts. An earlier version hardcoded 20
+ * on the reasoning that the two known stubs are 13 and 18 keys while genuine records run
+ * 28-37 — but that conflates two independent signals and sets the floor above the minimum
+ * legal record. A record carrying exactly _REQUIRED_V2_KEYS and nothing else is complete by
+ * definition; below that count it cannot be, whatever it contains. Both real stubs are
+ * caught by the schemaVersion check regardless (neither has one), so this floor exists only
+ * for the residual case: a valid schemaVersion on a nearly empty record.
+ */
+const _STUB_KEY_FLOOR = _REQUIRED_V2_KEYS.length
+
+function _deriveOutcome(status) {
+  return _OUTCOME_FOR_STATUS[status] || 'failed'
+}
+
+/**
+ * @returns {string[]} human-readable problems, [] when clean. Never throws — a validator
+ *   that can crash the Debrief phase is worse than no validator.
+ */
+function _validateV2Record(record) {
+  const problems = []
+  if (!record || typeof record !== 'object' || Array.isArray(record)) {
+    return ['not an object — no record to validate']
+  }
+
+  if (record.schemaVersion !== '2.0') {
+    problems.push(`schemaVersion is ${JSON.stringify(record.schemaVersion)}, expected "2.0"`)
+  }
+  for (const key of _REQUIRED_V2_KEYS) {
+    if (!(key in record)) problems.push(`missing required key: ${key}`)
+  }
+
+  // outcome consistency. A record whose outcome is a verbatim status value has collapsed the
+  // two axes — flag it even when the value looks reasonable.
+  const { status, outcome } = record
+  if (outcome != null && String(outcome) in _OUTCOME_FOR_STATUS) {
+    problems.push(`outcome "${outcome}" is a status value — status and outcome are separate axes`)
+  } else if (status != null && outcome != null) {
+    const expected = _OUTCOME_FOR_STATUS[status]
+    if (!expected) problems.push(`unrecognized status "${status}" — cannot check outcome`)
+    else if (outcome !== expected) problems.push(`outcome "${outcome}" inconsistent with status "${status}" (expected "${expected}")`)
+  }
+
+  if ('tokens' in record && (!record.tokens || typeof record.tokens !== 'object')) {
+    problems.push('tokens is present but not an object')
+  }
+  if ('cost' in record && (!record.cost || typeof record.cost !== 'object')) {
+    problems.push('cost is present but not an object')
+  }
+
+  return problems
+}
+
+/**
+ * FULL / PARTIAL / STUB.
+ *
+ * The middle state is the one a presence check cannot see: a PARTIAL record has every
+ * required key and still renders dashes, because the append landed and a later patch did
+ * not. The observed harness-plan TARS-1271 row is exactly this.
+ *
+ * Nulls the schema declares permanently unavailable (cacheRead, cacheCreation, per-model
+ * output) are NOT counted — they are honest, and counting them would make every record
+ * PARTIAL forever.
+ *
+ * @returns {{state: 'FULL'|'PARTIAL'|'STUB', dashes: string[], reasons: string[], problems: string[]}}
+ */
+function _classifyV2Record(record) {
+  if (!record || typeof record !== 'object' || Array.isArray(record)) {
+    return { state: 'STUB', dashes: [], reasons: ['not an object'], problems: _validateV2Record(record) }
+  }
+
+  const problems = _validateV2Record(record)
+  const reasons = []
+  const keyCount = Object.keys(record).length
+
+  if (record.schemaVersion !== '2.0') {
+    reasons.push(`no v2 schemaVersion (got ${JSON.stringify(record.schemaVersion)}) — fingerprint of a stage that never ran its own workflow`)
+  }
+  if (keyCount < _STUB_KEY_FLOOR) {
+    reasons.push(`only ${keyCount} keys, fewer than the ${_STUB_KEY_FLOOR} required — cannot be a complete record`)
+  }
+  if (reasons.length) return { state: 'STUB', dashes: [], reasons, problems }
+
+  const dashes = _DASH_FIELDS.filter(([, get]) => get(record) == null).map(([name]) => name)
+  return { state: dashes.length ? 'PARTIAL' : 'FULL', dashes, reasons, problems }
+}
+
 // ===== END PURE =====
 
 // The audit write, in code. Ported from harness-run/workflow.js:382 — the only place it has
@@ -442,6 +562,35 @@ a silent failure here is the bug this agent exists to fix.`
 //
 // Workflow scripts have no filesystem API, so an agent is required. Never throws: a
 // telemetry failure must not fail a run that otherwise succeeded.
+/**
+ * Grade each record and log the verdict. Never throws, never fails the run.
+ *
+ * This is the whole point of Phase 1e: "did this stage run and were its numbers measured?"
+ * becomes a line in the log rather than something a human infers from a file existing. It
+ * runs at write time, when the answer is still actionable, and it is advisory by design —
+ * a run that produced working code must not be failed because its telemetry is thin.
+ */
+function _gradeAuditRecord(records) {
+  try {
+    for (const rec of records) {
+      const { state, dashes, reasons, problems } = _classifyV2Record(rec)
+      const skill = rec?.skill || 'unknown'
+      if (state === 'FULL') {
+        log(`Telemetry grade: FULL (${skill}) — every required field measured.`)
+        continue
+      }
+      if (state === 'STUB') {
+        log(`Telemetry grade: STUB (${skill}) — ${reasons.join('; ')}`)
+      } else {
+        log(`Telemetry grade: PARTIAL (${skill}) — the record landed but the dashboard will show a dash for: ${dashes.join(', ')}`)
+      }
+      if (problems.length) log(`Telemetry problems (${skill}): ${problems.join('; ')}`)
+    }
+  } catch (err) {
+    log(`Telemetry: grading failed — ${err?.message || err}. Ignored; the write proceeds.`)
+  }
+}
+
 async function _writeAuditRecord({ telemetryPath, records, startTs }) {
   const list = (Array.isArray(records) ? records : [records]).filter(Boolean)
   if (!telemetryPath || !list.length) {
@@ -449,6 +598,7 @@ async function _writeAuditRecord({ telemetryPath, records, startTs }) {
     return
   }
   try {
+    _gradeAuditRecord(list)
     await agent(
       _buildWriteAgentPrompt({ telemetryPath, records: list, startTs }),
       { label: 'write-telemetry', phase: 'Debrief', model: 'claude-haiku-4-5-20251001', effort: 'low' }

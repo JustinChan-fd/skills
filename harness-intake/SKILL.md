@@ -110,6 +110,20 @@ Run the workflow. All metadata (runId, skillsCommit, timestamps) is captured her
 
 > **Why this moved into the workflow (2026-07-27).** This step used to be `writeAuditTelemetry(result.telemetryPath, result.auditRecord)` right here, i.e. a prose instruction for *you* to run after `Workflow()` returned. Nothing enforced it, so when the context was long or `cliSummary` read like a natural end of turn, it was silently dropped — `harness-implement` never wrote a single record in its entire history, and the one MC-1077 intake record exists only because a human noticed and asked for it. A missing record is indistinguishable from a stage that never ran, which made every telemetry-based conclusion unfalsifiable.
 
+**The workflow also grades the record before writing it.** `_gradeAuditRecord` runs
+`_classifyV2Record` over each record and logs one of three verdicts:
+
+| Verdict | Meaning | What to do |
+|---|---|---|
+| `FULL` | every required field present and measured | nothing |
+| `PARTIAL` | the record landed, but a field the dashboard renders is null — it will show a dash | patch the named field, or investigate why it was never measured |
+| `STUB` | no `2.0` `schemaVersion`, or fewer keys than the contract requires — the fingerprint of a stage that never ran its own workflow | treat as a failed stage, not a telemetry problem |
+
+The grade is **advisory and never fails a run**: a run that produced working code must not be
+failed over thin telemetry. But a `STUB` verdict in the log is a finding — it means the stage
+did not execute its own `workflow.js`. That was previously invisible, and it is why two
+fabricated TARS-1271 artifacts replayed into fixed code without anything noticing.
+
 What is left for you is **patch-only**: the three fields no workflow script can see, because they live in the `<usage>` block of the Workflow completion notification. `patchTelemetryRecord` is idempotent and `try`-swallowed, so if *this* step is skipped the record is still complete — it just lacks the input/cache split. That is the inversion: the unreliable step now costs three fields instead of the whole record.
 
 ```js

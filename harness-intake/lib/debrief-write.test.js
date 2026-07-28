@@ -80,3 +80,47 @@ test('the crash path still carries telemetryPath and the audit record out with t
   // crash-path write stays the only writer there and needs its payload.
   assert.match(SRC, /throw Object\.assign\(err, \{[^}]*telemetryPath/s, 'crash path lost its telemetry payload')
 })
+
+// ── The validator must be consulted, not merely present (Phase 1e) ────────────
+//
+// Mirroring _classifyV2Record into the PURE block accomplishes nothing on its own: an
+// unreferenced function is exactly the shape of the `logs/` bug this suite exists to prevent.
+// These assert the grade is computed and logged at the point where it can still be acted on.
+
+test('the grade happens inside the write, so no call site can skip it', () => {
+  // Deliberately NOT asserted per-Debrief-region. Grading lives inside _writeAuditRecord,
+  // which means every present and future write site inherits it — a per-site assertion would
+  // pass while a newly added write site silently graded nothing.
+  const fn = SRC.slice(SRC.indexOf('async function _writeAuditRecord'))
+  const body = fn.slice(0, fn.indexOf('\n}\n') + 1)
+  assert.match(
+    body,
+    /_gradeAuditRecord\(/,
+    '_writeAuditRecord writes a record it never graded — a mirrored validator with no caller ' +
+    'is the logs/ bug in a new costume'
+  )
+  // …and it must grade BEFORE the agent runs, so the log explains a bad record rather than
+  // trailing it.
+  assert.ok(
+    body.indexOf('_gradeAuditRecord(') < body.indexOf('await agent('),
+    'grade the record before writing it, not after'
+  )
+})
+
+test('the grade is logged, and never throws or fails the run', () => {
+  const fn = SRC.slice(SRC.indexOf('function _gradeAuditRecord'))
+  assert.ok(fn.startsWith('function _gradeAuditRecord'), 'no inline _gradeAuditRecord definition')
+  const body = fn.slice(0, fn.indexOf('\n}\n') + 1)
+  assert.match(body, /log\(/, 'the grade must reach the user — an unlogged grade changes nothing')
+  assert.match(body, /try\s*\{/, 'grading must be wrapped: a validator that crashes Debrief is worse than none')
+  assert.match(body, /catch/, 'grading must not throw')
+  assert.doesNotMatch(body, /throw\s/, 'grading must never fail a run over telemetry')
+})
+
+test('a STUB or PARTIAL grade is called out by name, so the log is diagnosable', () => {
+  const fn = SRC.slice(SRC.indexOf('function _gradeAuditRecord'))
+  const body = fn.slice(0, fn.indexOf('\n}\n') + 1)
+  for (const state of ['STUB', 'PARTIAL', 'FULL']) {
+    assert.ok(body.includes(state), `the grade log never mentions ${state}`)
+  }
+})

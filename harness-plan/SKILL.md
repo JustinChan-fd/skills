@@ -220,6 +220,20 @@ Debrief — Haiku + inline
 ```
 
 Invoke using the skill's own `workflow.js`:
+**The workflow also grades the record before writing it.** `_gradeAuditRecord` runs
+`_classifyV2Record` over each record and logs one of three verdicts:
+
+| Verdict | Meaning | What to do |
+|---|---|---|
+| `FULL` | every required field present and measured | nothing |
+| `PARTIAL` | the record landed, but a field the dashboard renders is null — it will show a dash | patch the named field, or investigate why it was never measured |
+| `STUB` | no `2.0` `schemaVersion`, or fewer keys than the contract requires — the fingerprint of a stage that never ran its own workflow | treat as a failed stage, not a telemetry problem |
+
+The grade is **advisory and never fails a run**: a run that produced working code must not be
+failed over thin telemetry. But a `STUB` verdict in the log is a finding — it means the stage
+did not execute its own `workflow.js`. That was previously invisible, and it is why two
+fabricated TARS-1271 artifacts replayed into fixed code without anything noticing.
+
 ```js
 // Capture metadata before Workflow() — Date.now() is unavailable inside workflow scripts.
 const [startTs, skillsCommit, runTs] = await Promise.all([
