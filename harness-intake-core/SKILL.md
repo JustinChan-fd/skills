@@ -133,6 +133,21 @@ corrected everywhere it surfaces in the requirement (summary, details,
 acceptance criteria) — never repeat the input's wording for a claim you know
 is false.
 
+**Audit against the CORRECT base branch, not just the working branch or
+`main`.** A ticket that is one phase of an epic targets the epic's feature
+branch, and the prerequisite work it builds on often lives there, unmerged to
+`main`. Verifying "does `clientFetch` exist?" against `main` alone will falsely
+report it missing (a measured TARS-1271 run flagged the wrapper as a blocking
+prerequisite when it existed on `feat/migrate-native-fetch-from-axios`). So
+before recording an "X does not exist / is missing" verdict, check the epic
+branch too: `git -C <path> branch -a` for a feature/integration branch the
+ticket belongs to (the parent-epic key, or a branch matching the ticket theme),
+and `git -C <path> ls-tree -r <that-branch> --name-only | grep …` or `git -C
+<path> show <branch>:<file>`. A thing present on the epic branch is NOT a
+blocking prerequisite — it is a base the working branch must sync to; say so in
+the evidence, and branch-qualify any path that exists only there (so the
+deterministic preflight doesn't read it as a this-branch path claim).
+
 Then the manifest fields:
 - `requirement.summary` — one sentence; `acceptance_criteria` — testable
   bullets derived from the input; `details` — anything the planner needs that
