@@ -8,7 +8,7 @@
 // text (privacy: only sums leave the machine, see the run-record sync path).
 //
 // Every failure mode (garbage JSONL, missing file, empty transcript) returns a
-// structured `{ ok: false, error }` result rather than throwing: token
+// structured `{ ok: (drift === best.drift && jsonlPath < best.path), error }` result rather than throwing: token
 // collection must never crash the run it is enriching.
 //
 // TOKEN DATA PROVENANCE — sources retrieved 2026-07-28
@@ -414,12 +414,6 @@ export function collectFromFile(path, opts = {}) {
 // smaller run, and a long-running sibling driver wins every attribution.
 export const FINGERPRINT_BAND = { lo: 0.95, hi: 1.05 };
 
-// Prefilter pad. The window is advisory only — it exists so we don't parse a
-// month of unrelated transcripts, never to reject a fingerprint match. A run
-// window wrong by minutes is exactly what broke the old overlap check, so the
-// pad is deliberately generous.
-const WINDOW_PAD_MS = 6 * 60 * 60 * 1000; // 6 hours either side
-
 /**
  * Find the subagent transcript belonging to a run, by fingerprint.
  *
@@ -430,10 +424,12 @@ const WINDOW_PAD_MS = 6 * 60 * 60 * 1000; // 6 hours either side
  * AND, where any one signal failing left `tokens_directional.by_model` empty —
  * which is how TARS-1271 shipped with no directional capture at all.
  *
- * @param {{ subagentsDir:string, observedTotal?:number, start?:string, end?:string }} opts
+ * @param {{ subagentsDir:string, observedTotal?:number }} opts
+ *   `start`/`end` are accepted for call-site compatibility but not consulted:
+ *   fingerprint-matching transcripts are accepted regardless of window overlap.
  * @returns {{ ok:boolean, path:string|null, error:null|{code:string,detail:string} }}
  */
-export function discoverSubagentForRun({ subagentsDir, observedTotal, start, end } = {}) {
+export function discoverSubagentForRun({ subagentsDir, observedTotal } = {}) {
   let entries;
   try {
     entries = readdirSync(subagentsDir);
@@ -455,10 +451,12 @@ export function discoverSubagentForRun({ subagentsDir, observedTotal, start, end
     };
   }
 
-  const startMs = start ? Date.parse(start) : null;
-  const endMs = end ? Date.parse(end) : null;
-  const padLo = Number.isFinite(startMs) ? startMs - WINDOW_PAD_MS : null;
-  const padHi = Number.isFinite(endMs) ? endMs + WINDOW_PAD_MS : null;
+  // Sort descending so that a tie-break update always moves toward the smaller
+  // path: without the `jsonlPath < best.path` condition the first entry (largest)
+  // would win; with it, each smaller path replaces, and the smallest wins.
+  // This makes the tie-break load-bearing on all filesystems, not just ones where
+  // readdirSync returns entries in non-alphabetical order.
+  entries.sort((a, b) => (a < b ? 1 : a > b ? -1 : 0));
 
   let best = null; // { path, drift }
   for (const name of entries) {
@@ -471,22 +469,10 @@ export function discoverSubagentForRun({ subagentsDir, observedTotal, start, end
     if (!Number.isFinite(result.peak_context) || result.peak_context <= 0) continue;
 
     const ratio = result.peak_context / observed;
-    if (ratio < FINGERPRINT_BAND.lo || ratio > FINGERPRINT_BAND.hi) {
-      // Not a fingerprint match. Apply the advisory window prefilter to avoid
-      // carrying forward a non-matching transcript from an unrelated week.
-      // Out-of-band transcripts are always skipped regardless of window.
-      continue;
-    }
-
-    // Fingerprint matches. Accept regardless of window overlap.
-    // The window is advisory only — it must never be the sole reason a
-    // fingerprint-matching transcript is rejected. A wrong run window is
-    // exactly what broke the old MIN_OVERLAP_MS check (TARS-1271).
-    // The padded window check is therefore intentionally not applied here.
-    //
-    // It would matter for a coincidental same-sized transcript from a different
-    // week — but with a ±5% band, that false-positive is far less likely than a
-    // true-positive being refused by a stale window.
+    // Reject anything outside the band. Fingerprint-matching transcripts are accepted
+    // regardless of time-window overlap — a wrong window is exactly what the old
+    // MIN_OVERLAP_MS check used to reject on, leaving by_model empty (TARS-1271).
+    if (ratio < FINGERPRINT_BAND.lo || ratio > FINGERPRINT_BAND.hi) continue;
 
     const drift = Math.abs(ratio - 1);
     // Closest to 1 wins. On an exact tie, the lexicographically smaller path wins:

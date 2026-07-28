@@ -131,14 +131,18 @@ test('two candidates in band: the one closest to the observed total wins', () =>
 test('an exact ratio tie resolves deterministically by path', () => {
   // readdirSync order is not guaranteed stable across filesystems, and a
   // non-deterministic pick makes the same run attribute differently on re-scan.
+  // 'jjj' < 'kkk' lexicographically, so jjj must win.
+  // Both candidates have identical drift, so the tie-break is the only thing
+  // separating them. The test creates jjj after kkk on purpose: any implementation
+  // that picks the first candidate in iteration order would return kkk, not jjj.
   const dir = makeSubagentsDir();
-  transcriptWithPeak(dir, 'kkk', 80_000);
-  transcriptWithPeak(dir, 'jjj', 80_000);
+  transcriptWithPeak(dir, 'kkk', 80_000);  // written first — wins if we follow readdir order
+  transcriptWithPeak(dir, 'jjj', 80_000);  // written second — wins only if tie-break is lexicographic
   const first = discoverSubagentForRun({ subagentsDir: dir, observedTotal: 80_000 });
   const second = discoverSubagentForRun({ subagentsDir: dir, observedTotal: 80_000 });
   assert.equal(first.ok, true);
   assert.equal(first.path, second.path, 'discovery is not deterministic on a tie');
-  assert.ok(first.path.includes('agent-jjj.jsonl'), 'tie-break is not lexicographic');
+  assert.ok(first.path.includes('agent-jjj.jsonl'), 'tie-break is not lexicographic — expected jjj (smaller path) but got: ' + first.path);
 });
 
 test('no observed total means no fingerprint, and no silent fallback', () => {
@@ -155,11 +159,56 @@ test('no observed total means no fingerprint, and no silent fallback', () => {
 
 test('the exported band is what discovery actually enforces', () => {
   // Guards against the constant and the comparison drifting apart.
+  // Asserts both the constant values AND that boundary points just outside
+  // the band are rejected — pinning lo exclusion, hi exclusion, and the
+  // values themselves so a widened constant can't silently swallow these cases.
   assert.equal(FINGERPRINT_BAND.lo, 0.95);
   assert.equal(FINGERPRINT_BAND.hi, 1.05);
+
+  // lo boundary: just at lo is in-band, just below lo is rejected.
+  {
+    const dir = makeSubagentsDir();
+    transcriptWithPeak(dir, 'lo-in', Math.round(100_000 * FINGERPRINT_BAND.lo));
+    assert.equal(discoverSubagentForRun({ subagentsDir: dir, observedTotal: 100_000 }).ok, true, 'lo boundary must be in-band');
+  }
+  {
+    const dir = makeSubagentsDir();
+    transcriptWithPeak(dir, 'lo-out', Math.round(100_000 * (FINGERPRINT_BAND.lo - 0.01)));
+    const r = discoverSubagentForRun({ subagentsDir: dir, observedTotal: 100_000 });
+    assert.equal(r.ok, false, 'just below lo must be rejected');
+    assert.equal(r.error.code, 'not_found');
+  }
+
+  // hi boundary: just at hi is in-band, just above hi is rejected.
+  {
+    const dir = makeSubagentsDir();
+    transcriptWithPeak(dir, 'hi-in', Math.round(100_000 * FINGERPRINT_BAND.hi));
+    assert.equal(discoverSubagentForRun({ subagentsDir: dir, observedTotal: 100_000 }).ok, true, 'hi boundary must be in-band');
+  }
+  {
+    const dir = makeSubagentsDir();
+    transcriptWithPeak(dir, 'hi-out', Math.round(100_000 * (FINGERPRINT_BAND.hi + 0.01)));
+    const r = discoverSubagentForRun({ subagentsDir: dir, observedTotal: 100_000 });
+    assert.equal(r.ok, false, 'just above hi must be rejected');
+    assert.equal(r.error.code, 'not_found');
+  }
+});
+
+test('a transcript with no usage entries is not matched even when no real candidate exists', () => {
+  // Guard: `peak_context <= 0` at the filter line. Without it, a transcript with
+  // peak_context:undefined produces ratio NaN, both band comparisons are false
+  // (NaN comparisons), so the band check is skipped and the candidate is selected.
+  // collectForRun's inline fallback at line 365 omits peak_context entirely,
+  // making this a live hazard on the no-transcript path. The guard is load-bearing.
   const dir = makeSubagentsDir();
-  transcriptWithPeak(dir, 'mmm', Math.round(100_000 * FINGERPRINT_BAND.lo));
-  assert.equal(discoverSubagentForRun({ subagentsDir: dir, observedTotal: 100_000 }).ok, true);
+  // A transcript with no usage lines: peak_context = 0.
+  writeAgentMeta(dir, 'nnn', { description: 'whatever' });
+  writeAgentTranscript(dir, 'nnn', [
+    { type: 'user', timestamp: '2026-07-27T02:00:00.000Z', message: { role: 'user', content: 'x' } },
+  ]);
+  const r = discoverSubagentForRun({ subagentsDir: dir, observedTotal: 50_000 });
+  assert.equal(r.ok, false, 'a zero-peak transcript must not be matched');
+  assert.equal(r.error.code, 'not_found');
 });
 
 test('returns not_found on a missing subagents directory', () => {
@@ -217,20 +266,13 @@ test('backfillDirectional returns not_found when subagents dir is missing', () =
 });
 
 test('backfillDirectional returns ok:false when transcript has no usage in the run window', () => {
+  // The usage line is OUTSIDE the run window (10:00 vs window 02:00-02:30), so the
+  // windowed collection returns empty by_model. Discovery succeeds because peak_context
+  // is unwindowed (peak = 15 matches observedTotal = 15), but the stamp is refused.
   const { runDir } = freshRunDir();
-  // Set an observedTotal so discovery does not return no_fingerprint.
-  // The transcript has no usage lines, so peak_context will be 0, causing not_found from discovery.
-  // Use a separate transcript that has a matching peak, then pass a no-usage transcript.
-  // Actually: if the transcript has no usage, peak_context=0, so discovery returns not_found.
-  // The test asserts no_usage, which means we need discovery to succeed but the windowed collection to have no model data.
-  // We need: a transcript where peak_context matches observedTotal (for discovery), but the windowed parse has no usage.
-  // Solution: write a transcript where the usage line is OUTSIDE the window, so collectFromFile (unwindowed) gives peak_context > 0
-  // but collectFromFile (windowed) gives no by_model entries.
   execFileSync('node', [CLI, 'record-observed-tokens', '--run-dir', runDir, '--total', '15', '--tier', 'MID'], { encoding: 'utf8' });
   const dir = makeSubagentsDir();
   writeAgentMeta(dir, 'nousage', { description: 'Plan driver for PROJ-1' });
-  // Usage line is OUTSIDE the run window (10:00 vs window 02:00-02:30), so windowed parse has no by_model.
-  // peak_context is unwindowed, so it sees this line and gives peak = 10+5 = 15.
   writeAgentTranscript(dir, 'nousage', [
     usageLine('claude-sonnet-4-6', '2026-07-27T10:00:00.000Z', { input_tokens: 10, output_tokens: 5, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 }),
   ]);
