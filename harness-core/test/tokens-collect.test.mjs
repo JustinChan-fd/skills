@@ -144,6 +144,12 @@ test('cwd-to-munged-project-dir helper returns the ~/.claude/projects/<munged-cw
   assert.equal(mungeProjectDir('/home/dev/code/myapp'), '-home-dev-code-myapp');
   // "/" and "." both become "-"
   assert.equal(mungeProjectDir('/a/b/.hidden/c'), '-a-b--hidden-c');
+  // Any non-alphanumeric that isn't a dash becomes "-" too — notably "@" in a
+  // username-shaped home dir (Claude's own munging does this; a "/.-only" regex
+  // silently mislocates the transcript and degrades directional tokens to
+  // estimated). Existing dashes are preserved.
+  assert.equal(mungeProjectDir('/home/dev@corp.com/code'), '-home-dev-corp-com-code');
+  assert.equal(mungeProjectDir('/a/b-c/phase-0-foundation'), '-a-b-c-phase-0-foundation');
   assert.equal(
     projectDirForCwd('/home/dev/code/myapp', { home: '/home/x' }),
     '/home/x/.claude/projects/-home-dev-code-myapp',

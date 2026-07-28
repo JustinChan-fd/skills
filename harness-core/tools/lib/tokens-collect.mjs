@@ -154,9 +154,14 @@ export function collectFromText(text, opts = {}) {
 // <project-dir>/<session-uuid>.jsonl; a driver's subagent transcripts are
 // SIBLINGS of it at <project-dir>/<session-uuid>/subagents/agent-*.jsonl.
 
-/** Munge an absolute cwd to Claude's project-directory name (dir name only). */
+/** Munge an absolute cwd to Claude's project-directory name (dir name only).
+ * Claude replaces every character that is NOT alphanumeric-or-dash with "-"
+ * (so "/", ".", and "@" in a username-shaped home dir all collapse to "-",
+ * while existing dashes are preserved). A narrower "/.-only" rule leaves "@"
+ * intact and silently mislocates the transcript → directional tokens degrade
+ * to estimated. */
 export function mungeProjectDir(cwd) {
-  return String(cwd).replace(/[/.]/g, '-');
+  return String(cwd).replace(/[^a-zA-Z0-9-]/g, '-');
 }
 
 /** Full ~/.claude/projects/<munged-cwd> path for a cwd. */
