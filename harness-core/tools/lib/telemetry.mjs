@@ -3,7 +3,7 @@
 // non-fatal; the sweep guarantees eventual delivery.
 import { execFileSync } from 'node:child_process';
 import { existsSync, mkdirSync, rmdirSync, rmSync, statSync, readdirSync, readFileSync, writeFileSync, renameSync, unlinkSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, dirname } from 'node:path';
 import { readRecord, writeRecord } from './record.mjs';
 
 const FINAL_STATUSES = ['succeeded', 'failed', 'partial', 'cancelled', 'timeout', 'abandoned'];
@@ -64,6 +64,18 @@ export function ensureClone({ dir, remote }) {
 
 export function syncRun({ runDir, telemetry, now = new Date(), retries = 3 }) {
   if (!telemetry?.remote || !telemetry?.dir) return { synced: false, reason: 'telemetry_not_configured' };
+
+  // The lock lives at "<dir>.lock", a SIBLING of the clone dir — so its parent
+  // is the clone dir's parent. On a fresh machine that parent may not exist yet
+  // (e.g. ~/.harness/telemetry when ~/.harness/ is absent); a non-recursive
+  // mkdir of the lock would then fail ENOENT and no run would ever sync. Ensure
+  // the parent chain exists before taking the lock. (ensureClone later creates
+  // the clone dir itself.)
+  try {
+    mkdirSync(dirname(telemetry.dir), { recursive: true });
+  } catch (err) {
+    return { synced: false, reason: `sync_error: ${err.message}` };
+  }
 
   // The clone at telemetry.dir is shared across concurrent same-machine syncRun
   // calls (e.g. a sweep over many runs, or overlapping harness invocations).

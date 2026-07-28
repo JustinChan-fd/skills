@@ -288,3 +288,19 @@ test('two routing_policy arms are distinguishable end-to-end through syncRun (fi
   assert.equal(syncedArmB.routing_policy, 'arm-b');
   assert.notEqual(syncedControl.routing_policy, syncedArmB.routing_policy);
 });
+
+test('syncRun creates the telemetry clone dir when its parent does not exist yet (fresh machine)', () => {
+  // Regression: the advisory lock did `mkdir('<dir>.lock')` non-recursively
+  // before the parent of <dir> existed, so a first sync on a fresh machine
+  // (e.g. ~/.harness/telemetry when ~/.harness/ is absent) failed ENOENT and
+  // the run never synced. syncRun must ensure the parent chain exists first.
+  const { remote, targetDir } = setup();
+  const base = mkdtempSync(join(tmpdir(), 'harness-tel-nodir-'));
+  // A telemetry dir two levels below a not-yet-created parent.
+  const telemetry = { remote, dir: join(base, 'no-such-parent', 'telemetry') };
+  const { runId, runDir } = initRun({ targetDir, repo: 'myapp', kind: 'intake', source: 'adhoc', now: NOW });
+  finalizeRun({ runDir, status: 'succeeded', now: NOW });
+  const result = syncRun({ runDir, telemetry, now: NOW });
+  assert.deepEqual(result, { synced: true });
+  assert.ok(readRecord(runDir).synced_at);
+});
