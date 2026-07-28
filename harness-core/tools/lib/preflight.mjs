@@ -135,10 +135,39 @@ function planChecks(runDir, findings) {
   }
 }
 
+// Implement runs against the plan.json harness-plan wrote (schema_version'd,
+// units + order). Before a fresh implement verifier: the plan must exist,
+// parse, pass the plan schema, and every non-NEW location must exist (a NEW:
+// location's parent dir must exist) — same mechanical ground-truth as plan,
+// but keyed to the plan schema so a schema-invalid plan is caught here too.
+function implementChecks(runDir, findings) {
+  const plan = parseArtifact(runDir, 'plan.json', findings);
+  if (!plan) return;
+  const target = targetOf(runDir);
+
+  for (const err of validate(loadSchema('plan'), plan)) {
+    findings.push({ check: 'schema_valid', detail: err });
+  }
+
+  for (const u of Array.isArray(plan.units) ? plan.units : []) {
+    for (const loc of u.locations ?? []) {
+      if (loc.startsWith('NEW: ')) {
+        const parent = dirname(loc.slice('NEW: '.length));
+        if (!existsSync(join(target, parent))) {
+          findings.push({ check: 'new_location_parent_exists', detail: `${u.id}: NEW location's parent dir does not exist: ${parent}` });
+        }
+      } else if (!existsSync(join(target, loc))) {
+        findings.push({ check: 'location_exists', detail: `${u.id}: location does not exist: ${loc}` });
+      }
+    }
+  }
+}
+
 export function preflight({ phase, runDir }) {
   const findings = [];
   if (phase === 'intake') intakeChecks(runDir, findings);
   else if (phase === 'plan') planChecks(runDir, findings);
+  else if (phase === 'implement') implementChecks(runDir, findings);
   else findings.push({ check: 'phase_known', detail: `unknown preflight phase: ${phase}` });
   return { ok: findings.length === 0, findings };
 }

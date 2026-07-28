@@ -33,6 +33,8 @@ import { syncRun, sweep } from './lib/telemetry.mjs';
 import { renderStatusComment, renderPrBody, renderBrief } from './lib/render.mjs';
 import { composeLoopLine } from './lib/looprecord.mjs';
 import { normalizeJiraIssue } from './lib/jira.mjs';
+import { extractPlanEntries, orderPlansByDeps } from './lib/plan-sequencer.mjs';
+import { splitOversizedTasks } from './lib/split-oversized.mjs';
 
 const [subcommand, ...rest] = process.argv.slice(2);
 
@@ -144,6 +146,23 @@ try {
       const v = opts({ file: { type: 'string' } });
       const normalized = normalizeJiraIssue(JSON.parse(readFileSync(v.file, 'utf8')));
       emit(normalized);
+    }
+    case 'plan-order': {
+      // Topologically order a plan manifest's plans[] by dependsOn (Kahn,
+      // stable). Exits 1 on an unknown dep id or a cycle — the plan skill must
+      // not proceed with an unorderable plan set.
+      const v = opts({ manifest: { type: 'string' } });
+      const plans = extractPlanEntries(JSON.parse(readFileSync(v.manifest, 'utf8')));
+      emit({ order: orderPlansByDeps(plans) });
+    }
+    case 'split-tasks': {
+      // Split any task whose files[] exceeds the per-task cap into same-group
+      // parallel siblings (directory-coherent chunks) so implement lands them
+      // as one commit without one agent grinding 100 files serially.
+      const v = opts({ plan: { type: 'string' }, cap: { type: 'string' } });
+      const plan = JSON.parse(readFileSync(v.plan, 'utf8'));
+      const tasks = splitOversizedTasks(plan.tasks ?? [], v.cap !== undefined ? Number(v.cap) : undefined);
+      emit({ tasks });
     }
     case 'validate': {
       const v = opts({ schema: { type: 'string' }, file: { type: 'string' } });
@@ -403,6 +422,8 @@ try {
           'init-run': '--target <path> --repo <slug> --kind intake|plan|implement --source issue-<n>|adhoc|file [--issue <n>] [--branch <b>] [--parent-run-id <id>] [--loop-run-id <id>] [--correlation-id <id>] [--repo-path <path>] [--skills-commit <sha>]',
           'resolve-project': '--issue <KEY-n>  (map a Jira issue key prefix to { repoPath, cloudId } from config/projects.json; exit 1 if unknown)',
           'jira-normalize': '--file <issue.json>  (normalize a saved getJiraIssue response into the neutral intake shape {key,summary,description,issue_type,change_type,parent_key,project_key,input}; exit 1 if malformed)',
+          'plan-order': '--manifest <plan-manifest.json>  (topologically order plans[] by dependsOn; { order:[...] }; exit 1 on cycle/unknown dep)',
+          'split-tasks': '--plan <plan.json> [--cap <n>]  (split any task whose files[] exceeds the cap into same-group parallel chunks; { tasks:[...] })',
           validate: '--schema <name> --file <path>',
           audit: '--target <path> --event <json>  (ts auto-stamped if omitted)',
           gate: '--size S|M|L --rounds <n> --result pass|advisory-fail|blocking-fail [--score <0..1>] [--delta <n>]',

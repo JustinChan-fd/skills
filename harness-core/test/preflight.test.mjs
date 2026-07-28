@@ -148,3 +148,60 @@ test('preflight reports unparseable artifacts as findings, not throws', () => {
   assert.equal(r.ok, false);
   assert.ok(r.findings.some((f) => f.check === 'artifact_parses'));
 });
+
+// ── implement preflight ───────────────────────────────────────────────────────
+// Before spending a fresh implement verifier, catch the mechanical defects: the
+// plan.json must exist, parse, be schema-valid, and every non-NEW location it
+// names must exist in the repo (a NEW: location's parent dir must exist).
+
+const IMPL_PLAN = (over = {}) => ({
+  run_id: '2026-07-25T000000Z__t__implement__adhoc__abc123',
+  units: [
+    { id: 'U1', title: 'edit app', locations: ['src/app.ts'], done_criteria: ['done'], depends_on: [] },
+  ],
+  order: ['U1'],
+  schema_version: '1.0.0',
+  ...over,
+});
+
+test('implement preflight passes when plan.json is schema-valid and locations exist', () => {
+  const { runDir } = scaffold();
+  writeFileSync(join(runDir, 'plan.json'), JSON.stringify(IMPL_PLAN()));
+  const r = preflight({ phase: 'implement', runDir });
+  assert.equal(r.ok, true);
+  assert.deepEqual(r.findings, []);
+});
+
+test('implement preflight flags a missing plan.json', () => {
+  const { runDir } = scaffold();
+  const r = preflight({ phase: 'implement', runDir });
+  assert.equal(r.ok, false);
+  assert.ok(r.findings.some((f) => f.check === 'artifact_exists'));
+});
+
+test('implement preflight flags a plan that fails the plan schema', () => {
+  const { runDir } = scaffold();
+  writeFileSync(join(runDir, 'plan.json'), JSON.stringify(IMPL_PLAN({ units: [{ id: 'U1' }] })));
+  const r = preflight({ phase: 'implement', runDir });
+  assert.equal(r.ok, false);
+  assert.ok(r.findings.some((f) => f.check === 'schema_valid'));
+});
+
+test('implement preflight flags a location that does not exist', () => {
+  const { runDir } = scaffold();
+  writeFileSync(join(runDir, 'plan.json'), JSON.stringify(IMPL_PLAN({
+    units: [{ id: 'U1', title: 'x', locations: ['src/ghost.ts'], done_criteria: ['d'], depends_on: [] }],
+  })));
+  const r = preflight({ phase: 'implement', runDir });
+  assert.equal(r.ok, false);
+  assert.ok(r.findings.some((f) => f.check === 'location_exists'));
+});
+
+test('implement preflight allows a NEW: location whose parent dir exists', () => {
+  const { runDir } = scaffold();
+  writeFileSync(join(runDir, 'plan.json'), JSON.stringify(IMPL_PLAN({
+    units: [{ id: 'U1', title: 'x', locations: ['NEW: src/components/clientFetch.ts'], done_criteria: ['d'], depends_on: [] }],
+  })));
+  const r = preflight({ phase: 'implement', runDir });
+  assert.equal(r.ok, true);
+});

@@ -72,6 +72,45 @@ test('jira-normalize exits 1 on a malformed issue (no summary)', () => {
   assert.equal(run(['jira-normalize', '--file', file]).code, 1);
 });
 
+test('plan-order topologically orders a plan manifest by dependsOn', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'harness-planord-'));
+  const file = join(dir, 'plan-manifest.json');
+  writeFileSync(file, JSON.stringify({ plans: [
+    { id: 'p2', jsonPath: 'b.json', dependsOn: ['p1'] },
+    { id: 'p1', jsonPath: 'a.json', dependsOn: [] },
+  ] }));
+  const r = run(['plan-order', '--manifest', file]);
+  assert.equal(r.code, 0);
+  assert.deepEqual(r.out.order.map((p) => p.id), ['p1', 'p2']);
+});
+
+test('plan-order exits 1 on a circular dependency', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'harness-planord-'));
+  const file = join(dir, 'plan-manifest.json');
+  writeFileSync(file, JSON.stringify({ plans: [
+    { id: 'p1', jsonPath: 'a.json', dependsOn: ['p2'] },
+    { id: 'p2', jsonPath: 'b.json', dependsOn: ['p1'] },
+  ] }));
+  assert.equal(run(['plan-order', '--manifest', file]).code, 1);
+});
+
+test('split-tasks splits an oversized task into same-group parallel chunks', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'harness-split-'));
+  const file = join(dir, 'plan.json');
+  const files = Array.from({ length: 20 }, (_, i) => `src/client/f${i}.js`);
+  writeFileSync(file, JSON.stringify({ tasks: [
+    { id: 'T05', title: 'migrate', groupId: 'G3', block: 'sequential', files, acceptanceCriteria: ['no axios'] },
+  ] }));
+  const r = run(['split-tasks', '--plan', file]);
+  assert.equal(r.code, 0);
+  assert.ok(r.out.tasks.length > 1, 'oversized task should split');
+  for (const t of r.out.tasks) {
+    assert.ok(t.files.length <= 8, `chunk ${t.id} over cap`);
+    assert.equal(t.block, 'parallel');
+    assert.equal(t.groupId, 'G3');
+  }
+});
+
 test('run-end persists active-ms, agent-count, and skill-metrics', () => {
   const targetDir = mkdtempSync(join(tmpdir(), 'harness-cliv2-'));
   const offlineEnv = { ...process.env, HARNESS_TELEMETRY_REMOTE: join(targetDir, 'no.git'), HARNESS_TELEMETRY_DIR: join(targetDir, 'clone') };
