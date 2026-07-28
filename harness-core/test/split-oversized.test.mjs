@@ -68,8 +68,8 @@ test('a task with no files key at all is untouched', () => {
 
 test('the cap is inclusive — 8 passes, 9 splits', () => {
   // The boundary is the thing most likely to be got wrong, and it must match the two other
-  // places this number already lives: _FILE_BUDGET_CAP = 8 in harness-plan/workflow.js and
-  // intake's noOversized check (">8 files"). One number, not a third threshold.
+  // place this number still lives: intake's noOversized check (">8 files"). It also matched
+  // _FILE_BUDGET_CAP = 8 in the now-deleted harness-plan skill. One number, not a third threshold.
   assert.equal(splitOversizedTasks([taskWith(8)]).length, 1)
   assert.ok(splitOversizedTasks([taskWith(9)]).length > 1)
 })

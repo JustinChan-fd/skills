@@ -1,8 +1,9 @@
 // v2 graft (schema_version 2.0.0): the fields the workplace telemetry MUST track
 // that the POC 1.5.0 record did not carry — parent-loop association, cross-phase
 // correlation, active time, per-skill perf, and the XS size.
-// SOURCE: ~/Desktop/Repos/skills/harness-telemetry-schema/telemetry-v2.jsonc (the
-// v2 field set these graft onto the proven POC lifecycle). Input/output tokens are
+// SOURCE: the v2 field set originally annotated in the harness-telemetry-schema
+// skill (now deleted — schemas/run-record.schema.json is the source of truth,
+// and this test is what enforces it). Input/output tokens are
 // intentionally NOT re-added here — tokens_directional.by_model already carries them.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';

@@ -46,8 +46,9 @@ function cell(value) {
   return String(value ?? '').replace(/\|/g, '\\|').replace(/\r?\n/g, ' ');
 }
 
-// Render the implement PR body exactly as documented in
-// harness-implement/SKILL.md step 5: it opens with `Closes #<issue>` for
+// Render the implement PR body as specified by harness-implement-core step 8
+// (the shape originated in the now-deleted harness-implement skill's step 5):
+// it opens with `Closes #<issue>` for
 // issue-sourced runs (so GitHub auto-closes on merge), renders the
 // entry-contract results as a markdown table, lists the landing checklist,
 // cites the run id, and appends a `## Advisory residue` section with one

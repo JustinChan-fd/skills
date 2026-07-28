@@ -3,8 +3,9 @@
 // downstream phases (plan, implement) read the manifest instead of re-hitting
 // Jira. Intake fetches ONCE and normalizes to disk immediately — a fetch
 // failure then fails only intake, cleanly (see plan §F risk: Jira MCP in a loop).
-// SOURCE: field set from harness-intake/SKILL.md getJiraIssue call
-// (fields: summary, description, issuetype, parent, project; markdown format).
+// SOURCE: field set carried over from the legacy harness-intake skill's
+// getJiraIssue call (fields: summary, description, issuetype, parent, project;
+// markdown format). That skill is deleted — this is the field set's only home.
 
 // Jira issue type → conventional-commit bucket. Unknown types return null so
 // intake classifies by substance (a request worded as a feature can be a fix).

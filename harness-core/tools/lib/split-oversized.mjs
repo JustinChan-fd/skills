@@ -12,8 +12,9 @@
 // sequential only when two parallel tasks in a group share a file, and lands
 // one commit per group. Same groupId + block:'parallel' + disjoint files[]
 // rides all three — no new orchestration.
-// Folded from the Desktop harness-plan/lib/split-oversized.js (its Workflow
-// inline mirror is deleted — this is the single home now).
+// Folded from the legacy harness-plan skill's lib/split-oversized.js. That
+// skill and its Workflow inline mirror are both deleted — this is the single
+// home now.
 
 /** The per-task file cap: `cap` files pass, `cap + 1` splits. Matches intake's noOversized check (">8 files"). */
 export const FILE_CAP = 8;

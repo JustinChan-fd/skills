@@ -1,7 +1,7 @@
 // jira.mjs: normalize the mcp__atlassian__getJiraIssue response shape into the
 // neutral intake input the SKILL.md consumes — so the skill never hand-parses
 // Jira JSON and plan/implement never re-hit Jira (they read the manifest).
-// SOURCE: field set from harness-intake/SKILL.md getJiraIssue call
+// SOURCE: field set from the legacy harness-intake skill's getJiraIssue call
 // (fields: summary, description, issuetype, parent, project; markdown format).
 import { test } from 'node:test';
 import assert from 'node:assert/strict';

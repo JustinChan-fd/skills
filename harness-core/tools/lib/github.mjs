@@ -4,8 +4,9 @@
 // downstream phases (plan, implement) read the manifest instead of re-hitting
 // the tracker. Intake fetches ONCE and normalizes to disk immediately — a fetch
 // failure then fails only intake, cleanly (mirrors the Jira-in-a-loop risk).
-// SOURCE: field set from harness-intake/SKILL.md gh-issue-view call
-// (fields: number, title, body, labels).
+// SOURCE: field set carried over from the legacy harness-intake skill's
+// gh-issue-view call (fields: number, title, body, labels). That skill is
+// deleted — this is the only home for the field set now.
 
 // GitHub label → conventional-commit bucket. Unknown/absent labels return null
 // so intake classifies by substance (same contract as unknown Jira issue types).

@@ -2,7 +2,7 @@
 // response shape into the SAME neutral intake shape jira.mjs produces — so the
 // SKILL.md never hand-parses GitHub JSON, plan/implement read the manifest (not
 // the tracker), and every downstream phase is source-agnostic.
-// SOURCE: field set from harness-intake/SKILL.md gh-issue-view call
+// SOURCE: field set from the legacy harness-intake skill's gh-issue-view call
 // (fields: number, title, body, labels).
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
