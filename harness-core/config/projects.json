@@ -1,0 +1,11 @@
+{
+  "defaultCloudId": "fandango.atlassian.net",
+  "projects": {
+    "TARS": { "repoPath": "/Users/206618626@bwt3.com/Desktop/Repos/webtarsthree", "cloudId": "fandango.atlassian.net" },
+    "RTFE": { "repoPath": "/Users/206618626@bwt3.com/Desktop/Repos/webtarsthree", "cloudId": "fandango.atlassian.net" },
+    "EMS":  { "repoPath": "/Users/206618626@bwt3.com/Desktop/Repos/tars-ems", "cloudId": "fandango.atlassian.net" },
+    "ARTI": { "repoPath": "/Users/206618626@bwt3.com/Desktop/Repos/arti", "cloudId": "fandango.atlassian.net" },
+    "PIZZA": { "repoPath": "/Users/206618626@bwt3.com/Desktop/Repos/pizza-pie", "cloudId": "fandango.atlassian.net" },
+    "RT":   { "repoPath": "/Users/206618626@bwt3.com/Desktop/Repos/rt-editorial-v4", "cloudId": "fandango.atlassian.net" }
+  }
+}

@@ -1,0 +1,37 @@
+{
+  "$id": "handoff",
+  "type": "object",
+  "required": ["run_id", "from_phase", "to_phase", "entry_contract", "artifacts", "schema_version"],
+  "additionalProperties": false,
+  "properties": {
+    "run_id": { "type": "string" },
+    "from_phase": { "enum": ["intake", "plan"] },
+    "to_phase": { "enum": ["plan", "implement"] },
+    "entry_contract": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["criterion", "tag"],
+        "additionalProperties": false,
+        "properties": {
+          "criterion": { "type": "string" },
+          "tag": { "enum": ["blocking", "advisory"] }
+        }
+      }
+    },
+    "artifacts": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["path", "description"],
+        "additionalProperties": false,
+        "properties": {
+          "path": { "type": "string" },
+          "description": { "type": "string" }
+        }
+      }
+    },
+    "notes": { "type": ["string", "null"] },
+    "schema_version": { "type": "string", "const": "1.0.0" }
+  }
+}

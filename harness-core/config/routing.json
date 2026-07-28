@@ -1,0 +1,56 @@
+{
+  "schema_version": "1.0.0",
+  "sizes": {
+    "S": { "max_parallel_readers": 2, "revision_cap": 3, "subagent_token_cap": 100000, "watchdog_stall_seconds": 300, "cost_ceiling_usd": 5 },
+    "M": { "max_parallel_readers": 4, "revision_cap": 5, "subagent_token_cap": 200000, "watchdog_stall_seconds": 300, "cost_ceiling_usd": 15 },
+    "L": { "max_parallel_readers": 6, "revision_cap": 5, "subagent_token_cap": 200000, "watchdog_stall_seconds": 600, "cost_ceiling_usd": 50 }
+  },
+  "tiers": {
+    "read_only_discovery": "LOW",
+    "synthesis_writer": "MID",
+    "verifier_intake": "MID",
+    "verifier_plan": "MID",
+    "verifier_implement": "HIGH",
+    "entry_contract": "MID",
+    "adversarial_reviewer": "HIGH"
+  },
+  "tier_models": { "LOW": "haiku", "MID": "sonnet", "HIGH": "opus" },
+  "reasoning": {
+    "read_only_discovery": "MINIMAL",
+    "synthesis_writer": "MODERATE",
+    "verifier_intake": "FULL",
+    "verifier_plan": "FULL",
+    "verifier_implement": "FULL",
+    "entry_contract": "FULL",
+    "adversarial_reviewer": "FULL"
+  },
+  "plateau_threshold": 0.05,
+  "advisory_open_score": 0.9,
+  "anomalies": { "outlier_multiple": 3, "min_samples": 3, "recent_limit": 50 },
+  "tier_prices_usd_per_mtok": {
+    "LOW": { "in": 1, "out": 5, "cache_read": 0.1, "cache_write": 1.25 },
+    "MID": { "in": 3, "out": 15, "cache_read": 0.3, "cache_write": 3.75 },
+    "HIGH": { "in": 5, "out": 25, "cache_read": 0.5, "cache_write": 6.25 }
+  },
+  "price_table": {
+    "version": "2026-07-26.1",
+    "source_url": "https://docs.claude.com/en/docs/about-claude/pricing",
+    "retrieved": "2026-07-26",
+    "note": "Tier-level list rates for the tier_models aliases (haiku/sonnet/opus). in/out are combined-direction bounds; cache_read/cache_write are the standard cache multipliers of the input rate (read ~0.1x, 5-minute write ~1.25x). tokens_by_tier holds in+out totals, so estimated_cost stays a lo/mid/hi range; directional per-model sums (tokens_directional) can collapse that range to a point via model_id_to_tier. Bump version on any rate/column change so historical records stay re-priceable."
+  },
+  "model_id_to_tier": {
+    "claude-opus-4-8": "HIGH",
+    "claude-opus-4-7": "HIGH",
+    "claude-opus-4-6": "HIGH",
+    "claude-opus-4-5": "HIGH",
+    "claude-opus-4-1": "HIGH",
+    "claude-opus-4-0": "HIGH",
+    "claude-fable-5": "HIGH",
+    "claude-mythos-5": "HIGH",
+    "claude-sonnet-5": "MID",
+    "claude-sonnet-4-6": "MID",
+    "claude-sonnet-4-5": "MID",
+    "claude-sonnet-4-0": "MID",
+    "claude-haiku-4-5": "LOW"
+  }
+}

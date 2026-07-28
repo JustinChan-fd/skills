@@ -1,0 +1,15 @@
+{
+  "$id": "audit-entry",
+  "type": "object",
+  "required": ["ts", "run_id", "event"],
+  "additionalProperties": false,
+  "properties": {
+    "ts": { "type": "string" },
+    "run_id": { "type": "string" },
+    "phase": { "type": ["string", "null"] },
+    "agent_id": { "type": ["string", "null"] },
+    "event": { "enum": ["run_start", "phase_start", "phase_end", "run_end", "spawn", "verifier_round", "gate_decision", "stall", "kill", "resume", "budget_exhausted", "needs_decision", "cost_update", "sweep", "error", "note"] },
+    "data": { "type": "object" },
+    "schema_version": { "type": "string", "const": "1.0.0" }
+  }
+}

@@ -1,0 +1,68 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { writeFileSync, mkdtempSync } from 'node:fs';
+import { join } from 'node:path';
+import { tmpdir, homedir } from 'node:os';
+import { resolveConfig, sizeBudgets, tierFor, expandHome } from '../tools/lib/config.mjs';
+
+test('routing defaults load; sizes and tiers resolve', () => {
+  const { routing } = resolveConfig({ env: {}, userFile: '/nonexistent' });
+  assert.equal(sizeBudgets(routing, 'S').max_parallel_readers, 2);
+  assert.equal(sizeBudgets(routing, 'L').watchdog_stall_seconds, 600);
+  assert.deepEqual(tierFor(routing, 'read_only_discovery'), { tier: 'LOW', model: 'haiku', reasoning: 'MINIMAL' });
+  assert.deepEqual(tierFor(routing, 'verifier_implement'), { tier: 'HIGH', model: 'opus', reasoning: 'FULL' });
+});
+
+test('unknown size and task type fail loudly', () => {
+  const { routing } = resolveConfig({ env: {}, userFile: '/nonexistent' });
+  assert.throws(() => sizeBudgets(routing, 'XL'), /unknown size/);
+  assert.throws(() => tierFor(routing, 'vibe_check'), /unknown task type/);
+});
+
+test('user.json overrides load; env overrides user.json', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'harness-cfg-'));
+  const userFile = join(dir, 'user.json');
+  writeFileSync(userFile, JSON.stringify({ defaultRepo: 'from-file', telemetry: { repo: 'u/t' } }));
+  const noEnv = resolveConfig({ env: {}, userFile });
+  assert.equal(noEnv.user.defaultRepo, 'from-file');
+  const withEnv = resolveConfig({ env: { HARNESS_DEFAULT_REPO: 'from-env', HARNESS_TELEMETRY_DIR: '/tmp/tel' }, userFile });
+  assert.equal(withEnv.user.defaultRepo, 'from-env');
+  assert.equal(withEnv.user.telemetry.repo, 'u/t');
+  assert.equal(withEnv.user.telemetry.dir, '/tmp/tel');
+});
+
+test('routing exposes cache_read/cache_write columns alongside in/out for every tier', () => {
+  const { routing } = resolveConfig({ env: {}, userFile: '/nonexistent' });
+  for (const tier of ['LOW', 'MID', 'HIGH']) {
+    const rates = routing.tier_prices_usd_per_mtok[tier];
+    for (const col of ['in', 'out', 'cache_read', 'cache_write']) {
+      assert.equal(typeof rates[col], 'number', `${tier}.${col} must be numeric`);
+    }
+    // cache multipliers follow the standard convention against the input rate.
+    assert.ok(Math.abs(rates.cache_read - rates.in * 0.1) < 1e-9);
+    assert.ok(Math.abs(rates.cache_write - rates.in * 1.25) < 1e-9);
+  }
+});
+
+test('routing exposes an explicit model-id-to-tier map covering the tier aliases in use', () => {
+  const { routing } = resolveConfig({ env: {}, userFile: '/nonexistent' });
+  const map = routing.model_id_to_tier;
+  assert.equal(map['claude-opus-4-8'], 'HIGH');
+  assert.equal(map['claude-sonnet-5'], 'MID');
+  assert.equal(map['claude-haiku-4-5'], 'LOW');
+  // every mapped tier must be a real pricing tier
+  for (const tier of Object.values(map)) {
+    assert.ok(routing.tier_prices_usd_per_mtok[tier], `unknown tier ${tier} in model_id_to_tier`);
+  }
+});
+
+test('price_table provenance version reflects the cache-column addition', () => {
+  const { routing } = resolveConfig({ env: {}, userFile: '/nonexistent' });
+  assert.equal(routing.price_table.version, '2026-07-26.1');
+  assert.equal(routing.price_table.retrieved, '2026-07-26');
+});
+
+test('expandHome expands leading tilde only', () => {
+  assert.equal(expandHome('~/x'), join(homedir(), 'x'));
+  assert.equal(expandHome('/abs/x'), '/abs/x');
+});

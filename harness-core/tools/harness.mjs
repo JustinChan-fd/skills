@@ -1,0 +1,420 @@
+#!/usr/bin/env node
+// harness-core/tools/harness.mjs
+// The deterministic spine's front door. Skills shell out here; the LLM never
+// hand-rolls a gate decision, a schema check, or a log write (spec §5).
+// Exit codes: 0 ok · 1 validation/decision failure · 2 fatal logging failure.
+//
+// WHY A SHELLED-OUT SCRIPT, NOT INLINE PROSE (Anthropic docs, retrieved 2026-07-27):
+//   SOURCE: https://platform.claude.com/docs/en/agents-and-tools/agent-skills/overview
+//     "Executable scripts (fill_form.py, validate.py) that Claude runs using bash,
+//      providing deterministic operations without loading their code into context."
+//   SOURCE: https://platform.claude.com/docs/en/agents-and-tools/agent-skills/best-practices
+//     "Prefer scripts for deterministic operations: Write validate_form.py rather
+//      than asking Claude to generate validation code."
+//   SOURCE: https://www.anthropic.com/engineering/equipping-agents-for-the-real-world-with-agent-skills
+//     "Many applications require the deterministic reliability that only code can provide."
+// See harness-core/README.md for the full rationale + the network-access note
+// (why the Jira MCP, gh, and git all work from a shelled-out Node process).
+import { parseArgs } from 'node:util';
+import { readFileSync, appendFileSync } from 'node:fs';
+import { join, dirname } from 'node:path';
+import { loadSchema, validate } from './lib/validate.mjs';
+import { resolveConfig, sizeBudgets, expandHome, resolveProject } from './lib/config.mjs';
+import { gateDecision } from './lib/gate.mjs';
+import { qualityScore } from './lib/quality.mjs';
+import { appendAudit, HarnessError } from './lib/audit.mjs';
+import { initRun, readRecord, phaseEnd, finalizeRun, recordObservedTokens, stampTokensDirectional, finalizeTokens } from './lib/record.mjs';
+import { collectForRun } from './lib/tokens-collect.mjs';
+import { preflight } from './lib/preflight.mjs';
+import { scanAnomalies } from './lib/anomalies.mjs';
+import { scanResidue } from './lib/residue.mjs';
+import { loopState } from './lib/loopstate.mjs';
+import { syncRun, sweep } from './lib/telemetry.mjs';
+import { renderStatusComment, renderPrBody, renderBrief } from './lib/render.mjs';
+import { composeLoopLine } from './lib/looprecord.mjs';
+
+const [subcommand, ...rest] = process.argv.slice(2);
+
+function opts(spec) {
+  return parseArgs({ args: rest, options: spec, strict: true }).values;
+}
+
+function emit(obj, code = 0) {
+  process.stdout.write(JSON.stringify(obj, null, 2) + '\n');
+  process.exit(code);
+}
+
+// Render subcommands print already-assembled markdown/prose to stdout (not a
+// JSON envelope) so the driver can pipe it straight into `gh` — one trailing
+// newline, no JSON.stringify.
+function emitText(str, code = 0) {
+  process.stdout.write(str.endsWith('\n') ? str : str + '\n');
+  process.exit(code);
+}
+
+function telemetryFromConfig() {
+  const { user } = resolveConfig();
+  if (!user.telemetry?.remote || !user.telemetry?.dir) return null;
+  return {
+    remote: user.telemetry.remote,
+    dir: expandHome(user.telemetry.dir),
+    build: user.telemetry.build ?? null,
+    commit_identity: user.telemetry.commit_identity ?? null,
+  };
+}
+
+// Collect directional token sums for a run and stamp them onto record.json
+// (additive — never touches tokens_by_tier / tokens_observed). On any
+// degradation (garbage/missing transcript, unrecognized model id) it still
+// stamps a complete:false tokens_directional with the format version, and
+// writes an estimated-with-note audit event (data.estimated:true, detected by
+// anomalies.mjs's isEstimatedTokensNote). Returns a summary.
+function collectAndStamp(v, routing) {
+  const runDir = v['run-dir'];
+  const record = readRecord(runDir);
+  const now = new Date();
+  const { tokens_directional, note, source } = collectForRun({
+    transcript: v.transcript,
+    mode: v.mode,
+    subagentsDir: v['subagents-dir'],
+    projectDir: v['project-dir'],
+    cwd: v.cwd ?? process.cwd(),
+    // Explicit --start/--end override the record's own run window (the default).
+    start: v.start ?? record.started_at ?? null,
+    end: v.end ?? record.ended_at ?? now.toISOString(),
+    gapCapMs: v['gap-cap-ms'] !== undefined ? Number(v['gap-cap-ms']) : undefined,
+    modelTierMap: routing.model_id_to_tier ?? {},
+    now,
+  });
+  stampTokensDirectional({ runDir, tokensDirectional: tokens_directional });
+  if (note) {
+    appendAudit(dirname(dirname(runDir)), {
+      ts: now.toISOString(),
+      run_id: record.run_id,
+      event: 'note',
+      data: { type: 'tokens', estimated: true, complete: false, reason: note.code, detail: note.detail },
+    });
+  }
+  return { complete: tokens_directional.complete, degraded: !!note, source };
+}
+
+const TOKENS_COLLECT_OPTS = {
+  transcript: { type: 'string' }, mode: { type: 'string' },
+  'subagents-dir': { type: 'string' }, 'project-dir': { type: 'string' },
+  cwd: { type: 'string' }, 'gap-cap-ms': { type: 'string' },
+  start: { type: 'string' }, end: { type: 'string' },
+};
+
+try {
+  switch (subcommand) {
+    case 'init-run': {
+      const v = opts({
+        target: { type: 'string' }, repo: { type: 'string' }, kind: { type: 'string' },
+        source: { type: 'string' }, issue: { type: 'string' }, branch: { type: 'string' },
+        'routing-policy': { type: 'string' },
+        // v2 graft: parent-loop association, cross-phase correlation, provenance.
+        'parent-run-id': { type: 'string' }, 'loop-run-id': { type: 'string' },
+        'correlation-id': { type: 'string' }, 'repo-path': { type: 'string' },
+        'skills-commit': { type: 'string' },
+      });
+      const { runId, runDir } = initRun({
+        targetDir: v.target, repo: v.repo, kind: v.kind, source: v.source,
+        issue: v.issue ?? null, branch: v.branch ?? null,
+        routingPolicy: v['routing-policy'] ?? null,
+        parentRunId: v['parent-run-id'] ?? null,
+        loopRunId: v['loop-run-id'], // undefined → mirrors parent (see initRun)
+        correlationId: v['correlation-id'] ?? null,
+        repoPath: v['repo-path'] ?? null,
+        skillsCommit: v['skills-commit'] ?? null,
+      });
+      emit({ run_id: runId, run_dir: runDir });
+    }
+    case 'resolve-project': {
+      const v = opts({ issue: { type: 'string' } });
+      const project = resolveProject(v.issue);
+      if (!project) emit({ error: `no project mapping for issue key: ${v.issue ?? '(none)'}` }, 1);
+      emit(project);
+    }
+    case 'validate': {
+      const v = opts({ schema: { type: 'string' }, file: { type: 'string' } });
+      const errors = validate(loadSchema(v.schema), JSON.parse(readFileSync(v.file, 'utf8')));
+      emit({ valid: errors.length === 0, errors }, errors.length ? 1 : 0);
+    }
+    case 'audit': {
+      const v = opts({ target: { type: 'string' }, event: { type: 'string' } });
+      appendAudit(join(v.target, '.harness'), JSON.parse(v.event));
+      emit({ ok: true });
+    }
+    case 'gate': {
+      const v = opts({
+        size: { type: 'string' }, rounds: { type: 'string' }, result: { type: 'string' }, delta: { type: 'string' },
+        score: { type: 'string' },
+      });
+      const { routing } = resolveConfig();
+      const decision = gateDecision({
+        result: v.result,
+        rounds: Number(v.rounds),
+        cap: sizeBudgets(routing, v.size).revision_cap,
+        delta: v.delta !== undefined ? Number(v.delta) : null,
+        plateauThreshold: routing.plateau_threshold,
+        score: v.score !== undefined ? Number(v.score) : null,
+        advisoryOpenScore: routing.advisory_open_score ?? null,
+      });
+      emit(decision, decision.decision === 'shut' ? 1 : 0);
+    }
+    case 'phase-end': {
+      const v = opts({
+        'run-dir': { type: 'string' }, phase: { type: 'string' }, status: { type: 'string' },
+        rounds: { type: 'string' }, score: { type: 'string' }, size: { type: 'string' },
+        ...TOKENS_COLLECT_OPTS,
+      });
+      phaseEnd({
+        runDir: v['run-dir'], phase: v.phase, status: v.status,
+        rounds: v.rounds !== undefined ? Number(v.rounds) : null,
+        score: v.score !== undefined ? Number(v.score) : null,
+        size: v.size ?? null,
+      });
+      // Persist directional tokens incrementally at phase-end too, so a crash
+      // before run-end still leaves this phase's collection on disk. Best-effort:
+      // token enrichment must never fail a phase-end.
+      try {
+        const { routing } = resolveConfig();
+        collectAndStamp(v, routing);
+      } catch {
+        /* enrichment is best-effort; the phase already ended successfully */
+      }
+      emit(readRecord(v['run-dir']));
+    }
+    case 'run-end': {
+      const v = opts({
+        target: { type: 'string' }, 'run-dir': { type: 'string' }, status: { type: 'string' },
+        'reason-code': { type: 'string' }, 'reason-detail': { type: 'string' },
+        'tokens-by-tier': { type: 'string' }, cost: { type: 'string' },
+        // v2 graft: active time, per-model/per-phase agent counts, per-skill metrics.
+        'active-ms': { type: 'string' }, 'agent-count': { type: 'string' },
+        'skill-metrics': { type: 'string' },
+        ...TOKENS_COLLECT_OPTS,
+      });
+      const reason = v['reason-code']
+        ? { code: v['reason-code'], detail: v['reason-detail'] ?? '', phase: null, agent: null }
+        : null;
+      const { routing, user } = resolveConfig();
+      finalizeRun({
+        runDir: v['run-dir'], status: v.status, reason,
+        tokensByTier: v['tokens-by-tier'] ? JSON.parse(v['tokens-by-tier']) : null,
+        cost: v.cost !== undefined ? Number(v.cost) : null,
+        prices: routing.tier_prices_usd_per_mtok ?? null,
+        billingMode: user.billing_mode ?? null,
+        priceTableVersion: routing.price_table?.version ?? null,
+        activeMs: v['active-ms'] !== undefined ? Number(v['active-ms']) : null,
+        agentCount: v['agent-count'] ? JSON.parse(v['agent-count']) : null,
+        skillMetrics: v['skill-metrics'] ? JSON.parse(v['skill-metrics']) : null,
+      });
+      // Final directional-token collection, before the sync, so the synced copy
+      // carries the sums. Best-effort: never fail run-end over enrichment.
+      try {
+        collectAndStamp(v, routing);
+      } catch {
+        /* enrichment is best-effort; the run already finalized */
+      }
+      const telemetry = telemetryFromConfig();
+      const sync = syncRun({ runDir: v['run-dir'], telemetry });
+      const swept = telemetry ? sweep({ targetDir: v.target, telemetry }).swept : [];
+      emit({ status: v.status, synced: sync.synced, swept });
+    }
+    case 'render-status-comment': {
+      const v = opts({
+        phase: { type: 'string' }, status: { type: 'string' }, 'run-id': { type: 'string' },
+        size: { type: 'string' }, 'size-rationale': { type: 'string' },
+        'plan-units': { type: 'string' }, 'plan-blocking': { type: 'string' },
+        'pr-url': { type: 'string' }, notes: { type: 'string' }, next: { type: 'string' },
+      });
+      emitText(renderStatusComment({
+        phase: v.phase, status: v.status, runId: v['run-id'],
+        size: v.size, sizeRationale: v['size-rationale'],
+        planUnits: v['plan-units'], planBlocking: v['plan-blocking'],
+        prUrl: v['pr-url'],
+        notes: v.notes ? JSON.parse(v.notes) : [],
+        next: v.next,
+      }));
+    }
+    case 'render-pr-body': {
+      const v = opts({
+        'change-type': { type: 'string' }, issue: { type: 'string' }, summary: { type: 'string' },
+        'result-rows': { type: 'string' }, landing: { type: 'string' }, 'run-id': { type: 'string' },
+        notes: { type: 'string' },
+      });
+      emitText(renderPrBody({
+        changeType: v['change-type'],
+        issue: v.issue ?? null,
+        summary: v.summary ?? '',
+        resultRows: v['result-rows'] ? JSON.parse(v['result-rows']) : [],
+        landingChecklist: v.landing ? JSON.parse(v.landing) : [],
+        runId: v['run-id'],
+        notes: v.notes ? JSON.parse(v.notes) : [],
+      }));
+    }
+    case 'tokens-finalize': {
+      const v = opts({ tier: { type: 'string', multiple: true } });
+      const observations = (v.tier ?? []).map((spec) => {
+        const [tier, rest = ''] = spec.split('=');
+        const [amountStr, flag] = rest.split(':');
+        return { tier, amount: Number(amountStr), estimated: flag === 'estimated' };
+      });
+      const { tokens_by_tier, note } = finalizeTokens(observations);
+      // The tokens note is emitted only when the driver actually spawned
+      // subagents (≥1 observation) — a run with no spawns writes no note.
+      const out = { tokens_by_tier };
+      if (observations.length) out.tokens_note = note;
+      emit(out);
+    }
+    case 'render-brief': {
+      const v = opts({ file: { type: 'string' } });
+      const brief = JSON.parse(readFileSync(v.file, 'utf8'));
+      const errors = validate(loadSchema('brief'), brief);
+      if (errors.length) emit({ valid: false, errors }, 1);
+      emitText(renderBrief(brief));
+    }
+    case 'loop-record': {
+      const v = opts({
+        target: { type: 'string' }, issue: { type: 'string' }, actions: { type: 'string' },
+        outcome: { type: 'string' }, 'pr-url': { type: 'string' }, 'anomalies-scan': { type: 'string' },
+        'phase-run': { type: 'string', multiple: true }, ts: { type: 'string' },
+      });
+      const phaseRuns = (v['phase-run'] ?? []).map((spec) => {
+        const idx = spec.indexOf('=');
+        return { phase: spec.slice(0, idx), runDir: spec.slice(idx + 1) };
+      });
+      const line = composeLoopLine({
+        issue: v.issue !== undefined ? Number(v.issue) : null,
+        actions: v.actions ? JSON.parse(v.actions) : [],
+        outcome: v.outcome,
+        prUrl: v['pr-url'] ?? null,
+        anomaliesScanPath: v['anomalies-scan'],
+        phaseRuns,
+        ts: v.ts ?? new Date().toISOString(),
+      });
+      appendFileSync(join(v.target, '.harness', 'loop.jsonl'), JSON.stringify(line) + '\n');
+      emit(line);
+    }
+    case 'record-observed-tokens': {
+      const v = opts({
+        'run-dir': { type: 'string' }, total: { type: 'string' }, tier: { type: 'string' },
+        source: { type: 'string' },
+      });
+      const record = recordObservedTokens({
+        runDir: v['run-dir'],
+        total: Number(v.total),
+        tier: v.tier,
+        source: v.source ?? 'agent_tool_usage_tag',
+      });
+      const telemetry = telemetryFromConfig();
+      const sync = syncRun({ runDir: v['run-dir'], telemetry });
+      emit({
+        status: record.status,
+        tokens_by_tier: record.tokens_by_tier,
+        tokens_observed: record.tokens_observed,
+        synced: sync.synced,
+      });
+    }
+    case 'tokens-collect': {
+      const v = opts({ 'run-dir': { type: 'string' }, target: { type: 'string' }, ...TOKENS_COLLECT_OPTS });
+      const { routing } = resolveConfig();
+      const summary = collectAndStamp(v, routing);
+      const record = readRecord(v['run-dir']);
+      emit({ ok: true, ...summary, tokens_directional: record.tokens_directional });
+    }
+    case 'preflight': {
+      const v = opts({ phase: { type: 'string' }, 'run-dir': { type: 'string' } });
+      const r = preflight({ phase: v.phase, runDir: v['run-dir'] });
+      emit(r, r.ok ? 0 : 1);
+    }
+    case 'anomalies': {
+      const v = opts({ dir: { type: 'string' }, repo: { type: 'string' }, limit: { type: 'string' } });
+      const { user, routing } = resolveConfig();
+      const dir = v.dir ? expandHome(v.dir) : user.telemetry?.dir ? expandHome(user.telemetry.dir) : null;
+      if (!dir) emit({ error: 'no telemetry dir: pass --dir or configure telemetry.dir in user.json' }, 1);
+      const r = scanAnomalies({
+        dir,
+        repo: v.repo ?? null,
+        limit: v.limit !== undefined ? Number(v.limit) : null,
+        routing,
+      });
+      emit(r, r.ok ? 0 : 1);
+    }
+    case 'residue-scan': {
+      const v = opts({ target: { type: 'string' }, issue: { type: 'string' } });
+      const auditPath = join(v.target, '.harness', 'audit.jsonl');
+      const items = scanResidue({ auditPath, issue: Number(v.issue) });
+      emit({ items }); // exit 0 always — an empty result is a valid outcome
+    }
+    case 'loop-state': {
+      const v = opts({ target: { type: 'string' }, issue: { type: 'string' } });
+      emit(loopState({ targetDir: v.target, issue: v.issue }));
+    }
+    case 'quality': {
+      const v = opts({ 'run-dir': { type: 'string' } });
+      const record = readRecord(v['run-dir']);
+      const auditPath = join(v['run-dir'], '..', '..', 'audit.jsonl');
+      let auditWritten = false;
+      try {
+        auditWritten = readFileSync(auditPath, 'utf8').includes(record.run_id);
+      } catch {
+        auditWritten = false;
+      }
+      let manifestValid = false;
+      try {
+        manifestValid = validate(loadSchema('manifest'), JSON.parse(readFileSync(join(v['run-dir'], 'manifest.json'), 'utf8'))).length === 0;
+      } catch {
+        manifestValid = false;
+      }
+      const score = qualityScore({
+        verifierScores: record.phases.map((p) => p.verifier_score).filter((s) => s !== null),
+        deliverable: {
+          completed: record.status === 'succeeded',
+          manifestValid,
+          gatesDecided: record.phases.length > 0,
+          auditWritten,
+        },
+      });
+      emit({ score });
+    }
+    case 'config': {
+      emit(resolveConfig());
+    }
+    case 'sweep': {
+      const v = opts({ target: { type: 'string' } });
+      emit(sweep({ targetDir: v.target, telemetry: telemetryFromConfig() }));
+    }
+    default:
+      emit({
+        error: `unknown subcommand: ${subcommand ?? '(none)'}`,
+        usage: {
+          'init-run': '--target <path> --repo <slug> --kind intake|plan|implement --source issue-<n>|adhoc|file [--issue <n>] [--branch <b>] [--parent-run-id <id>] [--loop-run-id <id>] [--correlation-id <id>] [--repo-path <path>] [--skills-commit <sha>]',
+          'resolve-project': '--issue <KEY-n>  (map a Jira issue key prefix to { repoPath, cloudId } from config/projects.json; exit 1 if unknown)',
+          validate: '--schema <name> --file <path>',
+          audit: '--target <path> --event <json>  (ts auto-stamped if omitted)',
+          gate: '--size S|M|L --rounds <n> --result pass|advisory-fail|blocking-fail [--score <0..1>] [--delta <n>]',
+          preflight: '--phase intake|plan --run-dir <dir>  (deterministic checks; run before spawning a verifier)',
+          anomalies: '[--dir <telemetry-clone>] [--repo <slug>] [--limit <n>]  (red-flag scan over recent records; exit 1 on findings)',
+          'loop-state': '--target <path> --issue <n>  (next pipeline action for an issue: intake|plan|implement|done + stranded run)',
+          'residue-scan': '--target <path> --issue <n>  (u1-shaped residue/defect notes for an issue from <target>/.harness/audit.jsonl; { items: [...] }, exit 0 even when empty)',
+          'phase-end': '--run-dir <dir> --phase <p> --status <s> [--rounds n] [--score x] [--size S|M|L]',
+          'run-end': '--target <path> --run-dir <dir> --status <s> [--reason-code c --reason-detail d] [--tokens-by-tier json] [--cost usd]',
+          'render-status-comment': '--phase <p> --status <s> --run-id <id> --next <text> [--size <S|M|L> --size-rationale <text>] [--plan-units <n> --plan-blocking <n>] [--pr-url <url>] [--notes <json-array>]  (print the templates/status-comment.md comment body to stdout)',
+          'render-pr-body': '--issue <n> --summary <text> --run-id <id> [--change-type <t>] [--result-rows <json>] [--landing <json>] [--notes <json>]  (print the implement PR body — Closes-#, entry-contract table, landing checklist, run id, Advisory-residue section — to stdout)',
+          'render-brief': '--file <path>  (validate a brief JSON against the brief schema and print the rendered seven-item Agent-tool prompt to stdout)',
+          'tokens-finalize': '--tier <TIER>=<amount>[:estimated] [--tier ...]  (sum per-tier subagent-token observations; print { tokens_by_tier, tokens_note } — the note carries estimated:true when any observation is :estimated)',
+          'loop-record': '--target <path> --issue <n> --actions <json> --outcome <s> --anomalies-scan <path> [--pr-url <url>] [--phase-run <phase>=<run_dir> ...] [--ts <iso>]  (compose one tick\'s loop.jsonl line from the anomalies scan + each dispatched run\'s tokens_observed, and append it to <target>/.harness/loop.jsonl)',
+          'record-observed-tokens': '--run-dir <dir> --total <n> --tier LOW|MID|HIGH [--source <str>]  (add an externally-observed token total ALONGSIDE a finalized run\'s own tokens_by_tier — additive, never overwrites; re-syncs telemetry)',
+          'tokens-collect': '--run-dir <dir> [--transcript <path>] [--mode loop|standalone] [--subagents-dir <dir>] [--project-dir <dir>] [--cwd <str>] [--gap-cap-ms <n>]  (parse a transcript and stamp additive tokens_directional onto record.json; degrades to estimated-with-note, exit 0, never crashes)',
+          quality: '--run-dir <dir>',
+          config: '(no flags)',
+          sweep: '--target <path>',
+        },
+      }, 1);
+  }
+} catch (err) {
+  const code = err instanceof HarnessError && err.code === 'logging_unavailable' ? 2 : 1;
+  emit({ error: err.message, code: err.code ?? null }, code);
+}

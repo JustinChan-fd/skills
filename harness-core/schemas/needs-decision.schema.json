@@ -1,0 +1,15 @@
+{
+  "$id": "needs-decision",
+  "type": "object",
+  "required": ["run_id", "agent_id", "decision_needed", "options", "blocking", "ts"],
+  "additionalProperties": false,
+  "properties": {
+    "run_id": { "type": "string" },
+    "agent_id": { "type": "string" },
+    "decision_needed": { "type": "string" },
+    "options": { "type": "array", "items": { "type": "string" } },
+    "blocking": { "type": "boolean" },
+    "ts": { "type": "string" },
+    "schema_version": { "type": "string", "const": "1.0.0" }
+  }
+}
