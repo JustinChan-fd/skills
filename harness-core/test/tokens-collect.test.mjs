@@ -128,6 +128,15 @@ test('collectFromFile on a missing path returns a structured not-found result, n
   assert.equal(r.error.code, 'not_found');
 });
 
+test('collectFromFile on subagent-driver fixture returns correct per-model sums', () => {
+  const r = collectFromFile(fixture('subagent-driver.jsonl'));
+  assert.equal(r.ok, true);
+  assert.equal(r.by_model['claude-sonnet-4-6'].input, 110);
+  assert.equal(r.by_model['claude-sonnet-4-6'].output, 45);
+  assert.equal(r.by_model['claude-sonnet-4-6'].cache_read, 500);
+  assert.equal(r.by_model['claude-sonnet-4-6'].cache_creation, 30);
+});
+
 // ---- u3: transcript discovery ----
 
 // Write a .jsonl file and stamp it with an explicit mtime (git does not

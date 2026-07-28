@@ -465,7 +465,7 @@ export function backfillDirectional({ runDir, subagentsDir, start, end, modelTie
   }
 
   const effectiveStart = start ?? record.started_at ?? null;
-  const effectiveEnd = end ?? record.ended_at ?? null;
+  const effectiveEnd = end ?? record.ended_at ?? now.toISOString();
 
   const discovered = discoverSubagentForRun({
     subagentsDir,
@@ -486,21 +486,35 @@ export function backfillDirectional({ runDir, subagentsDir, start, end, modelTie
     return { ok: false, error: result.error };
   }
 
-  // Cross-check: directional sum vs externally-observed total.
+  // Guard: a transcript that parsed but contained no usage data in the run window
+  // must not be stamped as a complete empty result — that looks like a successful
+  // attribution of zero tokens, which is indistinguishable from no data.
+  if (Object.keys(result.by_model).length === 0) {
+    return {
+      ok: false,
+      error: { code: 'no_usage', detail: 'transcript was discovered but contained no usage data within the run window — not stamping empty result' },
+    };
+  }
+
+  // Cross-check: input+output sum vs externally-observed total.
+  // We compare input+output only (non-cache tokens) because tokens_observed.total
+  // is the Agent-tool subagent_tokens tag, which doesn't accumulate session-wide
+  // cache_read the way raw JSONL does. Cache counts compound across all turns,
+  // so including them in the cross-check numerator inflates the ratio 10–400×.
   const observedTotal = record.tokens_observed?.total ?? 0;
   if (observedTotal > 0 && result.ok) {
-    const directionalSum = Object.values(result.by_model).reduce(
-      (sum, b) => sum + (b.input ?? 0) + (b.output ?? 0) + (b.cache_read ?? 0) + (b.cache_creation ?? 0),
+    const inputOutputSum = Object.values(result.by_model).reduce(
+      (acc, b) => acc + (b.input ?? 0) + (b.output ?? 0),
       0,
     );
-    if (directionalSum > 0) {
-      const ratio = directionalSum / observedTotal;
+    if (inputOutputSum > 0) {
+      const ratio = inputOutputSum / observedTotal;
       if (ratio < 0.1 || ratio > 10) {
         return {
           ok: false,
           error: {
             code: 'attribution_suspect',
-            detail: `directional sum ${directionalSum} diverges from observed total ${observedTotal} (ratio ${ratio.toFixed(4)}); skipping backfill`,
+            detail: `input+output sum ${inputOutputSum} diverges from observed total ${observedTotal} (ratio ${ratio.toFixed(4)}); skipping backfill`,
           },
         };
       }

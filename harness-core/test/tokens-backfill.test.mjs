@@ -198,6 +198,25 @@ test('backfillDirectional returns not_found when subagents dir is missing', () =
   assert.equal(r.error.code, 'not_found');
 });
 
+test('backfillDirectional returns ok:false when transcript has no usage in the run window', () => {
+  const { runDir } = freshRunDir();
+  const dir = makeSubagentsDir();
+  writeAgentMeta(dir, 'nousage', { spawnDepth: 1, description: 'Plan driver for PROJ-1' });
+  // Transcript has timestamps in range but NO usage fields
+  writeAgentTranscript(dir, 'nousage', [
+    { type: 'user', timestamp: '2026-07-27T02:00:00.000Z', message: { role: 'user', content: 'x' } },
+    { type: 'assistant', timestamp: '2026-07-27T02:05:00.000Z', message: { role: 'assistant', model: 'claude-sonnet-4-6', content: 'y' } },
+  ]);
+  const r = backfillDirectional({
+    runDir,
+    subagentsDir: dir,
+    start: '2026-07-27T02:00:00.000Z',
+    end: '2026-07-27T02:30:00.000Z',
+  });
+  assert.equal(r.ok, false);
+  assert.equal(r.error.code, 'no_usage');
+});
+
 // ---- CLI: backfill-directional subcommand ----
 
 test('CLI backfill-directional stamps tokens_directional.by_model onto record.json', () => {
@@ -210,6 +229,9 @@ test('CLI backfill-directional stamps tokens_directional.by_model onto record.js
     usageLine('claude-sonnet-4-6', '2026-07-27T02:00:00.000Z', { input_tokens: 50, output_tokens: 20, cache_read_input_tokens: 200, cache_creation_input_tokens: 30 }),
     usageLine('claude-sonnet-4-6', '2026-07-27T02:05:00.000Z', { input_tokens: 60, output_tokens: 25, cache_read_input_tokens: 300, cache_creation_input_tokens: 0 }),
   ]);
+
+  // Snapshot the real before-state to verify preservation of untouched fields.
+  const before = readRecord(runDir);
 
   const stdout = execFileSync('node', [CLI, 'backfill-directional',
     '--run-dir', runDir,
@@ -228,7 +250,6 @@ test('CLI backfill-directional stamps tokens_directional.by_model onto record.js
   assert.equal(m.input, 110);
 
   // Invariant: tokens_observed and tokens_by_tier must not be touched
-  const before = { tokens_observed: undefined, tokens_by_tier: undefined };
   assert.deepEqual(record.tokens_observed, before.tokens_observed);
   assert.deepEqual(record.tokens_by_tier, before.tokens_by_tier);
 });

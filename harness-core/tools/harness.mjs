@@ -367,6 +367,9 @@ try {
         start: { type: 'string' },
         end: { type: 'string' },
       });
+      if (!v['run-dir'] || !v['subagents-dir']) {
+        emit({ error: 'backfill-directional requires --run-dir and --subagents-dir' }, 1);
+      }
       const { routing } = resolveConfig();
       const bfResult = backfillDirectional({
         runDir: v['run-dir'],
