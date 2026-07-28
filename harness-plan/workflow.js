@@ -695,6 +695,78 @@ function _splitOversizedTasks(tasks, cap = _FILE_BUDGET_CAP) {
 }
 // ── END GENERATED ──
 
+// -- lib/title-counts.js --
+//
+// A file count stated in a task title is model-authored prose; files[] is ground truth. T05 read
+// `... source files (~76 files)` against a 102-entry array. _splitOversizedTasks already closes
+// this for oversized tasks (chunk titles are built from chunkList.length), so what is left is
+// every task at or under the cap, whose title passes through verbatim.
+//
+// `_reconcileTitleCountsWithReport` is a separate function rather than a property on the
+// reconciler, as it is in lib/: the inline-mirror harness slices declarations out as text, and a
+// `fn.withReport = …` assignment following the declaration is not part of the slice.
+//
+// Not global: a /g regex reused through .test() carries lastIndex, so every second identical
+// check returns false and the reconciler would fix alternating tasks.
+const _COUNT_RE = /~?\s*(\d+)(\s+(?:[\w-]+\s+){0,3}?)files\b/
+
+function _reconcileTitleCount(task) {
+  const files = Array.isArray(task?.files) ? task.files : null
+  // files: [] is the XS fast path's hardcoded value — "scope not enumerated", not "zero files".
+  // Reconciling against it would rewrite an honest count into a false 0 and call it derived.
+  if (!files || files.length === 0) return { task, correction: null }
+  if (typeof task.title !== 'string') return { task, correction: null }
+
+  const m = task.title.match(_COUNT_RE)
+  if (!m) return { task, correction: null }
+
+  const stated = Number(m[1])
+  const actual = files.length
+  if (stated === actual) return { task, correction: null }
+
+  const title = task.title.replace(_COUNT_RE, `${actual}${m[2]}files`)
+  return { task: { ...task, title }, correction: { id: task.id, stated, actual } }
+}
+
+// The synthesizer states counts too — Summary prose, the Files in Scope table — and its prompt
+// receives filesInScope sliced to 20 entries and nothing else, so on a larger plan it cannot count
+// and can only estimate. Distinct files, not a sum of per-task lengths: two tasks may share a file.
+function _fileCountSummary(tasks) {
+  const list = Array.isArray(tasks) ? tasks.filter(t => t && typeof t === 'object') : []
+  const distinct = new Set()
+  const byTask = {}
+  for (const t of list) {
+    const files = Array.isArray(t.files) ? t.files : []
+    byTask[t.id] = files.length
+    for (const f of files) distinct.add(f)
+  }
+  const totalFiles = distinct.size
+  const promptBlock = [
+    'FILE_COUNTS (authoritative — derived from the task files[] arrays; state these exactly, do not recount or round):',
+    `- total distinct files in scope: ${totalFiles}`,
+    `- tasks: ${list.length}`,
+    ...Object.entries(byTask).map(([id, n]) => `- ${id}: ${n}`),
+  ].join('\n')
+  return { totalFiles, taskCount: list.length, byTask, promptBlock }
+}
+
+function _reconcileTitleCounts(tasks) {
+  if (!Array.isArray(tasks)) return []
+  return tasks.map(t => _reconcileTitleCount(t).task)
+}
+
+function _reconcileTitleCountsWithReport(tasks) {
+  if (!Array.isArray(tasks)) return { tasks: [], corrections: [] }
+  const out = []
+  const corrections = []
+  for (const t of tasks) {
+    const { task, correction } = _reconcileTitleCount(t)
+    out.push(task)
+    if (correction) corrections.push(correction)
+  }
+  return { tasks: out, corrections }
+}
+
 // ===== END PURE =====
 
 // The audit write, in code. Ported from harness-run/workflow.js:382 — the only place it has
@@ -1728,6 +1800,23 @@ Return ONLY the revised tasks array (same schema, same ids).`,
       }
     }
 
+    // Reconcile file counts stated in task titles against files[] — last, deliberately.
+    //
+    // After the split, so chunk titles (already built from chunkList.length) are what gets
+    // checked rather than a parent title that is about to be discarded. After the revision loop
+    // too: that loop replaces whole task objects with model-authored ones, so reconciling before
+    // it would let a revision reintroduce exactly the count this fixes. Before synthesis, which
+    // is the point — the synthesizer copies titles into the plan document a human reads.
+    {
+      const { tasks: reconciled, corrections } = _reconcileTitleCountsWithReport(architectResult.tasks)
+      for (const c of corrections) {
+        // Stated, not just corrected: T05 claimed 76 against 102, and the gap between those two
+        // numbers is the finding. A log line saying only the new value hides it.
+        log(`Title count[${c.id}]: architect stated ${c.stated} files, files[] has ${c.actual} — corrected`)
+      }
+      architectResult.tasks = reconciled
+    }
+
     log(`Architect[${concern.label}]: ${architectResult.tasks.length} task(s), ${revisionRound} revision(s)`)
     return { concern, research, architectResult, revisionRound, idx }
   },
@@ -1749,8 +1838,10 @@ CONCERN: ${concern.label}
 ARCHITECT_OUTPUT:
 ${JSON.stringify(architectResult, null, 2)}
 
-FILES_IN_SCOPE:
+FILES_IN_SCOPE (capped at 20 for prompt size — count from FILE_COUNTS below, never from this list):
 ${JSON.stringify((research.filesInScope || []).slice(0, 20), null, 2)}
+
+${_fileCountSummary(architectResult.tasks).promptBlock}
 
 PATTERNS (for inline snippet embedding — top 5 only):
 ${JSON.stringify((research.patterns || []).slice(0, 5), null, 2)}

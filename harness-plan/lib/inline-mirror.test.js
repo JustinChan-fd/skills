@@ -20,6 +20,7 @@ import { deriveIssueKey } from './manifest-entry.js'
 import { selectSizingSource } from './sizing-source.js'
 import { selectDecomposeStrategy } from './decompose-strategy.js'
 import { splitOversizedTasks, FILE_CAP } from './split-oversized.js'
+import { reconcileTitleCounts, COUNT_RE, fileCountSummary } from './title-counts.js'
 
 const WORKFLOW_SRC = readFileSync(new URL('../workflow.js', import.meta.url), 'utf8')
 
@@ -407,4 +408,163 @@ test('the split result is assigned back onto the task list', () => {
   assert.ok(assigned, 'the split result is never assigned to architectResult.tasks — the plan keeps the oversized task')
   // And it must be the split output, not a re-assignment of the original.
   assert.match(assigned[1], /split|chunk/i, `assigned from '${assigned[1]}', which is not the split result`)
+})
+
+// ── title-counts (task #10) ───────────────────────────────────────────────────────────────────
+//
+// The reconciler has no lib-level caller — like buildTelemetryPath during the bridge era, whose
+// `logs/` assertion stayed green for a whole era precisely because the lib copy was dead. So the
+// mirror comparison and the call-site checks below carry the entire weight of "this actually
+// runs".
+
+const TITLE_CASES = (() => {
+  const files = (n, dir = 'src/client') => Array.from({ length: n }, (_, i) => `${dir}/f${i}.js`)
+  return [
+    // The T05 shape: a stated 76 against a real 102.
+    [[{ id: 'T05', title: 'Migrate all remaining src/client/pages/ source files (~76 files)', files: files(102, 'src/client/pages') }]],
+    // Correct count, no count, qualifier words, non-count numbers.
+    [[{ id: 'T03', title: 'Migrate src/client/hooks/ (7 source files)', files: files(7) }]],
+    [[{ id: 'T01', title: 'Enhance clientFetch with AbortController timeout support', files: files(1) }]],
+    [[{ id: 'T06', title: 'Convert 29 MockAdapter test files to vi.fn()', files: files(31) }]],
+    [[{ id: 'T08', title: 'Bump axios from 0.21 to 1.6 for API v2', files: files(2) }]],
+    // Fileless: the XS fast path, with and without a stated count.
+    [[{ id: 'X1', title: 'Do the thing', files: [] }]],
+    [[{ id: 'X2', title: 'Migrate the three api helpers (3 files)', files: [] }]],
+    [[{ id: 'X3', title: 'No files key (4 files)' }]],
+    // Several tasks at once, order and independence.
+    [[{ id: 'A', title: 'fine (2 files)', files: files(2) }, { id: 'B', title: 'wrong (5 files)', files: files(9) }]],
+    // Garbage must be inert identically on both sides.
+    [[null]], [[]], [null], ['tasks'], [undefined],
+    [[{ id: 'N', title: undefined, files: files(3) }]],
+  ]
+})()
+
+/**
+ * Index of a CALL to `name`, skipping its own declaration in the PURE block.
+ *
+ * A bare indexOf finds `function _reconcileTitleCounts…(` — the mirror declaration — which sits
+ * before every call site by construction, so a positional check built on it compares the wrong
+ * two offsets and reports the code as misordered when it is not.
+ */
+function callSiteOf(name) {
+  const pureEnd = WORKFLOW_SRC.indexOf('// ===== END PURE =====')
+  assert.ok(pureEnd !== -1, 'the PURE block end marker moved — these positional checks need updating')
+  return WORKFLOW_SRC.indexOf(`${name}(`, pureEnd)
+}
+
+test('inline _reconcileTitleCounts agrees with lib reconcileTitleCounts on every case', () => {
+  const inline = loadInline('_reconcileTitleCounts', ['_COUNT_RE', '_reconcileTitleCount'])
+  for (const [tasks] of TITLE_CASES) {
+    assert.deepEqual(
+      inline(tasks), reconcileTitleCounts(tasks),
+      `mirror drift for ${label(tasks)}`
+    )
+  }
+})
+
+test('inline _reconcileTitleCountsWithReport agrees with lib withReport on every case', () => {
+  // The report is what the log line is built from, so drift here means the run states a
+  // correction it did not make, or stays silent about one it did.
+  const inline = loadInline('_reconcileTitleCountsWithReport', ['_COUNT_RE', '_reconcileTitleCount'])
+  for (const [tasks] of TITLE_CASES) {
+    assert.deepEqual(
+      inline(tasks), reconcileTitleCounts.withReport(tasks),
+      `report drift for ${label(tasks)}`
+    )
+  }
+})
+
+test('the inline reconciler preserves identity for correct titles, exactly as lib does', () => {
+  // deepEqual cannot distinguish a passed-through task from a rebuilt clone, and identity is
+  // asserted in title-counts.test.js — so the mirror must hold it too.
+  const inline = loadInline('_reconcileTitleCounts', ['_COUNT_RE', '_reconcileTitleCount'])
+  const t = { id: 'T1', title: 'fine (2 files)', files: ['a/b.js', 'a/c.js'] }
+  assert.equal(inline([t])[0], t, 'the inline reconciler rebuilt a task whose count was already right')
+})
+
+test('the inline _COUNT_RE is not a global regex', () => {
+  // A /g regex reused through .test() carries lastIndex between calls, so every second identical
+  // check returns false — the reconciler corrects alternating tasks and skips the rest, with a
+  // fully green suite. deepEqual over the cases above would not necessarily catch it, because
+  // each case builds fresh input.
+  const decl = extractConst(WORKFLOW_SRC, '_COUNT_RE')
+  assert.ok(decl, 'workflow.js has no inline _COUNT_RE')
+  assert.ok(!/\/[a-z]*g[a-z]*\s*$/.test(decl.trim()), `inline _COUNT_RE carries the g flag: ${decl}`)
+  assert.equal(COUNT_RE.flags, '', 'lib COUNT_RE gained a flag — the mirror check above assumes none')
+})
+
+test('the reconciler is called after the split and before the plan doc is written', () => {
+  // Order matters in both directions. After the split, or the parent's stale count is reconciled
+  // and then thrown away when the parent is replaced by chunks. Before synthesis, or the
+  // synthesizer formats the uncorrected title into the plan document and the correction is
+  // invisible where a human reads it.
+  const split = WORKFLOW_SRC.indexOf('_splitOversizedTasks(', WORKFLOW_SRC.indexOf('// DAG file-conflict guard'))
+  const call = callSiteOf('_reconcileTitleCountsWithReport')
+  const synth = WORKFLOW_SRC.indexOf('hp-synthesizer')
+  assert.ok(split !== -1, 'split call moved — this positional check needs updating')
+  assert.ok(synth !== -1, 'synthesizer label moved — this positional check needs updating')
+  assert.ok(call !== -1, 'nothing calls the reconciler — the mirror exists as dead code')
+  assert.ok(call > split, 'the reconciler runs before the split, so chunk titles are never checked')
+  assert.ok(call < synth, 'the reconciler runs after synthesis, so the plan document keeps the wrong count')
+})
+
+test('a corrected count is logged, naming both numbers', () => {
+  // This task exists because a number was stated in prose and nothing reconciled it. Correcting
+  // it silently just moves the silence: the run must say what it changed and from what.
+  const call = callSiteOf('_reconcileTitleCountsWithReport')
+  assert.ok(call !== -1, 'nothing calls the reconciler')
+  const block = WORKFLOW_SRC.slice(call, call + 900)
+  assert.match(block, /log\(/, 'a title correction emits no log line')
+  assert.match(block, /\.stated/, 'the log does not name the count the architect stated')
+  assert.match(block, /\.actual/, 'the log does not name the real count')
+})
+
+test('the reconciled task list is assigned back', () => {
+  // The mutant this exists to kill, and it has already happened once in this file's history: the
+  // split was computed, logged, and never assigned. Every other check here would still pass.
+  const call = callSiteOf('_reconcileTitleCountsWithReport')
+  assert.ok(call !== -1, 'nothing calls the reconciler')
+  const block = WORKFLOW_SRC.slice(call, call + 900)
+  const assigned = block.match(/architectResult\.tasks\s*=\s*([\w.]+)/)
+  assert.ok(assigned, 'the reconciled list is never assigned to architectResult.tasks — the wrong count ships')
+  // Named for the reconciler's output, not re-assigned from the input. `architectResult.tasks =
+  // architectResult.tasks` would satisfy a bare "is assigned" check while changing nothing.
+  assert.match(assigned[1], /reconcil/i, `assigned from '${assigned[1]}', which is not the reconciler output`)
+  assert.ok(!/^architectResult\.tasks$/.test(assigned[1]), 'the list is re-assigned from itself — the correction is discarded')
+})
+
+test('inline _fileCountSummary agrees with lib fileCountSummary on every case', () => {
+  const inline = loadInline('_fileCountSummary')
+  const cases = [
+    [{ id: 'A', files: ['src/a.js', 'src/b.js'] }, { id: 'B', files: ['src/b.js'] }],
+    [{ id: 'X', files: [] }, { id: 'Y' }],
+    Array.from({ length: 13 }, (_, i) => ({ id: `T05${String.fromCharCode(97 + i)}`, files: [`src/p${i}.js`] })),
+    [], null, undefined, 'tasks', [null],
+  ]
+  for (const tasks of cases) {
+    assert.deepEqual(inline(tasks), fileCountSummary(tasks), `mirror drift for ${label(tasks)}`)
+  }
+})
+
+test('the synthesizer prompt receives the derived counts', () => {
+  // The synthesizer writes the Summary paragraph and the Files in Scope table — the numbers a
+  // human actually reads. Its prompt passes filesInScope sliced to 20, so without this block it
+  // cannot count on any larger plan and can only estimate. That is the T05 defect one stage later.
+  const synth = WORKFLOW_SRC.indexOf('hp-synthesizer')
+  assert.ok(synth !== -1, 'synthesizer label moved — this check needs updating')
+  // The prompt is built above its own options object, so search backwards from the label.
+  const promptRegion = WORKFLOW_SRC.slice(WORKFLOW_SRC.lastIndexOf('const planText', 0 + synth), synth)
+  assert.match(promptRegion, /_fileCountSummary\(/, 'the synthesizer prompt carries no derived file counts')
+  assert.match(promptRegion, /promptBlock/, 'the summary is computed but its rendered block is not interpolated')
+})
+
+test('the counts handed to the synthesizer come from the reconciled task list', () => {
+  // Not from research.filesInScope: that is a researcher artifact, capped at 20, and unrelated to
+  // what the tasks actually claim. Counting the wrong array would restate an estimate as a
+  // derivation, which is worse than the estimate.
+  const synth = WORKFLOW_SRC.indexOf('hp-synthesizer')
+  const call = WORKFLOW_SRC.lastIndexOf('_fileCountSummary(', synth)
+  assert.ok(call !== -1, 'no _fileCountSummary call before the synthesizer')
+  const arg = WORKFLOW_SRC.slice(call, WORKFLOW_SRC.indexOf(')', call))
+  assert.match(arg, /architectResult\.tasks/, `counted from '${arg}' rather than the task list`)
 })
