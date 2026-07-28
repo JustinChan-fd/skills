@@ -123,15 +123,20 @@ function _slugFromInput(text) {
     .replace(/\s+/g, '-').replace(/-{2,}/g, '-').slice(0, 40).replace(/-+$/, '')
   return slug || 'greenfield'
 }
+function _deriveTelemetryDir(repoPath) {
+  const homeDir = (repoPath || '').replace(/\/Desktop\/Repos\/[^/]+\/?$/, '') || '/tmp'
+  return `${homeDir}/Desktop/Repos/harness-telemetry`
+}
 // Format: {telemetryDir}/v2/{repo}__{skill}__{ticket}__{timestamp}.jsonl
 // Split on __ to get exactly [repo, skill, ticket, timestamp]
-function _buildTelemetryPath({ repoPath, skill, issueKey, rawText, timestamp, repoName }) {
-  const repo    = repoName || _repoNameFromPath(repoPath)
-  const key     = issueKey || _slugFromInput(rawText)
-  const ts      = timestamp || 'unknown-ts'
-  const homeDir = (repoPath || '').replace(/\/Desktop\/Repos\/[^/]+\/?$/, '') || '/tmp'
-  const teleDir = `${homeDir}/Desktop/Repos/harness-telemetry`
-  return `${teleDir}/v2/${repo}__${skill}__${key}__${ts}.jsonl`
+// v2/ is the ONLY dir the dashboard reads. lib/inline-mirror.test.js compares this
+// function against its lib/ original case-for-case — keep the two in lockstep.
+function _buildTelemetryPath({ telemetryDir, repoPath, skill, issueKey, rawText, timestamp, repoName }) {
+  const dir  = telemetryDir || _deriveTelemetryDir(repoPath)
+  const repo = repoName || _repoNameFromPath(repoPath)
+  const key  = issueKey || _slugFromInput(rawText)
+  const ts   = timestamp || 'unknown-ts'
+  return `${dir}/v2/${repo}__${skill}__${key}__${ts}.jsonl`
 }
 const _TEST_FILE_RE = /\.(test|spec)\.[jt]sx?$/
 function _ejectTestFiles(subtasks, issueKey, scopePath) {

@@ -133,11 +133,16 @@ function _computeCostV2({ agentCountByModel, inputTokens, outputTokensTotal }) {
 const _pendingAuditRecords = []
 function _buildAuditRecord(status, extra = {}) {
   if (!_telemetryPath) {
-    const repo = args.repoName || (repoPath || '').replace(/\/$/, '').split('/').pop() || 'unknown-repo'
+    // issueKey precedence is plan-specific (ticket text → manifest key → slug); the path
+    // assembly itself goes through the mirrored builder so it cannot drift from lib/.
     const issueKey = (input || '').match(/\b([A-Z]+-\d+)\b/)?.[1] || manifestEntry?.jiraKey || _slugFromInput(input)
-    const homeDir = (repoPath || '').replace(/\/Desktop\/Repos\/[^/]+\/?$/, '') || '/tmp'
-    const runTs = args.runTs || 'unknown-ts'
-    _telemetryPath = `${homeDir}/Desktop/Repos/harness-telemetry/v2/${repo}__harness-plan__${issueKey}__${runTs}.jsonl`
+    _telemetryPath = _buildTelemetryPath({
+      repoPath,
+      repoName:  args.repoName || null,
+      skill:     'harness-plan',
+      issueKey,
+      timestamp: args.runTs || 'unknown-ts',
+    })
   }
   const record = _buildV2Record(status, extra)
   _pendingAuditRecords.push(record)
@@ -176,8 +181,24 @@ function _slugFromInput(text) {
     .replace(/\s+/g, '-').replace(/-{2,}/g, '-').slice(0, 40).replace(/-+$/, '')
   return slug || 'greenfield'
 }
+function _repoNameFromPath(p) {
+  if (!p) return 'unknown-repo'
+  return String(p).replace(/\/$/, '').split('/').pop() || 'unknown-repo'
+}
+function _deriveTelemetryDir(repoPath) {
+  const homeDir = (repoPath || '').replace(/\/Desktop\/Repos\/[^/]+\/?$/, '') || '/tmp'
+  return `${homeDir}/Desktop/Repos/harness-telemetry`
+}
 // Format: {telemetryDir}/v2/{repo}__{skill}__{ticket}__{timestamp}.jsonl
-// (path is assembled inline in writeAuditRecord above)
+// v2/ is the ONLY dir the dashboard reads. lib/inline-mirror.test.js compares this
+// function against its lib/ original case-for-case — keep the two in lockstep.
+function _buildTelemetryPath({ telemetryDir, repoPath, skill, issueKey, rawText, timestamp, repoName }) {
+  const dir  = telemetryDir || _deriveTelemetryDir(repoPath)
+  const repo = repoName || _repoNameFromPath(repoPath)
+  const key  = issueKey || _slugFromInput(rawText)
+  const ts   = timestamp || 'unknown-ts'
+  return `${dir}/v2/${repo}__${skill}__${key}__${ts}.jsonl`
+}
 
 // lib/barrier.js — keep identical. import() unavailable in workflow scripts (probe-confirmed).
 const MAX_PROBE_LOOPS = 2
