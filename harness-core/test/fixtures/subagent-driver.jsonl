@@ -1,0 +1,3 @@
+{"type":"user","timestamp":"2026-07-27T02:00:00.000Z","message":{"role":"user","content":"SENSITIVE_TRANSCRIPT_TEXT drive plan phase"}}
+{"type":"assistant","timestamp":"2026-07-27T02:00:05.000Z","message":{"role":"assistant","model":"claude-sonnet-4-6","content":"SENSITIVE_TRANSCRIPT_TEXT planning","usage":{"input_tokens":50,"output_tokens":20,"cache_read_input_tokens":200,"cache_creation_input_tokens":30}}}
+{"type":"assistant","timestamp":"2026-07-27T02:05:00.000Z","message":{"role":"assistant","model":"claude-sonnet-4-6","content":"SENSITIVE_TRANSCRIPT_TEXT more planning","usage":{"input_tokens":60,"output_tokens":25,"cache_read_input_tokens":300,"cache_creation_input_tokens":0}}}
