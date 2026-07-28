@@ -56,10 +56,45 @@ test('routing exposes an explicit model-id-to-tier map covering the tier aliases
   }
 });
 
+test('model_id_to_tier covers the current flagship and the synthetic-entry sentinel', () => {
+  const { routing } = resolveConfig({ env: {}, userFile: '/nonexistent' });
+  const map = routing.model_id_to_tier;
+  // claude-opus-5 is what the driver and reasoning seats actually run on; every
+  // other opus-family and flagship id in the map is HIGH, so this must be too.
+  assert.equal(map['claude-opus-5'], 'HIGH');
+  // Transcripts carry the literal id '<synthetic>' for no-model assistant entries.
+  // It is not billable; it is mapped to the cheapest tier purely so it never lands
+  // in tokens_directional.unknown[] and forces complete:false on a perfect capture.
+  assert.equal(map['<synthetic>'], 'LOW');
+  // the existing loop below is what keeps these two priceable
+  for (const id of ['claude-opus-5', '<synthetic>']) {
+    assert.ok(routing.tier_prices_usd_per_mtok[map[id]], `${id} maps to an unpriced tier`);
+  }
+});
+
+test('every model id the harness itself spawns is present in model_id_to_tier', () => {
+  const { routing } = resolveConfig({ env: {}, userFile: '/nonexistent' });
+  const map = routing.model_id_to_tier;
+  // A run whose transcript carries an id missing from this map is reported
+  // complete:false by buildTokensDirectional even when the capture was perfect.
+  // A measured M-size run lost its whole by_model breakdown to a flagship rename;
+  // this list is the tripwire so the next rename fails here, loudly, instead.
+  const spawned = [
+    'claude-opus-5',
+    'claude-opus-4-8',
+    'claude-sonnet-5',
+    'claude-sonnet-4-6',
+    'claude-haiku-4-5',
+    '<synthetic>',
+  ];
+  const missing = spawned.filter((id) => !(id in map));
+  assert.deepEqual(missing, [], `model ids spawned by harness skills but unmapped: ${missing.join(', ')}`);
+});
+
 test('price_table provenance version reflects the cache-column addition', () => {
   const { routing } = resolveConfig({ env: {}, userFile: '/nonexistent' });
-  assert.equal(routing.price_table.version, '2026-07-26.1');
-  assert.equal(routing.price_table.retrieved, '2026-07-26');
+  assert.equal(routing.price_table.version, '2026-07-28.1');
+  assert.equal(routing.price_table.retrieved, '2026-07-28');
 });
 
 test('expandHome expands leading tilde only', () => {
