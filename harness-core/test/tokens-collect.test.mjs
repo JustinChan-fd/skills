@@ -8,6 +8,7 @@ import {
   DEFAULT_GAP_CAP_MS,
   collectFromText,
   collectFromFile,
+  buildTokensDirectional,
   mungeProjectDir,
   projectDirForCwd,
   discoverLoopTranscript,
@@ -313,4 +314,69 @@ test('collectFromFile surfaces peak_context, including on the not_found path', (
   }));
   assert.equal(collectFromFile(p).peak_context, 1_175);
   assert.equal(collectFromFile(join(dir, 'nope.jsonl')).peak_context, 0);
+});
+
+// ---- buildTokensDirectional: `complete` must never be vacuously true ----
+
+// A helper matching the parser's success shape closely enough for the builder,
+// which only reads `.ok` and `.by_model`.
+const okResult = (by_model) => ({ ok: true, by_model, error: null });
+const sums = { input: 100, output: 50, cache_read: 20, cache_creation: 10 };
+const NOW = new Date('2026-07-28T10:00:00.000Z');
+
+test('an empty by_model is never complete — a transcript that produced nothing has nothing to be complete about', () => {
+  const { tokens_directional, note } = buildTokensDirectional({
+    result: okResult({}),
+    modelTierMap: { 'claude-opus-4-8': 'HIGH' },
+    now: NOW,
+  });
+  // This is the shape the live TARS-1271 record landed in: ok collect, zero
+  // models, zero unknowns -> the old code stamped complete:true over {}.
+  assert.deepEqual(tokens_directional.by_model, {});
+  assert.equal(tokens_directional.complete, false);
+  assert.equal(tokens_directional.format_version, '1');
+  assert.equal(tokens_directional.collected_at, '2026-07-28T10:00:00.000Z');
+  // The note is the only channel that distinguishes "collected nothing" from
+  // "collected something but saw an unknown model" (no field is added to the
+  // record — the schema's tokens_directional is additionalProperties:false).
+  assert.equal(note.code, 'empty_collection');
+  assert.match(note.detail, /no model usage/i);
+});
+
+test('a populated by_model with every model tiered is complete — the empty-guard does not invert the normal path', () => {
+  const { tokens_directional, note } = buildTokensDirectional({
+    result: okResult({ 'claude-opus-4-8': { ...sums } }),
+    modelTierMap: { 'claude-opus-4-8': 'HIGH' },
+    now: NOW,
+  });
+  assert.equal(tokens_directional.complete, true);
+  assert.equal(note, null);
+  assert.equal(tokens_directional.by_model['claude-opus-4-8'].input, 100);
+});
+
+test('a populated by_model containing an unknown model id is still not complete, and says so distinctly', () => {
+  const { tokens_directional, note } = buildTokensDirectional({
+    result: okResult({
+      'claude-opus-4-8': { ...sums },
+      'some-unrecognized-model-99': { input: 70, output: 5, cache_read: 0, cache_creation: 0 },
+    }),
+    modelTierMap: { 'claude-opus-4-8': 'HIGH' },
+    now: NOW,
+  });
+  assert.equal(tokens_directional.complete, false);
+  assert.equal(note.code, 'unknown_model');
+  assert.notEqual(note.code, 'empty_collection'); // the two degradations stay tellable apart
+  // the unknown model's tokens survive under its own id, never mis-tiered
+  assert.equal(tokens_directional.by_model['some-unrecognized-model-99'].input, 70);
+});
+
+test('a failed collect keeps its own error code and is not relabelled empty_collection', () => {
+  const { tokens_directional, note } = buildTokensDirectional({
+    result: { ok: false, by_model: {}, error: { code: 'not_found', detail: 'no such transcript' } },
+    modelTierMap: {},
+    now: NOW,
+  });
+  assert.equal(tokens_directional.complete, false);
+  assert.equal(note.code, 'not_found'); // parse/discovery failure wins over emptiness
+  assert.equal(tokens_directional.format_version, '1'); // stamped even on failure
 });

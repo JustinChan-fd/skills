@@ -323,10 +323,16 @@ export function resolveTranscript({ transcript, mode, subagentsDir, projectDir, 
 /**
  * Turn a parser result into the additive `tokens_directional` record field
  * plus an optional degradation note. The format version is ALWAYS stamped, even
- * on failure. `complete` is true only when parsing succeeded AND every model id
- * seen is present in `modelTierMap` — a parse failure or any unrecognized model
- * id degrades to `complete: false` with a note (so an unknown model is flagged,
- * never silently mis-tiered under a default tier).
+ * on failure. `complete` is true only when parsing succeeded AND at least one
+ * model was actually collected AND every model id seen is present in
+ * `modelTierMap`. The emptiness clause exists because a parse failure and a
+ * zero-usage transcript are indistinguishable from `unknown.length` alone: with
+ * `by_model: {}` there are no unknown ids, so `complete` used to come out true
+ * over nothing at all. The note's code says which degradation happened —
+ * `empty_collection` (nothing collected) vs `unknown_model` (collected, but an
+ * unrecognized id that must not be silently mis-tiered under a default tier) —
+ * because `tokens_directional` itself cannot carry a reason field: its subschema
+ * in run-record.schema.json is additionalProperties:false.
  */
 export function buildTokensDirectional({ result, modelTierMap = {}, now = new Date() }) {
   const tokens_directional = {
@@ -346,6 +352,18 @@ export function buildTokensDirectional({ result, modelTierMap = {}, now = new Da
     return {
       tokens_directional,
       note: { code: 'unknown_model', detail: `unrecognized model id(s), degraded to estimated: ${unknown.join(', ')}` },
+    };
+  }
+  // A collect can succeed and still find nothing: an empty by_model has no
+  // unknown model ids to flag, so the old `complete = true` here fired on a
+  // transcript that produced zero usage lines. The live TARS-1271 record landed
+  // exactly that way — `complete: true` over `by_model: {}` — and a consumer
+  // reading `complete` has no reason to also test emptiness. Completeness now
+  // requires something to have been collected.
+  if (Object.keys(tokens_directional.by_model).length === 0) {
+    return {
+      tokens_directional,
+      note: { code: 'empty_collection', detail: 'transcript parsed but contained no model usage; nothing to attribute' },
     };
   }
   tokens_directional.complete = true;
