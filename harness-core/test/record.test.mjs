@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { dirname } from 'node:path';
-import { initRun, readRecord, phaseEnd, finalizeRun, recordObservedTokens, finalizeTokens } from '../tools/lib/record.mjs';
+import { initRun, readRecord, phaseEnd, finalizeRun, recordObservedTokens, stampTokensDirectional, finalizeTokens } from '../tools/lib/record.mjs';
 
 const NOW = new Date('2026-07-24T18:30:12Z');
 
@@ -328,4 +328,130 @@ test('finalizeTokens on zero observations yields an empty tokens_by_tier and est
   const r = finalizeTokens([]);
   assert.deepEqual(r.tokens_by_tier, {});
   assert.equal(r.estimated, false);
+});
+
+// ---------------------------------------------------------------------------
+// stampTokensDirectional clobber guard — record-observed-tokens, phase-end and
+// run-end all funnel through collectAndStamp (harness.mjs), so one run stamps
+// several times. On the live TARS-1271 run an early call landed real per-model
+// sums and a later call whose transcript resolution failed wrote by_model: {}
+// over the top, which is why that record needed a manual backfill-directional
+// to recover numbers the harness had already captured once.
+// ---------------------------------------------------------------------------
+
+const GOOD_DIRECTIONAL = {
+  by_model: { 'claude-opus-5': { input: 12_000, output: 3_400 } },
+  format_version: '1',
+  collected_at: NOW.toISOString(),
+  complete: true,
+};
+
+function emptyDirectional(collectedAt) {
+  return { by_model: {}, format_version: '1', collected_at: collectedAt, complete: false };
+}
+
+test('stampTokensDirectional refuses to clobber a non-empty by_model with an empty one', () => {
+  const { runDir } = freshRun();
+  stampTokensDirectional({ runDir, tokensDirectional: GOOD_DIRECTIONAL });
+  const later = new Date(NOW.getTime() + 60_000).toISOString();
+  const record = stampTokensDirectional({ runDir, tokensDirectional: emptyDirectional(later) });
+  // The whole object survives — not just by_model. collected_at and complete
+  // still describe the observation that actually produced the sums.
+  assert.deepEqual(record.tokens_directional, GOOD_DIRECTIONAL);
+  assert.deepEqual(readRecord(runDir).tokens_directional, GOOD_DIRECTIONAL);
+  assert.equal(record.skipped, true);
+});
+
+test('stampTokensDirectional leaves a prior synced_at intact when it skips (a no-op must not force a re-sync)', () => {
+  const { runDir } = freshRun();
+  stampTokensDirectional({ runDir, tokensDirectional: GOOD_DIRECTIONAL });
+  const synced = readRecord(runDir);
+  synced.synced_at = NOW.toISOString(); // simulate the successful sync that followed the good stamp
+  writeFileSync(join(runDir, 'record.json'), JSON.stringify(synced));
+  const record = stampTokensDirectional({ runDir, tokensDirectional: emptyDirectional(NOW.toISOString()) });
+  assert.equal(record.synced_at, NOW.toISOString());
+  assert.equal(readRecord(runDir).synced_at, NOW.toISOString());
+});
+
+test('stampTokensDirectional writes a newer non-empty by_model over an older one and clears synced_at', () => {
+  const { runDir } = freshRun();
+  stampTokensDirectional({ runDir, tokensDirectional: GOOD_DIRECTIONAL });
+  const synced = readRecord(runDir);
+  synced.synced_at = NOW.toISOString();
+  writeFileSync(join(runDir, 'record.json'), JSON.stringify(synced));
+  // Transcripts accumulate, so a later real observation is normally a superset —
+  // newest real reading wins, never a merge.
+  const superset = {
+    by_model: {
+      'claude-opus-5': { input: 20_000, output: 5_000 },
+      'claude-haiku-4-5': { input: 800, output: 120 },
+    },
+    format_version: '1',
+    collected_at: new Date(NOW.getTime() + 60_000).toISOString(),
+    complete: true,
+  };
+  const record = stampTokensDirectional({ runDir, tokensDirectional: superset });
+  assert.deepEqual(record.tokens_directional, superset);
+  assert.deepEqual(readRecord(runDir).tokens_directional, superset);
+  assert.equal(record.synced_at, null);
+  assert.equal(record.skipped, false);
+});
+
+test('stampTokensDirectional writes an empty by_model when no directional field exists yet', () => {
+  const { runDir } = freshRun();
+  // A degraded first attempt must still land format_version/collected_at so the
+  // anomalies scan can tell "collection ran and found nothing" apart from
+  // "collection never ran at all".
+  const empty = emptyDirectional(NOW.toISOString());
+  const record = stampTokensDirectional({ runDir, tokensDirectional: empty });
+  assert.deepEqual(record.tokens_directional, empty);
+  assert.deepEqual(readRecord(runDir).tokens_directional, empty);
+  assert.equal(record.skipped, false);
+});
+
+test('stampTokensDirectional writes an empty by_model over a previous empty one (no guard between two empties)', () => {
+  const { runDir } = freshRun();
+  stampTokensDirectional({ runDir, tokensDirectional: emptyDirectional(NOW.toISOString()) });
+  const later = new Date(NOW.getTime() + 30_000).toISOString();
+  const record = stampTokensDirectional({ runDir, tokensDirectional: emptyDirectional(later) });
+  assert.equal(record.tokens_directional.collected_at, later);
+  assert.equal(record.skipped, false);
+});
+
+test('stampTokensDirectional treats a null/missing tokensDirectional as empty and never clobbers real sums', () => {
+  const { runDir } = freshRun();
+  stampTokensDirectional({ runDir, tokensDirectional: GOOD_DIRECTIONAL });
+  for (const bad of [null, undefined, {}, { by_model: null, format_version: '1', collected_at: null, complete: false }]) {
+    const record = stampTokensDirectional({ runDir, tokensDirectional: bad });
+    assert.deepEqual(record.tokens_directional, GOOD_DIRECTIONAL);
+    assert.equal(record.skipped, true);
+  }
+});
+
+test('stampTokensDirectional never touches tokens_by_tier or tokens_observed — in the write branch or the skip branch (loop invariant 6)', () => {
+  const { runDir } = freshRun();
+  finalizeRun({ runDir, status: 'succeeded', tokensByTier: { MID: 65_000 }, now: NOW });
+  recordObservedTokens({ runDir, total: 105_779, tier: 'MID', now: NOW });
+  const observed = readRecord(runDir).tokens_observed;
+
+  // write branch
+  let record = stampTokensDirectional({ runDir, tokensDirectional: GOOD_DIRECTIONAL });
+  assert.deepEqual(record.tokens_by_tier, { MID: 65_000 });
+  assert.deepEqual(record.tokens_observed, observed);
+
+  // skip branch
+  record = stampTokensDirectional({ runDir, tokensDirectional: emptyDirectional(NOW.toISOString()) });
+  assert.deepEqual(record.tokens_by_tier, { MID: 65_000 });
+  assert.deepEqual(record.tokens_observed, observed);
+  assert.deepEqual(readRecord(runDir).tokens_by_tier, { MID: 65_000 });
+  assert.deepEqual(readRecord(runDir).tokens_observed, observed);
+});
+
+test('stampTokensDirectional skip does not write a skipped key into record.json (schema is additionalProperties:false)', () => {
+  const { runDir } = freshRun();
+  stampTokensDirectional({ runDir, tokensDirectional: GOOD_DIRECTIONAL });
+  stampTokensDirectional({ runDir, tokensDirectional: emptyDirectional(NOW.toISOString()) });
+  const raw = readFileSync(join(runDir, 'record.json'), 'utf8');
+  assert.ok(!raw.includes('"skipped"'));
+  assert.equal(readRecord(runDir).skipped, undefined);
 });

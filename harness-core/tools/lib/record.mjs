@@ -94,16 +94,45 @@ export function readRecord(runDir) {
   return JSON.parse(readFileSync(join(runDir, 'record.json'), 'utf8'));
 }
 
+// True when a tokens_directional object carries at least one per-model sum.
+// Defensive about shape because it is asked about both freshly-built objects
+// and whatever an old record on disk happens to hold (including null).
+function hasModelSums(tokensDirectional) {
+  const byModel = tokensDirectional?.by_model;
+  return !!byModel && typeof byModel === 'object' && Object.keys(byModel).length > 0;
+}
+
 // Stamp the additive tokens_directional field onto a run record. This is
 // strictly additive: it sets only tokens_directional and never touches
 // tokens_by_tier or tokens_observed (the two raw token snapshots), so directional
 // per-model sums are recorded ALONGSIDE the existing tier totals, never over top
 // of them. synced_at is cleared so the enriched record is re-pushed to telemetry.
+//
+// Clobber guard: record-observed-tokens, phase-end and run-end each call
+// collectAndStamp, so one run stamps several times and any single call may have
+// failed to resolve a transcript. On the live TARS-1271 run an early call landed
+// real per-model sums and a later call landed by_model: {} over the top, so the
+// record shipped empty and needed a manual backfill-directional to recover sums
+// the harness had already captured. An incoming empty by_model therefore never
+// replaces an existing non-empty one — it is a no-op that also leaves synced_at
+// alone, because nothing changed and forcing a re-sync of identical bytes is
+// pure waste. An incoming non-empty by_model always wins: transcripts only grow,
+// so the newest real reading is the most complete one (supersets are expected,
+// which is why this replaces rather than merges).
+//
+// The skip signal rides back as a NON-ENUMERABLE `skipped` property. It must not
+// be enumerable: this same object is what writeRecord validates, and
+// run-record.schema.json is additionalProperties:false, so an enumerable key
+// would both fail validation and leak into record.json.
 export function stampTokensDirectional({ runDir, tokensDirectional }) {
   const record = readRecord(runDir);
-  record.tokens_directional = tokensDirectional;
-  record.synced_at = null;
-  writeRecord(runDir, record);
+  const skipped = !hasModelSums(tokensDirectional) && hasModelSums(record.tokens_directional);
+  if (!skipped) {
+    record.tokens_directional = tokensDirectional;
+    record.synced_at = null;
+    writeRecord(runDir, record);
+  }
+  Object.defineProperty(record, 'skipped', { value: skipped, enumerable: false });
   return record;
 }
 
