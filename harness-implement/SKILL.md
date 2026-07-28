@@ -99,16 +99,39 @@ const patchTelemetryRecord = async (path, fields) => {
     await Bash(`python3 -c "
 import json, sys
 
+# Prefixes whose value is a MAP with caller-controlled keys. Everything after one of these is
+# a SINGLE literal key, however many dots it holds. cost.nullReasons is keyed by the dotted
+# field path a null explains ('tokens.total.input'), so splitting it into levels both leaves
+# the stale reason in place AND invents a nullReasons.tokens.total = {} branch nothing reads.
+# Mirrors MAP_VALUED_PREFIXES in lib/telemetry-patch.js; lib/skill-patch-parity.test.js runs
+# this python for real and fails if the two disagree.
+MAP_VALUED_PREFIXES = ['cost.nullReasons', 'agentCount.byModel', 'agentCount.byPhase',
+                      'tokens.byModel', 'tokens.byPhase']
+
+def split_patch_key(key):
+    for prefix in MAP_VALUED_PREFIXES:
+        # Only a key reaching INTO the map is special; the map itself stays replaceable.
+        if key.startswith(prefix + '.'):
+            return prefix.split('.'), key[len(prefix) + 1:]
+    segs = key.split('.')
+    return segs[:-1], segs[-1]
+
 def set_nested(d, dotted_key, value):
-    keys = dotted_key.split('.')
-    for k in keys[:-1]:
+    path, leaf = split_patch_key(dotted_key)
+    deleting = value is None
+    for k in path:
         if k not in d or not isinstance(d[k], dict):
+            # A delete never creates what it would delete from — that vivification is where
+            # the invented branch came from. A set does, since a record may legitimately not
+            # carry tokens.total yet.
+            if deleting:
+                return
             d[k] = {}
         d = d[k]
-    if value is None:
-        d.pop(keys[-1], None)
+    if deleting:
+        d.pop(leaf, None)
     else:
-        d[keys[-1]] = value
+        d[leaf] = value
 
 path, fields_json = sys.argv[1], sys.argv[2]
 fields = json.loads(fields_json)
