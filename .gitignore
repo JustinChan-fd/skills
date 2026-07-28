@@ -1,2 +1,19 @@
 .DS_Store
 **/.DS_Store
+*.swp
+
+# Node
+node_modules/
+
+# Hook runtime artifacts
+*.log
+*.state
+
+# User-specific harness config (machine-local: repo registry, telemetry sink)
+harness-core/config/user.json
+
+# Local harness run artifacts (self-hosting: this repo is also a harness target)
+.harness/
+
+# Probe run outputs (delivered to harness-telemetry, never committed here)
+harness-core/probes/*/results/
