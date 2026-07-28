@@ -7,13 +7,22 @@
 // JSONL reader rather than mirroring a second parser.
 import { readEvents } from './anomalies.mjs';
 
-// The integer in a run_id's `__issue-<n>__` segment, or null when the run_id
+// The issue in a run_id's `__issue-<x>__` segment, or null when the run_id
 // carries no issue segment (adhoc/file-sourced runs are permanently outside
-// forward-routing — they have no issue to route to).
+// forward-routing — they have no issue to route to). A purely-numeric segment
+// (GitHub issue: issue-2) returns a Number; a slugified Jira key
+// (issue-tars-1271) returns the slug string. Both flavors route.
 export function parseIssueFromRunId(runId) {
   if (typeof runId !== 'string') return null;
-  const m = runId.match(/__issue-(\d+)__/);
-  return m ? Number(m[1]) : null;
+  const m = runId.match(/__issue-([a-z0-9][a-z0-9-]*)__/);
+  if (!m) return null;
+  return /^\d+$/.test(m[1]) ? Number(m[1]) : m[1];
+}
+
+// Normalize an issue identifier for comparison: a Jira key like "TARS-1271" and
+// its run-id slug "tars-1271" must match, so compare lowercased strings.
+function issueKey(issue) {
+  return String(issue).toLowerCase();
 }
 
 // A note is routable residue ONLY when it carries the FULL u1 shape:
@@ -34,8 +43,12 @@ function isRoutableResidue(event) {
 // audit file (readEvents → null) is a valid empty outcome, not an error.
 export function scanResidue({ auditPath, issue }) {
   const events = readEvents(auditPath) ?? [];
+  const wanted = issueKey(issue);
   return events
     .filter(isRoutableResidue)
-    .filter((e) => parseIssueFromRunId(e.run_id) === issue)
+    .filter((e) => {
+      const parsed = parseIssueFromRunId(e.run_id);
+      return parsed !== null && issueKey(parsed) === wanted;
+    })
     .sort((a, b) => (a.ts < b.ts ? -1 : a.ts > b.ts ? 1 : 0));
 }

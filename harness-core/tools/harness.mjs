@@ -315,7 +315,10 @@ try {
         return { phase: spec.slice(0, idx), runDir: spec.slice(idx + 1) };
       });
       const line = composeLoopLine({
-        issue: v.issue !== undefined ? Number(v.issue) : null,
+        // Keep the issue verbatim — a Jira key (TARS-1271) must survive into the
+        // loop.jsonl line, not be coerced to NaN. A numeric GitHub issue stays a
+        // numeric string, which is fine for the log.
+        issue: v.issue ?? null,
         actions: v.actions ? JSON.parse(v.actions) : [],
         outcome: v.outcome,
         prUrl: v['pr-url'] ?? null,
@@ -374,7 +377,9 @@ try {
     case 'residue-scan': {
       const v = opts({ target: { type: 'string' }, issue: { type: 'string' } });
       const auditPath = join(v.target, '.harness', 'audit.jsonl');
-      const items = scanResidue({ auditPath, issue: Number(v.issue) });
+      // Pass the issue verbatim (Jira key or numeric) — scanResidue normalizes
+      // it against the run-id's parsed issue (case-insensitive), so no coercion.
+      const items = scanResidue({ auditPath, issue: v.issue });
       emit({ items }); // exit 0 always — an empty result is a valid outcome
     }
     case 'loop-state': {

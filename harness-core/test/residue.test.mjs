@@ -189,3 +189,32 @@ test('scanResidue ignores non-note events and other issues; missing file yields 
   assert.deepEqual(scanResidue({ auditPath, issue: 2 }), []);
   assert.deepEqual(scanResidue({ auditPath: join(scaffold(), 'nope.jsonl'), issue: 2 }), []);
 });
+
+// ── Jira issue keys (slugified in the run-id) ─────────────────────────────────
+// A Jira-sourced run-id carries the slugified key: issue-tars-1271. residue
+// forward-routing must work for those too — parse the slug, and match it
+// against the real key the caller passes (case-insensitively).
+
+test('parseIssueFromRunId parses a slugified Jira key segment as its slug string', () => {
+  assert.equal(parseIssueFromRunId('2026-07-28T064201Z__webtarsthree__intake__issue-tars-1271__70b223'), 'tars-1271');
+  assert.equal(parseIssueFromRunId('2026-07-28T000000Z__webtarsthree__plan__issue-ems-5__abc123'), 'ems-5');
+});
+
+test('parseIssueFromRunId still returns a number for a purely-numeric issue segment', () => {
+  assert.equal(parseIssueFromRunId('2026-07-27T022150Z__skills__intake__issue-2__b5808e'), 2);
+});
+
+test('scanResidue matches a Jira-keyed run when the caller passes the real key (case-insensitive)', () => {
+  const auditPath = writeAudit([
+    {
+      ts: '2026-07-28T06:00:00Z',
+      run_id: '2026-07-28T064201Z__webtarsthree__intake__issue-tars-1271__70b223',
+      phase: 'intake', agent_id: 'driver', event: 'note',
+      data: { type: 'residue', criterion: 'AC-1 clientFetch timeout', detail: 'timeout not yet added' },
+    },
+  ]);
+  // The loop passes the real key (TARS-1271); the run-id carries the slug (tars-1271).
+  const hits = scanResidue({ auditPath, issue: 'TARS-1271' });
+  assert.equal(hits.length, 1);
+  assert.equal(hits[0].data.criterion, 'AC-1 clientFetch timeout');
+});
