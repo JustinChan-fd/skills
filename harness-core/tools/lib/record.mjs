@@ -199,10 +199,10 @@ export function finalizeRun({ runDir, status, reason = null, wallMs = null, toke
 // numbers later (harness-core's role is to aggregate and summarize, not to
 // bake a computed "final answer" into the individual record).
 //
-// Only meaningful once the run has actually finalized (run-end already
-// happened) — recording an observed total against an in-flight `attempted`
-// record makes no sense, since its own eventual run-end wouldn't touch this
-// field, but there'd be nothing yet to corroborate.
+// Can be called at any run lifecycle state (attempted or finalized). An
+// orchestrator may observe the Agent-tool return total before the subagent's
+// own run-end has completed — for example, on a crashed run — so enforcing
+// "finalized only" was too strict and has been removed.
 // Sum per-tier subagent-token observations into the tokens_by_tier shape a
 // phase-end reports, and author the accompanying tokens note. This is the
 // deterministic half of a phase's token accounting: the driver still OBSERVES

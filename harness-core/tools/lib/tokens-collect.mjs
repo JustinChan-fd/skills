@@ -478,6 +478,13 @@ export function backfillDirectional({ runDir, subagentsDir, start, end, modelTie
   if (!discovered.ok) return { ok: false, error: discovered.error };
 
   const result = collectFromFile(discovered.path, { start: effectiveStart, end: effectiveEnd });
+  // Defense-in-depth: a transcript that passed discovery should always be parseable
+  // (discovery requires at least one timestamp line, which means at least one JSON line
+  // was successfully parsed → collectFromText sets ok:true). This guard covers edge
+  // cases such as a transcript that becomes unreadable between discovery and collection.
+  if (!result.ok) {
+    return { ok: false, error: result.error };
+  }
 
   // Cross-check: directional sum vs externally-observed total.
   const observedTotal = record.tokens_observed?.total ?? 0;
