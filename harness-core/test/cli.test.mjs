@@ -117,3 +117,29 @@ test('config prints resolved routing', () => {
   assert.equal(cfg.code, 0);
   assert.equal(cfg.out.routing.tier_models.HIGH, 'opus');
 });
+
+test('github-normalize reads a saved gh issue response and prints the neutral shape', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'harness-gh-'));
+  const file = join(dir, 'gh-2.json');
+  writeFileSync(file, JSON.stringify({
+    number: 2,
+    title: 'Clear button does not reset the date filter',
+    body: 'Expected: all filters reset.',
+    labels: [{ name: 'bug' }],
+  }));
+  const r = run(['github-normalize', '--file', file, '--repo', 'jarvis']);
+  assert.equal(r.code, 0);
+  assert.equal(r.out.key, '2');
+  assert.equal(r.out.project_key, 'jarvis');
+  assert.equal(r.out.change_type, 'fix');
+  assert.equal(r.out.issue_type, null);
+  assert.ok(r.out.input.includes('Expected: all filters reset.'));
+});
+
+test('github-normalize exits 1 on a malformed issue (no title)', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'harness-gh-'));
+  const file = join(dir, 'bad.json');
+  writeFileSync(file, JSON.stringify({ number: 2 }));
+  const r = run(['github-normalize', '--file', file, '--repo', 'jarvis']);
+  assert.equal(r.code, 1);
+});

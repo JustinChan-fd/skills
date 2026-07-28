@@ -33,6 +33,7 @@ import { syncRun, sweep } from './lib/telemetry.mjs';
 import { renderStatusComment, renderPrBody, renderBrief } from './lib/render.mjs';
 import { composeLoopLine } from './lib/looprecord.mjs';
 import { normalizeJiraIssue } from './lib/jira.mjs';
+import { normalizeGithubIssue } from './lib/github.mjs';
 import { extractPlanEntries, orderPlansByDeps } from './lib/plan-sequencer.mjs';
 import { splitOversizedTasks } from './lib/split-oversized.mjs';
 
@@ -149,6 +150,17 @@ try {
       // malformed issue exits 1 rather than fabricating a shape.
       const v = opts({ file: { type: 'string' } });
       const normalized = normalizeJiraIssue(JSON.parse(readFileSync(v.file, 'utf8')));
+      emit(normalized);
+    }
+    case 'github-normalize': {
+      // Normalize a saved `gh issue view --json number,title,body,labels`
+      // response into the SAME neutral intake shape jira-normalize produces, so
+      // downstream phases are source-agnostic. Fetch-once-to-disk, same as Jira:
+      // intake writes the raw response, this reads it, plan/implement read the
+      // manifest. --repo is the repo slug, used as project_key. A malformed
+      // issue exits 1 rather than fabricating a shape.
+      const v = opts({ file: { type: 'string' }, repo: { type: 'string' } });
+      const normalized = normalizeGithubIssue(JSON.parse(readFileSync(v.file, 'utf8')), { repoSlug: v.repo ?? null });
       emit(normalized);
     }
     case 'plan-order': {
@@ -459,6 +471,7 @@ try {
           'init-run': '--target <path> --repo <slug> --kind intake|plan|implement --source issue-<n>|adhoc|file [--issue <n>] [--branch <b>] [--parent-run-id <id>] [--loop-run-id <id>] [--correlation-id <id>] [--repo-path <path>] [--skills-commit <sha>]',
           'resolve-project': '--issue <KEY-n>  (map a Jira issue key prefix to { repoPath, cloudId } from config/projects.json; exit 1 if unknown)',
           'jira-normalize': '--file <issue.json>  (normalize a saved getJiraIssue response into the neutral intake shape {key,summary,description,issue_type,change_type,parent_key,project_key,input}; exit 1 if malformed)',
+          'github-normalize': '--file <issue.json> [--repo <slug>]  (normalize a saved `gh issue view --json number,title,body,labels` response into the SAME neutral intake shape as jira-normalize; --repo becomes project_key; exit 1 if malformed)',
           'plan-order': '--manifest <plan-manifest.json>  (topologically order plans[] by dependsOn; { order:[...] }; exit 1 on cycle/unknown dep)',
           'split-tasks': '--plan <plan.json> [--cap <n>]  (split any task whose files[] exceeds the cap into same-group parallel chunks; { tasks:[...] })',
           validate: '--schema <name> --file <path>',

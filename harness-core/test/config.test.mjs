@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { writeFileSync, mkdtempSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir, homedir } from 'node:os';
-import { resolveConfig, sizeBudgets, tierFor, expandHome } from '../tools/lib/config.mjs';
+import { resolveConfig, sizeBudgets, tierFor, expandHome, issueSourceFor } from '../tools/lib/config.mjs';
 
 test('routing defaults load; sizes and tiers resolve', () => {
   const { routing } = resolveConfig({ env: {}, userFile: '/nonexistent' });
@@ -65,4 +65,19 @@ test('price_table provenance version reflects the cache-column addition', () => 
 test('expandHome expands leading tilde only', () => {
   assert.equal(expandHome('~/x'), join(homedir(), 'x'));
   assert.equal(expandHome('/abs/x'), '/abs/x');
+});
+
+test('issueSourceFor reads a repo\'s explicit issue_source, defaulting to jira', () => {
+  const user = {
+    repos: {
+      webtarsthree: { path: '~/x', issue_source: 'jira' },
+      jarvis: { path: '~/j', issue_source: 'github', github: 'me/jarvis' },
+      legacy: { path: '~/l' }, // unset → default jira (back-compat)
+    },
+  };
+  assert.equal(issueSourceFor(user, 'jarvis'), 'github');
+  assert.equal(issueSourceFor(user, 'webtarsthree'), 'jira');
+  assert.equal(issueSourceFor(user, 'legacy'), 'jira'); // default when unset
+  assert.equal(issueSourceFor(user, 'unknown-alias'), 'jira'); // unknown repo → default
+  assert.equal(issueSourceFor({}, 'anything'), 'jira'); // no repos at all → default
 });

@@ -1,8 +1,9 @@
 {
   "repos": {
-    "example-alias": { "path": "~/path/to/your/repo", "github": "your-user/your-repo" }
+    "example-jira-repo": { "path": "~/path/to/your/repo", "issue_source": "jira" },
+    "example-github-repo": { "path": "~/path/to/another/repo", "issue_source": "github", "github": "your-user/your-repo" }
   },
-  "defaultRepo": "example-alias",
+  "defaultRepo": "example-jira-repo",
   "billing_mode": "subscription",
   "telemetry": {
     "repo": "your-user/harness-telemetry",

@@ -55,33 +55,60 @@ Let `CLI` = `node ~/.claude/skills/harness-core/tools/harness.mjs`.
 
 ## Tick workflow
 
-**1. Resolve the target repo** from the invocation argument (alias in
-`~/.claude/skills/harness-core/config/user.json` `repos` registry, or a
-path), else `defaultRepo`. No target resolvable → report and stop.
+**1. Resolve the target repo AND its issue source** from the invocation
+argument (alias in `~/.claude/skills/harness-core/config/user.json` `repos`
+registry, or a path), else `defaultRepo`. No target resolvable → report and
+stop. Read the resolved repo's `issue_source` from that same registry — it is
+`jira` or `github` (unset defaults to `jira`; the CLI helper `issueSourceFor`
+encodes this). For a `github` repo, also read its `github` field (the
+`owner/repo` slug). This `ISSUE_SOURCE` (and `GITHUB_SLUG` when github) governs
+step 4's pick-work-item, the driver prompts' input shape, and every
+status-comment sink — pass it into every driver prompt.
 
 **2. Take the lock.** If `<target>/.harness/loop.lock` exists and its mtime
 is under 2 hours old → another tick is mid-pipeline: report "tick skipped:
 pipeline in flight" and STOP (do not remove it). If it exists but is 2+
 hours old, the prior tick died: delete it and continue (step 4's stranded
-handling cleans up its run). Then write the lock:
+handling cleans up its run). The `.harness/` dir may not exist yet on a
+never-before-run repo (`init-run` creates it later, but the lock precedes it),
+so ensure it first, then write the lock:
 
+    mkdir -p <target>/.harness
     date -u +%Y-%m-%dT%H:%M:%SZ > <target>/.harness/loop.lock
 
 **3. Sweep** (finalizes and syncs orphaned records deterministically):
 
     CLI sweep --target <target>
 
-**4. Pick the work item.** List the target project's open issues ascending by
-issue number. Resolve the project key + cloudId from the target (the
-`projects.json` prefix whose `repoPath` is this target), then via the Jira MCP:
+**4. Pick the work item.** List the target's open issues ascending by number,
+then take the FIRST whose `CLI loop-state --target <target> --issue <ID>`
+reports `next` != `done`. The listing depends on `ISSUE_SOURCE`; `loop-state`
+and everything after it are identical either way (the state derives from
+`record.issue` on disk, which is source-neutral).
 
-    mcp__atlassian__searchJiraIssuesUsingJql({ cloudId,
-      jql: 'project = <KEY> AND statusCategory != Done ORDER BY key ASC',
-      fields: ['key'], maxResults: 50 })
+- **`ISSUE_SOURCE == jira`:** resolve the project key + cloudId from the target
+  (the `projects.json` prefix whose `repoPath` is this target), then via the
+  Jira MCP:
 
-For each issue key in order, run `CLI loop-state --target <target> --issue
-<KEY>` and take the FIRST whose `next` is not `done`. Issues at `done` have a
-delivered PR — transitioning the Jira issue is the user's business, skip them.
+      mcp__atlassian__searchJiraIssuesUsingJql({ cloudId,
+        jql: 'project = <KEY> AND statusCategory != Done ORDER BY key ASC',
+        fields: ['key'], maxResults: 50 })
+
+  The work-item id is the Jira KEY (e.g. `TARS-1271`).
+
+- **`ISSUE_SOURCE == github`:** no cloudId / project-key resolution — list the
+  repo's open issues by number:
+
+      gh issue list --repo <GITHUB_SLUG> --state open --json number,title --jq 'sort_by(.number)'
+
+  The work-item id is the issue NUMBER (e.g. `2`). Beware: `gh issue list` also
+  returns PRs on some setups — the `--json number` of an issue is fine, but do
+  NOT treat a PR as a work item; the `number,title` projection over
+  `gh issue list` is issues-only.
+
+For each id in order, run `CLI loop-state --target <target> --issue <ID>` and
+take the FIRST whose `next` is not `done`. Issues at `done` have a delivered PR
+— transitioning the issue's tracker state is the user's business, skip them.
 No candidate → no-op tick: append the loop log line (step 7), remove the lock,
 report, stop.
 
@@ -303,14 +330,18 @@ the table):
 >    SKILL.md — only the Skill tool's own loading path is guaranteed to carry
 >    everything the skill actually needs in effect; a manual Read can silently
 >    miss it.
-> 2. Execute it step by step, exactly, with this input: <Jira issue key
->    (e.g. TARS-1271) | upstream run id and its artifact paths>. When you call
->    `CLI init-run`, pass `--parent-run-id <LOOP_RUN_ID> --loop-run-id
->    <LOOP_RUN_ID> --correlation-id <CORRELATION_ID>` (values below) so this
->    phase joins the tick's pipeline run.
+> 2. Execute it step by step, exactly, with this input: <work-item id (Jira KEY
+>    e.g. TARS-1271, or GitHub issue number e.g. 2) | upstream run id and its
+>    artifact paths>. When you call `CLI init-run`, pass `--parent-run-id
+>    <LOOP_RUN_ID> --loop-run-id <LOOP_RUN_ID> --correlation-id
+>    <CORRELATION_ID>` (values below) so this phase joins the tick's pipeline
+>    run.
 > 3. The target repo is <target path> (alias <alias> in
 >    ~/.claude/skills/harness-core/config/user.json); the base branch is
 >    <resolved base from step 5>. LOOP_RUN_ID=<...>, CORRELATION_ID=<...>.
+>    ISSUE_SOURCE=<jira|github>; for github, GITHUB_SLUG=<owner/repo>. The
+>    skill branches its fetch/normalize and status-comment sink on ISSUE_SOURCE
+>    — pass these through.
 >
 > Operational rules (from measured driver failures — follow strictly):
 > - Dispatch EVERY subagent synchronously (run_in_background: false); wait
@@ -327,11 +358,14 @@ the table):
 >   verifiers, verifier_round after EVERY round (pass rounds included),
 >   structured estimated:true/false tokens note.
 > - <phase-specific truths: for plan/implement, the manifest/plan are the
->   truth — never re-read the Jira issue; carry forward any intake
+>   truth — never re-read the source issue; carry forward any intake
 >   claims-audit corrections verbatim. For implement: PR title prefix from
->   the manifest's change_type + the Jira KEY; the Jira key rides in the title
->   and summary (no GitHub Closes-# auto-close — the Jira issue transitions in
->   Jira after review); open the PR but NEVER merge it.>
+>   the manifest's change_type + the work-item id. If ISSUE_SOURCE==jira, the
+>   Jira key rides in the title and summary only (NO GitHub Closes-# — the Jira
+>   issue transitions in Jira after review). If ISSUE_SOURCE==github, the PR
+>   body's `Closes-#<number>` is desired (auto-closes the issue on merge) —
+>   render-pr-body already emits it from --issue <number>. Either way, open the
+>   PR but NEVER merge it.>
 >
 > When completely done (after run-end), report: run_id, run_dir, verifier
 > rounds + final score, tokens_by_tier (and whether estimated), <phase

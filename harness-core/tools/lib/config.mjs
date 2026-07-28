@@ -58,6 +58,15 @@ export function resolveProject(issueKey, projectsFile = undefined) {
   return projects[prefix] ?? null;
 }
 
+// Resolve a repo's issue tracker ('jira' | 'github') from user.json. Every repo
+// is meant to stamp issue_source explicitly, but an unset (or unknown) repo
+// defaults to 'jira' for back-compat with the original Jira-only harness. This
+// is the single branch point the SKILL.md files read to route pick-work-item,
+// fetch/normalize, and the status-comment sink.
+export function issueSourceFor(user, alias) {
+  return user?.repos?.[alias]?.issue_source ?? 'jira';
+}
+
 function setPath(obj, keys, value) {
   let cur = obj;
   for (const k of keys.slice(0, -1)) cur = cur[k] ??= {};

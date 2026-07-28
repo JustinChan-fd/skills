@@ -192,9 +192,9 @@ residue) and act on the decision exactly as harness-intake-core does:
 - `shut` (exit 1) → the phase failed: `CLI phase-end --run-dir <run_dir>
   --phase plan --status failed`, then `CLI run-end --target <path>
   --run-dir <run_dir> --status failed --reason-code verifier_blocking_cap
-  --reason-detail "<summary>"`, post the status comment to Jira if Jira-sourced
-  (`mcp__atlassian__addCommentToJiraIssue`, same render helper as step 8), and
-  stop.
+  --reason-detail "<summary>"`, post the status comment if issue-sourced (jira →
+  `mcp__atlassian__addCommentToJiraIssue`; github → `gh issue comment <n>
+  --repo <owner/repo>`, same render helper as step 8), and stop.
 
 **6. Negotiate the entry contract** (spec §6's generator/verifier agreement,
 done BEFORE implement starts). You draft the proposal either way: the
@@ -227,10 +227,10 @@ finalize the run as failed: `CLI run-end --target <path> --run-dir <run_dir>
 --status failed --reason-code crash --reason-detail "artifact failed schema
 validation: handoff"`, and stop.
 
-**8. Close.** First `phase-end`, then the status comment (if Jira-sourced,
+**8. Close.** First `phase-end`, then the status comment (if issue-sourced,
 one comment), then `run-end`. Do NOT hand-compose the comment markdown:
-render it with `CLI render-status-comment` and pass its stdout as the Jira
-comment body, so the template's shape (heading emoji, Plan line with unit
+render it with `CLI render-status-comment` and pass its stdout as the comment
+body, so the template's shape (heading emoji, Plan line with unit
 count + blocking-criteria count, Residue line, Next line) is assembled by
 script. Pass `--notes` as the JSON array of THIS run's own recorded
 residue/defect notes (the notes step 5 wrote this run — no `audit.jsonl`
@@ -240,9 +240,12 @@ yourself.
 
     BODY=$(CLI render-status-comment --phase plan --status succeeded --run-id <run_id> --plan-units <n> --plan-blocking <n> --notes '<json-array of residue notes, or []>' --next "<what happens next>")
 
-Post it to Jira (Jira-sourced runs only; skip for adhoc/file):
-
-    mcp__atlassian__addCommentToJiraIssue({ cloudId, issueIdOrKey: '<KEY>', commentBody: BODY })
+Post it to the issue tracker — the render helper is source-neutral, only the
+post differs (skip for adhoc/file). Carry the `issue_source` forward from the
+manifest's `source` (`issue-<KEY>` → jira, `issue-<n>` numeric → github) or the
+dispatcher:
+- **jira:** `mcp__atlassian__addCommentToJiraIssue({ cloudId, issueIdOrKey: '<KEY>', commentBody: BODY })`
+- **github:** `gh issue comment <n> --repo <owner/repo> --body "$BODY"`
 
 Then close the record, passing the per-skill perf fields the v2 record tracks —
 `--active-ms` (from `CLI tokens-collect`'s `active_ms`), `--agent-count`, and

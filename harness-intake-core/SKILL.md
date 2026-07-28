@@ -53,19 +53,28 @@ Let `CLI` = `node ~/.claude/skills/harness-core/tools/harness.mjs`.
 
 ## Workflow
 
-**1. Resolve the target repo.** Jira-first, deterministic — do not guess from
-git remotes:
-- If given a Jira issue key (e.g. `TARS-1271`), run `CLI resolve-project
-  --issue <KEY>` → `{ repoPath, cloudId }` (mapping lives in
-  `harness-core/config/projects.json`). Use `repoPath` as `<path>`; the repo
-  slug is its folder name. Keep `cloudId` for the Jira calls in steps 2 and 8.
+**1. Resolve the target repo.** Deterministic — do not guess from git remotes.
+The path depends on the input's tracker:
+- **Jira issue key** (e.g. `TARS-1271`): run `CLI resolve-project --issue <KEY>`
+  → `{ repoPath, cloudId }` (mapping lives in `harness-core/config/projects.json`).
+  Use `repoPath` as `<path>`; the repo slug is its folder name. Keep `cloudId`
+  for the Jira calls in steps 2 and 8. If `resolve-project` exits 1 (unknown
+  prefix), ask the user for the path and tell them to add the mapping to
+  `projects.json` for next time.
+- **GitHub issue number** (e.g. `2`): there is no key prefix to map, so the repo
+  comes from the invocation context — the loop/dispatcher passes the target path
+  and the `github` slug (`owner/repo`) explicitly; a standalone run uses the cwd
+  git repo or the named alias. Read the alias's `issue_source`/`github` from
+  `~/.claude/skills/harness-core/config/user.json` (`repos` registry). Keep the
+  `github` slug for the `gh` calls in steps 2 and 8.
 - Else if the cwd is a git repo and no repo was named: use it.
 - Else look up the alias in `~/.claude/skills/harness-core/config/user.json`
   (`repos` registry; also `defaultRepo`). Expand `~`.
-- Else ask. If `resolve-project` exits 1 (unknown prefix), ask the user for the
-  path and tell them to add the mapping to `projects.json` for next time.
+- Else ask.
 - Record: target path, repo slug, current branch (`git -C <path> branch
-  --show-current`).
+  --show-current`), and the resolved `issue_source` (`jira`|`github`; unset →
+  `jira`). `issue_source` governs step 2's fetch/normalize and step 8's comment
+  sink.
 
 **2. Classify the input** → `source`:
 - **Jira issue key** (`TARS-1271`, `EMS-5`, or a Jira browse URL) → fetch ONCE
@@ -82,6 +91,18 @@ git remotes:
   starting `requirement.change_type`. If the fetch fails, tell the user and
   fall back to asking for pasted content (`adhoc`). `source` =
   `issue-<slugified-key>` (lowercase, e.g. `issue-tars-1271`).
+- **GitHub issue number** (`2`, when `issue_source == github`) → fetch ONCE and
+  normalize to disk, exactly mirroring the Jira path but via `gh` (so
+  plan/implement never re-hit GitHub):
+
+      gh issue view <n> --repo <owner/repo> --json number,title,body,labels > <path>/.harness/tmp/gh-<n>.json
+
+  then `CLI github-normalize --file <that> --repo <slug>` → the SAME neutral
+  intake shape as jira-normalize (`--repo <slug>` becomes `project_key`). Use
+  `.input` as the raw input and `.change_type` (mapped from labels) as the
+  starting `requirement.change_type`. If the fetch fails, tell the user and
+  fall back to `adhoc`. `source` = `issue-<n>` (e.g. `issue-2`). The issue
+  NUMBER is what rides in `--issue` (step 3) and the record's `issue` field.
 - An existing file path → `file`.
 - Anything else (pasted/typed text) → `adhoc`.
 
@@ -95,8 +116,9 @@ git remotes:
       --correlation-id "$CORRELATION_ID" --skills-commit "$SKILLS_COMMIT" \
       [--parent-run-id <LOOP_RUN_ID> --loop-run-id <LOOP_RUN_ID>]
 
-Pass `--issue <KEY>` for a Jira source (the real key, e.g. `TARS-1271` — it
-rides in the record while the slug rides in the run-id). Pass
+Pass `--issue <ID>` for an issue source — the Jira KEY (`TARS-1271`) or the
+GitHub issue NUMBER (`2`); it rides in the record while the slug rides in the
+run-id. `CORRELATION_ID` is `<ID>-<runTs>` either way. Pass
 `--parent-run-id`/`--loop-run-id` ONLY when harness-loop dispatched you (it
 supplies the pipeline tick's run-id); a standalone run leaves them off and
 still stamps `correlation_id` so its three phases join. Capture `run_id` and
@@ -227,9 +249,9 @@ another verifier round):
 - `shut` (exit 1) → the phase failed: `CLI phase-end --run-dir <run_dir>
   --phase intake --status failed`, then `CLI run-end --target <path>
   --run-dir <run_dir> --status failed --reason-code verifier_blocking_cap
-  --reason-detail "<summary>"`, post the status comment to Jira if
-  Jira-sourced (`mcp__atlassian__addCommentToJiraIssue`, same render helper as
-  step 8), and stop.
+  --reason-detail "<summary>"`, post the status comment if issue-sourced (jira →
+  `mcp__atlassian__addCommentToJiraIssue`; github → `gh issue comment <n>
+  --repo <owner/repo>`, same render helper as step 8), and stop.
 
 **7. Write the handoff** (`<run_dir>/handoffs/intake-to-plan.json`, `handoff`
 schema, per `templates/handoff.md`): `from_phase: intake`, `to_phase: plan`,
@@ -239,10 +261,10 @@ security/data-loss/build-breaking → `blocking`, else `advisory`), `artifacts`
 handling** below for the retry rule.
 
 **8. Close the phase.** First `phase-end`, then the status comment (if
-Jira-sourced, ONE comment per `templates/status-comment.md` — posted before
+issue-sourced, ONE comment per `templates/status-comment.md` — posted before
 run-end so the run record's window contains it), then `run-end`. Do NOT
 hand-compose the comment markdown: render it with `CLI render-status-comment`
-and pass its stdout as the Jira comment body, so the template's shape (heading
+and pass its stdout as the comment body, so the template's shape (heading
 emoji, Size line, Residue line, Next line) is assembled by script. Pass
 `--notes` as the JSON array of THIS run's own recorded residue/defect notes
 (the notes step 6 wrote this run — no `audit.jsonl` re-scan); the helper
@@ -251,9 +273,16 @@ is empty. You still author the `--next` prose yourself.
 
     BODY=$(CLI render-status-comment --phase intake --status succeeded --run-id <run_id> --size <size> --size-rationale "<one-line rationale>" --notes '<json-array of residue notes, or []>' --next "<what happens next>")
 
-Then post it to Jira (Jira-sourced runs only; skip for adhoc/file):
+Then post it to the issue tracker — the render helper is source-neutral, only
+the post differs (skip entirely for adhoc/file):
+- **`issue_source == jira`:**
 
-    mcp__atlassian__addCommentToJiraIssue({ cloudId, issueIdOrKey: '<KEY>', commentBody: BODY })
+      mcp__atlassian__addCommentToJiraIssue({ cloudId, issueIdOrKey: '<KEY>', commentBody: BODY })
+
+- **`issue_source == github`:** pipe the rendered body straight into `gh`
+  (variable-free, so no shell-quoting surprises):
+
+      gh issue comment <n> --repo <owner/repo> --body "$(CLI render-status-comment --phase intake --status succeeded --run-id <run_id> --size <size> --size-rationale "<one-line rationale>" --notes '<json-array of residue notes, or []>' --next "<what happens next>")"
 
 Then close the record. Pass the per-skill perf fields the v2 record tracks —
 `--active-ms` (gap-capped active time, from `CLI tokens-collect`'s

@@ -120,32 +120,37 @@ another HIGH-tier round):
   --phase implement --status failed`, then `CLI run-end --target <path>
   --run-dir <run_dir> --status failed --reason-code verifier_blocking_cap
   --reason-detail "<summary>"`, push the branch anyway (work is not lost),
-  post the status comment to Jira if Jira-sourced
-  (`mcp__atlassian__addCommentToJiraIssue`), and stop.
+  post the status comment if issue-sourced (jira →
+  `mcp__atlassian__addCommentToJiraIssue`; github → `gh issue comment <n>
+  --repo <owner/repo>`), and stop.
 
-**5. Deliver — open the PR, never merge.** The code repo is GitHub, so the PR
-is created with `gh pr create`; the ISSUE tracker is Jira, so the PR references
-the Jira key (there is no GitHub auto-close for a Jira issue — closing happens
-in Jira, by a human, after review). Do NOT hand-assemble the PR body markdown:
-render it with `CLI render-pr-body` and capture its stdout into a variable-free
-`gh pr create --body "$(...)"` invocation. You still author the prose
-`--summary` yourself; the helper assembles the invariant shape (a reference
-line, the entry-contract results table, the landing checklist, the run id, and
-the Advisory-residue section). Pass the entry-contract results as
-`--result-rows` (a JSON array of `{criterion, tag, result, evidence}`), the
-post-merge landing checklist as `--landing`, and `--notes` as the JSON array of
-THIS run's own recorded residue/defect notes:
+**5. Deliver — open the PR, never merge.** The code repo is GitHub either way,
+so the PR is created with `gh pr create`. Do NOT hand-assemble the PR body
+markdown: render it with `CLI render-pr-body` and capture its stdout into a
+variable-free `gh pr create --body "$(...)"` invocation. You still author the
+prose `--summary` yourself; the helper assembles the invariant shape (a
+`Closes #<issue>` line, the entry-contract results table, the landing
+checklist, the run id, and the Advisory-residue section). Pass the
+entry-contract results as `--result-rows` (a JSON array of `{criterion, tag,
+result, evidence}`), the post-merge landing checklist as `--landing`, and
+`--notes` as the JSON array of THIS run's own recorded residue/defect notes:
 
     git push -u origin <branch>
-    gh pr create --title "<change_type>: <KEY> <requirement summary>" --body "$(CLI render-pr-body --change-type <change_type> --issue <KEY> --summary "<your prose summary>" --run-id <run_id> --result-rows '<json>' --landing '<json>' --notes '<json-array of residue notes, or []>')"
+    gh pr create --title "<change_type>: <ID> <requirement summary>" --body "$(CLI render-pr-body --change-type <change_type> --issue <ID> --summary "<your prose summary>" --run-id <run_id> --result-rows '<json>' --landing '<json>' --notes '<json-array of residue notes, or []>')"
 
-Put the Jira `<KEY>` (e.g. `TARS-1271`) in BOTH the PR title and the
-`--summary` prose (e.g. "Implements TARS-1271.") so the PR is traceable to the
-ticket. `render-pr-body`'s `--issue <KEY>` line is a plain reference, not a
-GitHub auto-close keyword — a Jira issue is transitioned in Jira after human
-review, which is consistent with the never-merge invariant (the PR is opened
-for review, not merged, so nothing should auto-close on push anyway). **Do not
-merge the PR** — delivery ends here.
+`<ID>` is the work-item id — the Jira KEY (`TARS-1271`) or the GitHub issue
+NUMBER (`2`) — and goes in BOTH the PR title and the `--summary` prose (e.g.
+"Implements #2." / "Implements TARS-1271.") so the PR is traceable. The
+`Closes #<ID>` line render-pr-body emits behaves differently by source, and
+both behaviors are correct:
+- **github:** `Closes #2` is a valid GitHub auto-close keyword — the issue
+  closes automatically when a human merges the PR (never on open, so the
+  never-merge invariant holds; nothing auto-closes just from pushing).
+- **jira:** `Closes #TARS-1271` is NOT a valid numeric ref in the code repo, so
+  GitHub ignores it — it degrades to a plain reference, and the Jira issue is
+  transitioned in Jira by a human after review, as before.
+
+**Do not merge the PR** — delivery ends here.
 
 **The `## Advisory residue` section** is emitted by `render-pr-body` directly
 below the run-id line. It lists every `residue`/`defect` note THIS implement
@@ -165,18 +170,21 @@ title as the commit subject, and repos with conventional-commit automation
 (semantic version bumps, changelogs) key off that prefix; a non-semantic
 prefix silently downgrades their releases.
 
-**6. Close.** First `phase-end`, then the status comment (if Jira-sourced,
+**6. Close.** First `phase-end`, then the status comment (if issue-sourced,
 one comment: outcome + PR link), then `run-end`. Do NOT hand-compose the
 comment markdown: render it with `CLI render-status-comment` and pass its
-stdout as the Jira comment body, so the template's shape (heading emoji, PR
+stdout as the comment body, so the template's shape (heading emoji, PR
 line, Residue line, Next line) is assembled by script. Pass `--notes` as the
 JSON array of THIS run's own recorded residue/defect notes (the same notes
 that fed step 5's PR-body section — no `audit.jsonl` re-scan); the helper
 populates the **Residue** line from them and omits it entirely when the array
-is empty. You still author the `--next` prose yourself.
+is empty. You still author the `--next` prose yourself. The render helper is
+source-neutral; only the post differs (carry `issue_source` from the manifest's
+`source` or the dispatcher):
 
     BODY=$(CLI render-status-comment --phase implement --status <succeeded|partial|failed> --run-id <run_id> --pr-url <url> --notes '<json-array of residue notes, or []>' --next "<outcome, or why the run stopped>")
-    # Jira-sourced: mcp__atlassian__addCommentToJiraIssue({ cloudId, issueIdOrKey: '<KEY>', commentBody: BODY })
+    # issue_source==jira:   mcp__atlassian__addCommentToJiraIssue({ cloudId, issueIdOrKey: '<KEY>', commentBody: BODY })
+    # issue_source==github: gh issue comment <n> --repo <owner/repo> --body "$BODY"
     CLI phase-end --run-dir <run_dir> --phase implement --status <succeeded|partial|failed> --rounds <n> --score <score> --size <size>
     CLI run-end --target <path> --run-dir <run_dir> --status <same> [--reason-code <code> --reason-detail "<why>"] --tokens-by-tier '{"LOW":<n>,"MID":<n>,"HIGH":<n>}' \
       --active-ms <n> \
