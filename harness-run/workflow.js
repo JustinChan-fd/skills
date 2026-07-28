@@ -8,6 +8,15 @@ export const meta = {
     { title: 'Implement',   detail: 'harness-implement: TDD-gated implementation' },
     { title: 'PR',          detail: 'Push branch, open DRAFT PR' },
     { title: 'Summary',     detail: 'Assemble run summary' },
+    // Bookkeeping is not a pipeline stage — checkpoint/stamp/telemetry agents run BETWEEN
+    // stages and after them. They used to tag `phase: 'Summary'`, which meant the terminal
+    // row of the progress tree completed seconds into a run: the plan→implement checkpoint
+    // fires before Implement starts. Nothing ran out of order; the display just reported the
+    // run finished while it was still working. Declared last because it interleaves with
+    // everything, so it reads as a trailing group rather than wedged between two stages it
+    // sits either side of. lib/phases.test.js fails the suite if a bookkeeping agent claims a
+    // pipeline phase again, or if any agent claims a phase not declared here.
+    { title: 'Bookkeeping', detail: 'Checkpoints, duration stamps, per-stage telemetry appends' },
   ],
 }
 
@@ -311,7 +320,7 @@ Content:
 ${JSON.stringify(state, null, 2)}
 
 After writing, confirm with "CHECKPOINT_OK" or "CHECKPOINT_ERROR: <reason>".`,
-    { label: `checkpoint-${lastCompletedStage}`, phase: 'Summary', effort: 'low' }
+    { label: `checkpoint-${lastCompletedStage}`, phase: 'Bookkeeping', effort: 'low' }
   )
 }
 
@@ -375,7 +384,7 @@ async function nowMs(label) {
   const r = await agent(
     `Run exactly: python3 -c "import time; print(int(time.time()*1000))"
 Return ONLY the integer it prints. No prose, no units, no punctuation.`,
-    { label: `stamp-${label}`, phase: 'Summary', model: 'claude-haiku-4-5-20251001', effort: 'low' }
+    { label: `stamp-${label}`, phase: 'Bookkeeping', model: 'claude-haiku-4-5-20251001', effort: 'low' }
   )
   const n = parseInt(String(r).match(/\d{10,}/)?.[0] || '', 10)
   return Number.isFinite(n) ? n : null
@@ -445,7 +454,7 @@ if lines:
 " <path> <fields-json>
 
 Report "TELEMETRY_OK" or "TELEMETRY_ERROR: <reason>".`,
-    { label: `telemetry-${skill}`, phase: 'Summary', model: 'claude-haiku-4-5-20251001', effort: 'low' }
+    { label: `telemetry-${skill}`, phase: 'Bookkeeping', model: 'claude-haiku-4-5-20251001', effort: 'low' }
   )
 }
 
