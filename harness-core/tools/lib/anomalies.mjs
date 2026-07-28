@@ -77,6 +77,31 @@ function recordChecks({ record, events, routing, findings }) {
   // Non-succeeded runs are already flagged above; their streams are expected
   // to be partial.
   if (record.status !== 'succeeded') return;
+
+  // TARS-1271 succeeded with tokens_observed full and tokens_directional.by_model
+  // empty — every downstream attribution read zero and no one noticed for weeks,
+  // because a silent enrichment failure looks identical to a quiet run. Gate on
+  // observed > 0 so a run that genuinely spawned nothing stays clean: with no
+  // tokens to attribute, an empty by_model is the right answer.
+  //
+  // tokens_observed is a flat { total, tier, source, observed_at } summary (one
+  // Agent-tool usage tag), NOT a per-model map — the per-model split is exactly
+  // what tokens_directional adds and exactly what goes missing here. Records
+  // reach this scan unvalidated (scanAnomalies JSON.parses raw files; the schema
+  // check lives on writeRecord, on the write path), so pre-directional-era and
+  // partially-written records land here: optional-chain everything and require a
+  // finite number rather than throw, because a throw aborts the whole scan
+  // rather than skipping one record.
+  const observedTotal = record.tokens_observed?.total;
+  const byModel = record.tokens_directional?.by_model ?? null;
+  // Reading by_model rather than `complete` is deliberate: the live record had
+  // complete:true over {}. A populated by_model with complete:false is honest
+  // partial attribution — an unrecognised model id — and must never flag, or the
+  // signal gets muted on healthy runs.
+  if (Number.isFinite(observedTotal) && observedTotal > 0 && (byModel === null || Object.keys(byModel).length === 0)) {
+    flag('directional_uncaptured', `${observedTotal} observed tokens but tokens_directional.by_model is empty`);
+  }
+
   if (events === null) {
     flag('events_missing', 'no events.jsonl beside a succeeded record');
     return;

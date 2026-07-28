@@ -260,6 +260,117 @@ test('dashboard_stale is skipped when docs/ does not exist or dir is not a git r
   assert.ok(!r.findings.some((f) => f.check === 'dashboard_stale'));
 });
 
+// The real tokens_observed shape, per run-record.schema.json: a flat summary
+// object with exactly one number in it, NOT a model-id-keyed map. Written by
+// recordObservedTokens from a single Agent-tool usage tag, which is why there
+// is one total and one tier rather than a per-model breakdown — the per-model
+// split is precisely what tokens_directional adds, and precisely what goes
+// missing when this rule fires.
+const observed = (total) => ({
+  total,
+  tier: 'HIGH',
+  source: 'agent_tool_usage_tag',
+  observed_at: '2026-07-25T00:01:00Z',
+});
+
+// TARS-1271 shipped with an empty tokens_directional.by_model and nothing
+// noticed: the gap was found by reading a record by hand weeks later. This
+// rule is the automated version of that discovery. The live record it is
+// modelled on is real — log/webtarsthree/2026-07-28T084525Z__…__implement__…json
+// carries tokens_observed.total 532540 beside by_model {}.
+test('directional_uncaptured: succeeded run with observed tokens but empty by_model is flagged', () => {
+  const dir = scaffold();
+  const rec = makeRecord({
+    tokens_observed: observed(532540),
+    tokens_directional: { by_model: {}, complete: false },
+  });
+  writeRun(dir, rec);
+  const r = scanAnomalies({ dir, routing: ROUTING });
+  assert.deepEqual(checksFor(r, rec.run_id), ['directional_uncaptured']);
+});
+
+// The live record had complete:true over an empty by_model. A sibling task in
+// this plan stopped that flag being vacuous, but this rule must not depend on
+// that fix having landed — it reads by_model, never complete.
+test('directional_uncaptured: fires regardless of the complete flag when by_model is empty', () => {
+  const dir = scaffold();
+  const rec = makeRecord({
+    tokens_observed: observed(532540),
+    tokens_directional: { by_model: {}, complete: true },
+  });
+  writeRun(dir, rec);
+  const r = scanAnomalies({ dir, routing: ROUTING });
+  assert.deepEqual(checksFor(r, rec.run_id), ['directional_uncaptured']);
+});
+
+test('directional_uncaptured: a populated by_model does not flag, even when complete is false', () => {
+  const dir = scaffold();
+  const rec = makeRecord({
+    tokens_observed: observed(532540),
+    // complete:false is honest partial attribution — an unknown model showed
+    // up — not the total-silence case this rule watches for.
+    tokens_directional: { by_model: { 'claude-opus-5': { input: 120000, output: 8000 } }, complete: false },
+  });
+  writeRun(dir, rec);
+  const r = scanAnomalies({ dir, routing: ROUTING });
+  assert.deepEqual(checksFor(r, rec.run_id), []);
+});
+
+test('directional_uncaptured: a run that observed zero tokens does not flag', () => {
+  const dir = scaffold();
+  const rec = makeRecord({
+    // Nothing was observed, so there was never anything to attribute: an empty
+    // by_model is the correct answer here, not a regression.
+    tokens_observed: observed(0),
+    tokens_directional: { by_model: {}, complete: true },
+  });
+  writeRun(dir, rec);
+  const r = scanAnomalies({ dir, routing: ROUTING });
+  assert.deepEqual(checksFor(r, rec.run_id), []);
+});
+
+test('directional_uncaptured: non-succeeded runs with empty by_model are not flagged', () => {
+  const dir = scaffold();
+  const rec = makeRecord({
+    status: 'cancelled',
+    reason: { code: 'user_cancel', detail: 'x', phase: null, agent: null },
+    tokens_observed: observed(532540),
+    tokens_directional: { by_model: {}, complete: false },
+  });
+  writeRun(dir, rec, null);
+  const r = scanAnomalies({ dir, routing: ROUTING });
+  const checks = checksFor(r, rec.run_id);
+  assert.ok(checks.includes('run_not_succeeded'));
+  assert.ok(!checks.includes('directional_uncaptured'));
+});
+
+// scanAnomalies reads the 50 newest records WITHOUT schema-validating them, so
+// records from eras predating tokens_directional land in this predicate. A
+// throw here would abort the whole scan, not just skip one record.
+test('directional_uncaptured: records missing or nulling the token fields do not throw', () => {
+  const dir = scaffold();
+  const absent = makeRecord({}); // makeRecord carries neither token field
+  const nulled = makeRecord({ tokens_observed: null, tokens_directional: null });
+  for (const rec of [absent, nulled]) writeRun(dir, rec);
+  const r = scanAnomalies({ dir, routing: ROUTING });
+  assert.deepEqual(checksFor(r, absent.run_id), []);
+  assert.deepEqual(checksFor(r, nulled.run_id), []);
+});
+
+// Belt-and-braces on the same unvalidated-read path: `total` itself may be
+// missing or non-numeric on a partially-written record. `> 0` on undefined or a
+// string must be false, not a throw and not a coerced truth.
+test('directional_uncaptured: a tokens_observed with no usable total does not flag or throw', () => {
+  const dir = scaffold();
+  const noTotal = makeRecord({
+    tokens_observed: { tier: 'HIGH', source: 'agent_tool_usage_tag', observed_at: '2026-07-25T00:01:00Z' },
+    tokens_directional: { by_model: {}, complete: false },
+  });
+  writeRun(dir, noTotal);
+  const r = scanAnomalies({ dir, routing: ROUTING });
+  assert.deepEqual(checksFor(r, noTotal.run_id), []);
+});
+
 // harness-loop/SKILL.md step 7 documents a two-command sequence for turning a
 // telemetry scan into loop.jsonl's `anomalies` count: (1) capture
 // `CLI anomalies` stdout to a file with `>`, then (2) JSON.parse that file and
