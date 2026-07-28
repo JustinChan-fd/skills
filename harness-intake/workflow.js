@@ -547,7 +547,11 @@ const _REQUIRED_V2_KEYS = [
 const _OUTCOME_FOR_STATUS = {
   COMPLETE: 'success',
   COMPLETE_FRAMING_CORRECTED: 'success',
-  COMPLETE_WITH_STUBS: 'success',
+  // 'partial', not 'success': the status means the split landed but some ACs produced
+  // stubs a human still has to review. lib/status.js writes 'partial' for it, and a
+  // validator that expects 'success' logs a spurious inconsistency on exactly the
+  // degraded runs the grade exists to report. See outcome-agreement.test.js.
+  COMPLETE_WITH_STUBS: 'partial',
   PROPOSED_WITH_GAPS: 'partial',
   PARTIAL: 'partial',
   FAILED: 'failed',

@@ -128,7 +128,10 @@ test('each status maps to exactly one acceptable outcome', () => {
   const OK = [
     ['COMPLETE', 'success'],
     ['COMPLETE_FRAMING_CORRECTED', 'success'],
-    ['COMPLETE_WITH_STUBS', 'success'],
+    // 'partial': stubs mean the split landed but ACs still need human review, and
+    // lib/status.js is the map that writes the record. This asserted 'success' while the
+    // writer wrote 'partial' — both files had green tests and contradicted each other.
+    ['COMPLETE_WITH_STUBS', 'partial'],
     ['PROPOSED_WITH_GAPS', 'partial'],
     ['PARTIAL', 'partial'],
     ['FAILED', 'failed'],

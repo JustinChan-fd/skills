@@ -257,6 +257,19 @@ function _verdictFor(finalScore, retriesUsed) {
   return { verdict: 'EXIT', action: 'stop' }
 }
 
+// -- lib/verdict-axes.js --------------------------------------------------------
+// verdict / status / outcome are three axes. A gate that returns a negative verdict has still
+// completed, and 'PROCEED' is not a value the dashboard's RESULT column can read.
+const _KNOWN_VERDICTS = ['PROCEED', 'RE_ASK', 'EXIT']
+function _statusForVerdict(verdict) {
+  return _KNOWN_VERDICTS.includes(verdict) ? 'COMPLETE' : 'FAILED'
+}
+function _outcomeForVerdict(verdict) {
+  if (verdict === 'PROCEED') return 'success'
+  if (verdict === 'RE_ASK' || verdict === 'EXIT') return 'partial'
+  return 'failed'
+}
+
 // -- lib/gated.js ---------------------------------------------------------------
 function _gatedPathFor(origPath) {
   if (/-gated\.json$/.test(origPath)) return origPath
@@ -416,8 +429,13 @@ const record = {
   skill: 'harness-bridge',
   skillsCommit: a.skillsCommit || 'unknown',
   ts: a.runTs,
-  status: verdict === 'PROCEED' ? 'COMPLETE' : verdict,
-  outcome: verdict,
+  // Three separate axes — see lib/verdict-axes.js. The verdict is the gate's DECISION and stays
+  // on its own field below; `status` is whether the gate ran, and a gate that says no has still
+  // run; `outcome` is the dashboard's success/partial/failed roll-up, which a verdict string is
+  // not a member of. Writing the verdict into these two produced records on disk reading
+  // `status: 'RE_ASK'` and `outcome: 'PROCEED'`.
+  status: _statusForVerdict(verdict),
+  outcome: _outcomeForVerdict(verdict),
   sourceIssue: a.issueKey || null,
   repo,
   worktree,
