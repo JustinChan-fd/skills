@@ -371,6 +371,80 @@ test('directional_uncaptured: a tokens_observed with no usable total does not fl
   assert.deepEqual(checksFor(r, noTotal.run_id), []);
 });
 
+// Finding 1: byModel === null is load-bearing — tokens_directional absent or
+// null with a positive observed total must flag AND must not throw. Without the
+// null guard, `Object.keys(null)` throws, aborting the whole scan. The prior
+// test 6 does not reach this: it nulls both fields so Number.isFinite(undefined)
+// short-circuits before byModel is evaluated. These two variants use a real
+// positive total so the predicate actually reaches the byModel branch.
+test('directional_uncaptured: tokens_directional absent (key not present) with positive total flags', () => {
+  const dir = scaffold();
+  // tokens_directional key deliberately omitted — real shape on pre-directional
+  // records and on any run whose collectAndStamp failed outright.
+  const rec = makeRecord({ tokens_observed: observed(532540) });
+  writeRun(dir, rec);
+  const r = scanAnomalies({ dir, routing: ROUTING });
+  assert.deepEqual(checksFor(r, rec.run_id), ['directional_uncaptured']);
+});
+
+test('directional_uncaptured: tokens_directional explicitly null with positive total flags', () => {
+  const dir = scaffold();
+  const rec = makeRecord({ tokens_observed: observed(532540), tokens_directional: null });
+  writeRun(dir, rec);
+  const r = scanAnomalies({ dir, routing: ROUTING });
+  assert.deepEqual(checksFor(r, rec.run_id), ['directional_uncaptured']);
+});
+
+// Finding 2: placement — block sits above the `if (events === null)` return so
+// a succeeded run that also lost its events file reports BOTH facts. If the
+// block were moved below that return the events_missing early-return would
+// suppress directional_uncaptured entirely.
+test('directional_uncaptured: succeeded run with positive total, empty by_model, AND no events file reports both events_missing and directional_uncaptured', () => {
+  const dir = scaffold();
+  const rec = makeRecord({
+    tokens_observed: observed(532540),
+    tokens_directional: { by_model: {}, complete: false },
+  });
+  writeRun(dir, rec, null); // null → no .events.jsonl written
+  const r = scanAnomalies({ dir, routing: ROUTING });
+  const checks = checksFor(r, rec.run_id);
+  assert.ok(checks.includes('events_missing'), `expected events_missing in ${JSON.stringify(checks)}`);
+  assert.ok(checks.includes('directional_uncaptured'), `expected directional_uncaptured in ${JSON.stringify(checks)}`);
+});
+
+// Finding 3: Number.isFinite is load-bearing for exactly one input — a numeric
+// string. `'532540' > 0` is true by JS coercion; without the isFinite guard a
+// stringified total over an empty by_model would produce a spurious flag.
+test('directional_uncaptured: a stringified numeric total does not flag (Number.isFinite rejects it)', () => {
+  const dir = scaffold();
+  const rec = makeRecord({
+    tokens_observed: { total: '532540', tier: 'HIGH', source: 'agent_tool_usage_tag', observed_at: '2026-07-25T00:01:00Z' },
+    tokens_directional: { by_model: {}, complete: false },
+  });
+  writeRun(dir, rec);
+  const r = scanAnomalies({ dir, routing: ROUTING });
+  assert.deepEqual(checksFor(r, rec.run_id), []);
+});
+
+// Finding 4: the detail string is never asserted. Since it embeds observedTotal,
+// mutating the template to arbitrary text would pass the suite. Assert the
+// primary positive case's finding object contains the observed total value.
+test('directional_uncaptured: finding detail contains the observed token count', () => {
+  const dir = scaffold();
+  const rec = makeRecord({
+    tokens_observed: observed(532540),
+    tokens_directional: { by_model: {}, complete: false },
+  });
+  writeRun(dir, rec);
+  const r = scanAnomalies({ dir, routing: ROUTING });
+  const finding = r.findings.find((f) => f.run_id === rec.run_id && f.check === 'directional_uncaptured');
+  assert.ok(finding, 'finding must exist');
+  assert.ok(
+    /532540/.test(finding.detail),
+    `detail should contain the observed total (532540) but was: ${finding.detail}`,
+  );
+});
+
 // harness-loop/SKILL.md step 7 documents a two-command sequence for turning a
 // telemetry scan into loop.jsonl's `anomalies` count: (1) capture
 // `CLI anomalies` stdout to a file with `>`, then (2) JSON.parse that file and
