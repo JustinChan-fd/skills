@@ -93,6 +93,22 @@ function addUsage(bucket, usage) {
   }
 }
 
+// The total context of ONE api call: everything the model had to read plus what
+// it wrote. This is the number the Agent tool surfaces as `subagent_tokens`,
+// which drivers copy into a record's `tokens_observed.total` — so the max of
+// this across a transcript is an identity fingerprint for "this file is that
+// run's". Missing cache keys coerce to 0: older transcript lines carry only
+// input/output, and a NaN here makes every later fingerprint comparison false.
+function contextTotal(usage) {
+  if (!usage || typeof usage !== 'object') return 0;
+  let total = 0;
+  for (const field of Object.values(DIRECTIONS)) {
+    const v = usage[field];
+    if (typeof v === 'number' && Number.isFinite(v)) total += v;
+  }
+  return total;
+}
+
 // A transcript line may carry usage in message.usage (top-level) and in each
 // entry of an iterations[] array (fallback/multi-attempt sub-entries, each with
 // its own .usage or .message.usage). All of them count toward the line's model.
@@ -122,7 +138,8 @@ function inWindow(ts, startMs, endMs) {
  * @param {{start?:string|null,end?:string|null,gapCapMs?:number}} [opts]
  * @returns {{ok:boolean, by_model:object, timestamps:{min:string|null,max:string|null},
  *            active_ms:number, gap_cap_ms:number, lines_total:number,
- *            lines_parsed:number, lines_skipped:number, error:null|{code:string,detail:string}}}
+ *            lines_parsed:number, lines_skipped:number, peak_context:number,
+ *            error:null|{code:string,detail:string}}}
  */
 export function collectFromText(text, opts = {}) {
   const gapCapMs = Number.isFinite(opts.gapCapMs) ? opts.gapCapMs : DEFAULT_GAP_CAP_MS;
@@ -138,6 +155,7 @@ export function collectFromText(text, opts = {}) {
     lines_total: 0,
     lines_parsed: 0,
     lines_skipped: 0,
+    peak_context: 0,
     error: null,
   };
 
@@ -165,6 +183,19 @@ export function collectFromText(text, opts = {}) {
     const tsMs = tsStr ? Date.parse(tsStr) : NaN;
     const ts = Number.isFinite(tsMs) ? tsMs : null;
 
+    const usages = usagesFromLine(line);
+
+    // Peak is measured UNWINDOWED, deliberately. The window is derived from the
+    // run's own started_at/ended_at, and a wrong window is exactly the failure
+    // the fingerprint exists to rescue — TARS-1271's directional capture came
+    // back empty because a windowed match dropped the only call that identified
+    // the transcript. Sums stay windowed below: they answer "what did THIS run
+    // spend", where counting a neighbour's calls is the error to avoid.
+    for (const u of usages) {
+      const total = contextTotal(u);
+      if (total > base.peak_context) base.peak_context = total;
+    }
+
     if (!inWindow(ts, startMs, endMs)) continue;
 
     if (ts !== null) {
@@ -174,7 +205,6 @@ export function collectFromText(text, opts = {}) {
     }
 
     const model = typeof line?.message?.model === 'string' ? line.message.model : null;
-    const usages = usagesFromLine(line);
     if (model && usages.length) {
       byModel[model] ??= emptyBucket();
       for (const u of usages) addUsage(byModel[model], u);
@@ -356,6 +386,7 @@ export function collectFromFile(path, opts = {}) {
       lines_total: 0,
       lines_parsed: 0,
       lines_skipped: 0,
+      peak_context: 0,
       error: { code: 'not_found', detail: err.message },
     };
   }

@@ -208,3 +208,109 @@ test('both discovery paths degrade to a structured not-found on a missing direct
   const empty = mkdtempSync(join(tmpdir(), 'harness-empty-'));
   assert.equal(discoverLoopTranscript(empty).ok, false);
 });
+
+// ---- peak_context: the single-call context fingerprint ----
+//
+// tokens_observed.total on a record is the Agent tool's subagent_tokens tag,
+// which is the PEAK single-call context of that subagent — not a sum. Matching
+// a transcript to a run by that number is an identity check; matching by
+// spawnDepth + description + a 60s window overlap is three guesses ANDed
+// together, and it landed TARS-1271 with an empty by_model.
+
+const usageLine = (ts, model, u) =>
+  JSON.stringify({ timestamp: ts, message: { model, usage: u } });
+
+test('peak_context is the largest single call context, not the sum and not the last call', () => {
+  // The biggest call is deliberately in the MIDDLE: a bug that returns the last
+  // call's total, or a running sum, both pass a fixture where max is last.
+  const text = [
+    usageLine('2026-07-27T00:00:10.000Z', 'claude-opus-5', {
+      input_tokens: 100, output_tokens: 10, cache_read_input_tokens: 0, cache_creation_input_tokens: 0,
+    }),
+    usageLine('2026-07-27T00:00:20.000Z', 'claude-opus-5', {
+      input_tokens: 5_000, output_tokens: 800, cache_read_input_tokens: 60_000, cache_creation_input_tokens: 2_000,
+    }),
+    usageLine('2026-07-27T00:00:30.000Z', 'claude-opus-5', {
+      input_tokens: 200, output_tokens: 20, cache_read_input_tokens: 1_000, cache_creation_input_tokens: 0,
+    }),
+  ].join('\n');
+  const r = collectFromText(text);
+  assert.equal(r.ok, true);
+  assert.equal(r.peak_context, 67_800, 'peak is 5000 + 800 + 60000 + 2000');
+  const summed = r.by_model['claude-opus-5'];
+  const sumTotal = summed.input + summed.output + summed.cache_read + summed.cache_creation;
+  assert.ok(r.peak_context < sumTotal, 'peak must not be the sum across calls');
+});
+
+test('peak_context ignores the start/end window that sums honour', () => {
+  // The whole point: a wrong run window is what breaks time-based attribution,
+  // so the fingerprint must survive one. The peak call here is OUTSIDE the
+  // window, and must still be reported.
+  const text = [
+    usageLine('2026-07-27T00:00:10.000Z', 'claude-opus-5', {
+      input_tokens: 90_000, output_tokens: 500, cache_read_input_tokens: 0, cache_creation_input_tokens: 0,
+    }),
+    usageLine('2026-07-27T00:05:00.000Z', 'claude-opus-5', {
+      input_tokens: 100, output_tokens: 10, cache_read_input_tokens: 0, cache_creation_input_tokens: 0,
+    }),
+  ].join('\n');
+  const r = collectFromText(text, {
+    start: '2026-07-27T00:04:00.000Z',
+    end: '2026-07-27T00:06:00.000Z',
+  });
+  assert.equal(r.ok, true);
+  assert.equal(r.peak_context, 90_500, 'the out-of-window peak call was dropped');
+  assert.equal(r.by_model['claude-opus-5'].input, 100, 'sums must stay windowed');
+});
+
+test('peak_context counts iterations[] sub-entries as their own calls', () => {
+  // usagesFromLine flattens iterations[]; each is a real API call with its own
+  // context, so the peak may live in a sub-entry rather than message.usage.
+  const text = JSON.stringify({
+    timestamp: '2026-07-27T00:00:10.000Z',
+    message: { model: 'claude-opus-5', usage: { input_tokens: 10, output_tokens: 5 } },
+    iterations: [
+      { usage: { input_tokens: 40_000, output_tokens: 300, cache_read_input_tokens: 1_000 } },
+      { message: { usage: { input_tokens: 20, output_tokens: 2 } } },
+    ],
+  });
+  const r = collectFromText(text);
+  assert.equal(r.peak_context, 41_300);
+});
+
+test('missing cache keys coerce to 0 rather than NaN', () => {
+  // Older transcript lines carry only input_tokens/output_tokens. A NaN peak
+  // makes every fingerprint comparison false, which is the silent-empty failure
+  // this whole phase is fixing.
+  const text = usageLine('2026-07-27T00:00:10.000Z', 'claude-opus-5', {
+    input_tokens: 700, output_tokens: 40,
+  });
+  const r = collectFromText(text);
+  assert.equal(r.peak_context, 740);
+  assert.ok(Number.isFinite(r.peak_context), 'peak_context is not finite');
+});
+
+test('a transcript with no usage entries reports peak_context 0, not -Infinity', () => {
+  const text = JSON.stringify({ timestamp: '2026-07-27T00:00:10.000Z', type: 'user', message: { content: 'hi' } });
+  const r = collectFromText(text);
+  assert.equal(r.ok, true);
+  assert.equal(r.peak_context, 0);
+});
+
+test('an empty or unparseable transcript still carries a numeric peak_context', () => {
+  // Both early-return paths build from `base`; a field added only to the success
+  // path would leave `undefined` here, and Task 3 compares it numerically.
+  assert.equal(collectFromText('').peak_context, 0);
+  assert.equal(collectFromText('not json at all').peak_context, 0);
+});
+
+test('collectFromFile surfaces peak_context, including on the not_found path', () => {
+  // Discovery calls collectFromFile, never collectFromText directly.
+  const dir = mkdtempSync(join(tmpdir(), 'peak-'));
+  const p = join(dir, 't.jsonl');
+  writeFileSync(p, usageLine('2026-07-27T00:00:10.000Z', 'claude-opus-5', {
+    input_tokens: 1_000, output_tokens: 100, cache_read_input_tokens: 50, cache_creation_input_tokens: 25,
+  }));
+  assert.equal(collectFromFile(p).peak_context, 1_175);
+  assert.equal(collectFromFile(join(dir, 'nope.jsonl')).peak_context, 0);
+});
