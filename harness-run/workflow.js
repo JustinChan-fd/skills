@@ -354,6 +354,11 @@ const childTelemetryArgs = {
   today,
   skillsCommit,
   parentRunId,
+  // Fallback only — each call site overrides this with its own stage-start stamp (_t0), so
+  // a child measures ITS duration and not the whole run's. Without an override a late stage
+  // would report cumulative time, which is plausible and wrong: the same class of error as
+  // measuring "run start → a human noticed the log was missing".
+  startTs:  a.startTs || null,
 }
 
 // ── Stage telemetry, conductor-side ──────────────────────────────────────────
@@ -376,37 +381,50 @@ Return ONLY the integer it prints. No prose, no units, no punctuation.`,
   return Number.isFinite(n) ? n : null
 }
 
-// Appends the child's audit record to its telemetry JSONL, then patches the
-// measured durationMs/output tokens onto that line. Mirrors the child SKILL.md
-// wrappers' post-Workflow block. Never throws — telemetry must not fail a run.
+// PATCH-ONLY as of 2026-07-27. The child workflow appends its own audit record from its
+// own Debrief phase now (see each child's _writeAuditRecord), so appending here too would
+// put the same run on the dashboard twice — `v2/*.jsonl` is read line-by-line, so a
+// duplicate line is a duplicate run in every count, cost total, and average.
+//
+// What survives is the patch, because the conductor is the only party that can measure it:
+// wall-clock either side of the `workflow()` call (tighter than the child's own startTs
+// span) and the `budget.spent()` delta for that stage. Never throws — telemetry must not
+// fail a run.
 async function finalizeStageTelemetry(skill, { telemetryPath, auditRecords, durationMs, outputTokens }) {
   if (!telemetryPath) {
-    log(`Telemetry: ${skill} returned no telemetryPath — nothing to write`)
+    log(`Telemetry: ${skill} returned no telemetryPath — nothing to patch`)
     return
   }
   const records = (Array.isArray(auditRecords) ? auditRecords : [auditRecords]).filter(Boolean)
   if (!records.length) {
-    log(`Telemetry: ${skill} returned no audit record — nothing to write`)
+    // The child returned no record, which now means its own write never happened either.
+    // Say so loudly: this is the Phase 1a regression, not a missing conductor step.
+    log(`Telemetry: ${skill} returned no audit record — its in-workflow write likely did not run`)
     return
   }
   const patch = {
     ...(durationMs != null ? { durationMs } : {}),
     ...(outputTokens != null ? { 'tokens.total.output': outputTokens } : {}),
   }
+  if (!Object.keys(patch).length) {
+    log(`Telemetry: ${skill} — nothing measured to patch, leaving the child's record as written`)
+    return
+  }
   await agent(
-    `Write telemetry for the ${skill} stage of a harness run. Two steps, in order. Do not skip either.
+    `Patch measured fields onto the ${skill} stage's telemetry record. ONE step.
 
-STEP 1 — append each record below as one JSONL line to:
-  ${telemetryPath}
-Create parent directories if needed. Append, never overwrite.
+The record has ALREADY been written by the ${skill} workflow itself — do NOT append, do NOT
+create the file, do NOT re-write the record. Appending duplicates the run on the dashboard.
 
-Records (${records.length}):
-${records.map(r => JSON.stringify(r)).join('\n')}
+File: ${telemetryPath}
 
-STEP 2 — patch these fields onto the LAST line of that file (dotted keys are nested paths):
+Patch these fields onto the LAST line of that file (dotted keys are nested paths):
 ${JSON.stringify(patch, null, 2)}
 
-Use this exact command shape for step 2, passing the JSON via argv (never via shell interpolation):
+If the file does not exist or is empty, report TELEMETRY_ERROR and stop — a missing file
+means the workflow's own write failed, and that is a finding to surface, not to paper over.
+
+Use this exact command shape, passing the JSON via argv (never via shell interpolation):
 
 python3 -c "
 import json, sys
@@ -483,6 +501,7 @@ detail here degrades every downstream stage.`,
     { scriptPath: '/Users/206618626@bwt3.com/.claude/skills/harness-intake/workflow.js' },
     {
       ...childTelemetryArgs,
+      startTs:  _t0 != null ? String(_t0) : (a.startTs || null),
       input:    ticketInput,
       issueKey,
       repoPath: worktreePath,
@@ -592,6 +611,7 @@ reformat, or drop any field.`,
     { scriptPath: '/Users/206618626@bwt3.com/.claude/skills/harness-plan/workflow.js' },
     {
       ...childTelemetryArgs,
+      startTs:      _t0 != null ? String(_t0) : (a.startTs || null),
       input:        _planInput,
       repoPath:     worktreePath,
       gatedIntake:  intakeManifest,   // manifest supremacy — authoritative size + file scope
@@ -691,6 +711,7 @@ Return JSON: the parsed manifest object (plans array, size, execution, etc.)`,
       { scriptPath: '/Users/206618626@bwt3.com/.claude/skills/harness-implement/workflow.js' },
       {
         ...childTelemetryArgs,
+        startTs:  _t0 != null ? String(_t0) : (a.startTs || null),
         planPath:     planRelPath,
         repoPath:     worktreePath,
         baseBranch,                  // pre-answered — implement must not prompt

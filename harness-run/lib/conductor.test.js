@@ -142,3 +142,48 @@ test('weightEvolutionReport shows initial → final and each change', () => {
   assert.match(out, /20 → 30/)
   assert.match(out, /empty subtask files/)
 })
+
+// ── Stage telemetry is patch-only as of 2026-07-27 (Phase 1a) ────────────────
+//
+// Children now write their own audit record from inside their own Debrief phase, so the
+// conductor must NOT append it again — the dashboard reads `v2/*.jsonl` line by line, so a
+// second append is a second run in every aggregate. What the conductor still uniquely knows
+// is the measured wall-clock around the `workflow()` call and the output-token delta, so it
+// keeps the patch and drops the append.
+//
+// This guard is a source-text check on harness-run/workflow.js, the same shape as each
+// child's debrief-write.test.js. It cannot prove the agent ran; it proves the instruction
+// still says patch and no longer says append.
+
+import { readFileSync as _readFileSync } from 'node:fs'
+const RUN_SRC = _readFileSync(new URL('../workflow.js', import.meta.url), 'utf8')
+
+function finalizeBody(src) {
+  const i = src.indexOf('async function finalizeStageTelemetry')
+  assert.ok(i > -1, 'finalizeStageTelemetry is gone — has stage telemetry moved?')
+  return src.slice(i, src.indexOf('\n}\n', i))
+}
+
+test('finalizeStageTelemetry no longer instructs an append', () => {
+  const body = finalizeBody(RUN_SRC)
+  assert.ok(
+    !/append each record/i.test(body),
+    'the conductor still tells the agent to append — the child already did, so this doubles the row'
+  )
+  assert.ok(!/Append, never overwrite/i.test(body), 'append instruction still present')
+})
+
+test('finalizeStageTelemetry still patches the measured fields it alone knows', () => {
+  const body = finalizeBody(RUN_SRC)
+  assert.match(body, /durationMs/, 'wall-clock around the workflow() call is conductor-only')
+  assert.match(body, /tokens\.total\.output/, 'the budget.spent() delta is conductor-only')
+  assert.match(body, /lines\[-1\]/, 'must patch the record the child just appended')
+})
+
+test('the conductor passes startTs down so a child can measure its own duration', () => {
+  // Without it the child's write agent skips its duration step and the field arrives null,
+  // which is then only rescued by the conductor patch — one failure away from a dash.
+  const i = RUN_SRC.indexOf('const childTelemetryArgs')
+  const block = RUN_SRC.slice(i, RUN_SRC.indexOf('}', i))
+  assert.match(block, /startTs/, 'childTelemetryArgs must carry startTs')
+})

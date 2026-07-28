@@ -14,6 +14,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import { buildTelemetryPath, deriveTelemetryDir, repoNameFromPath, slugFromInput } from './telemetry.js'
+import { buildWriteAgentPrompt, buildDurationPatchCmd } from './telemetry-write.js'
 
 const WORKFLOW_SRC = readFileSync(new URL('../workflow.js', import.meta.url), 'utf8')
 
@@ -96,5 +97,36 @@ test('every telemetry path the workflow can build lands in v2/, never logs/', ()
     const p = inline(c)
     assert.ok(p.includes('/harness-telemetry/v2/'), `not a dashboard-visible path: ${p}`)
     assert.ok(!p.includes('/logs/'), `legacy dir: ${p}`)
+  }
+})
+
+// ── The write helpers (Phase 1a) ──────────────────────────────────────────────
+//
+// These two are more drift-prone than the path builders: they are long template literals
+// whose text IS the contract with the write agent. A silent divergence means the tested
+// prompt and the shipped prompt are different documents.
+
+test('inline _buildDurationPatchCmd is byte-identical to lib buildDurationPatchCmd', () => {
+  const inline = loadInline('_buildDurationPatchCmd')
+  for (const [p, ts] of [['/t/v2/a.jsonl', '1769500000000'], ['/t/v2/a.jsonl', null], ['/t/v2/a.jsonl', '']]) {
+    assert.equal(inline(p, ts), buildDurationPatchCmd(p, ts), `mirror drift for (${p}, ${ts})`)
+  }
+})
+
+test('inline _buildWriteAgentPrompt is byte-identical to lib buildWriteAgentPrompt', () => {
+  const inline = loadInline('_buildWriteAgentPrompt', ['_buildDurationPatchCmd'])
+  const rec = { schemaVersion: '2.0', skill: 'x', status: 'COMPLETE' }
+  const cases = [
+    { telemetryPath: '/t/v2/a.jsonl', records: [rec], startTs: '1769500000000' },
+    { telemetryPath: '/t/v2/a.jsonl', records: [rec], startTs: null },
+    { telemetryPath: '/t/v2/a.jsonl', records: [rec, { ...rec, status: 'FAILED' }], startTs: '1' },
+    // A single record passed unwrapped, and a list with holes — both normalize the same way.
+    { telemetryPath: '/t/v2/a.jsonl', records: rec, startTs: '1' },
+    { telemetryPath: '/t/v2/a.jsonl', records: [rec, null, undefined], startTs: '1' },
+    // Hostile payload: must be inert on both sides, identically.
+    { telemetryPath: '/t/v2/a.jsonl', records: [{ ...rec, e: `$(id) \`whoami\` 'q'` }], startTs: '1' },
+  ]
+  for (const c of cases) {
+    assert.equal(inline(c), buildWriteAgentPrompt(c), `mirror drift for ${JSON.stringify(c).slice(0, 80)}`)
   }
 })

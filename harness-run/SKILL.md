@@ -29,7 +29,9 @@ const intakeResult = await workflow(
 
 **Never** spawn an `agent()` whose prompt tells it to call `Workflow` or `/harness-intake`. Subagents cannot nest `Workflow`, so that shape silently never runs the child's `workflow.js` — the subagent instead improvises a hand-written manifest and every per-stage telemetry field comes back null. That was the single root cause of the null DURATION/TOKENS/COST columns in the dashboard for the harness-run era.
 
-Because the conductor bypasses each child's SKILL.md wrapper, it takes over the wrapper's two post-workflow jobs itself: stamping wall-clock `durationMs` (via a haiku agent, since `Date.now()` is unavailable in workflow scripts) and appending the returned audit record to the child's telemetry JSONL. See `finalizeStageTelemetry` in `workflow.js`.
+Each child workflow **writes its own audit record** from its own Debrief phase (2026-07-27). The conductor no longer appends it — doing both would put the same run on the dashboard twice, since `v2/*.jsonl` is read line-by-line. What the conductor still does is **patch** the two fields only it can measure: wall-clock `durationMs` either side of the `workflow()` call, and that stage's `budget.spent()` delta. See `finalizeStageTelemetry` in `workflow.js`.
+
+If a child returns no audit record, that is now a finding rather than a missing conductor step — it means the child's in-workflow write did not run. The conductor logs it plainly instead of silently filling the gap.
 
 ## The Sequence
 
@@ -181,9 +183,10 @@ Because the conductor calls child `workflow.js` files directly, it does what eac
 | `repo` | conductor → child `repoName` | canonical repo name, not the worktree dir |
 | `ts` | conductor → child `today` | calendar date (`2026-07-27`) |
 | `runId` / `parentRunId` | conductor | shared across all stages, so records link |
-| `durationMs` | conductor | epoch-ms stamps either side of the `workflow()` call |
+| `durationMs` | child, then conductor | the child's write agent measures it from the stage `startTs` the conductor passes down; the conductor then patches its own tighter stamp over the top |
 | `tokens.total.output` | conductor | `budget.spent()` delta around the call |
 | `status` / `outcome` | child workflow | lifecycle value, and the derived `success`/`partial`/`failed` |
+| the record itself | child workflow | appended by the child's Debrief `write-telemetry` agent — never by the conductor |
 
 `status` and `outcome` are separate axes and must not be conflated — `assembleRunSummary` reads `outcome` only and never falls back to `status`.
 

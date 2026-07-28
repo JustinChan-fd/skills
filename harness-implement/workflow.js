@@ -101,7 +101,84 @@ function _computeCostV2({ agentCountByModel, inputTokens, outputTokensTotal }) {
   if (inputTokens == null) nullReasons['tokens.total.input'] = 'subagentTokens not yet patched'
   return { rateLockedUsd: parseFloat((inCost + outCost).toFixed(4)), priceTableVersion: _PRICE_TABLE_VERSION, nullReasons }
 }
+// mirrors lib/telemetry-write.js — the python3 stamp that measures durationMs from the
+// run's own start. The agent takes its own end stamp rather than trusting a caller: every
+// wrapper passed startTs and nothing ever used it, so args.durationMs was always null and
+// the value got patched in later, measuring "run start → a human noticed the log was
+// missing" instead of the run. Values go through argv, never shell interpolation.
+function _buildDurationPatchCmd(telemetryPath, startTs) {
+  if (!startTs) return null
+  return `python3 -c "
+import json, sys, time
+path, start = sys.argv[1], int(sys.argv[2])
+duration = int(time.time() * 1000) - start
+lines = open(path).readlines()
+if lines:
+    last = json.loads(lines[-1])
+    last['durationMs'] = duration
+    lines[-1] = json.dumps(last) + '\\n'
+    open(path, 'w').writelines(lines)
+    print('DURATION_MS', duration)
+" '${telemetryPath}' '${startTs}'`
+}
+
+// mirrors lib/telemetry-write.js
+function _buildWriteAgentPrompt({ telemetryPath, records, startTs }) {
+  const lines = (Array.isArray(records) ? records : [records]).filter(Boolean).map(r => JSON.stringify(r))
+  const patchCmd = _buildDurationPatchCmd(telemetryPath, startTs)
+
+  return `Write this skill's audit record to telemetry. ${patchCmd ? 'Two steps, in order. Do not skip either.' : 'One step.'}
+
+STEP 1 — append each record below as one JSONL line to:
+  ${telemetryPath}
+
+Create parent directories if needed. Append, never overwrite — this file may already hold
+records from earlier runs of the same ticket, and losing them is unrecoverable.
+
+Records (${lines.length}), already serialized — write each verbatim, one per line, exactly as
+given. Do not reformat, pretty-print, re-key, or "fix" them; a multi-line record corrupts the
+JSONL and the dashboard silently drops the file:
+
+${lines.join('\n')}
+
+Command shape for step 1 (the payload is single-quote escaped; keep it that way):
+
+mkdir -p "$(dirname '${telemetryPath}')" && echo '<record-json>' >> '${telemetryPath}'
+${patchCmd ? `
+STEP 2 — stamp the measured durationMs onto the LAST line of that file. Run this exactly as
+written; it takes its own end stamp and subtracts the run's start (${startTs}). Do not
+compute the duration yourself and do not substitute a value:
+
+${patchCmd}
+` : ''}
+Report "TELEMETRY_OK" or "TELEMETRY_ERROR: <reason>". If step 1 fails, say so explicitly —
+a silent failure here is the bug this agent exists to fix.`
+}
 // ===== END PURE =====
+
+// The audit write, in code. Ported from harness-run/workflow.js:382 — the only place it has
+// ever worked. It used to be a prose instruction in SKILL.md for the main agent to run after
+// Workflow() returned, which is why harness-implement has never written a single record and
+// why MC-1077's only exists because a human asked for it after the fact.
+//
+// Workflow scripts have no filesystem API, so an agent is required. Never throws: a
+// telemetry failure must not fail a run that otherwise succeeded.
+async function _writeAuditRecord({ telemetryPath, records, startTs }) {
+  const list = (Array.isArray(records) ? records : [records]).filter(Boolean)
+  if (!telemetryPath || !list.length) {
+    log(`Telemetry: nothing to write (path=${telemetryPath ? 'ok' : 'missing'}, records=${list.length})`)
+    return
+  }
+  try {
+    await agent(
+      _buildWriteAgentPrompt({ telemetryPath, records: list, startTs }),
+      { label: 'write-telemetry', phase: 'Debrief', model: 'claude-haiku-4-5-20251001', effort: 'low' }
+    )
+    log(`Telemetry: wrote ${list.length} record(s) → ${telemetryPath}`)
+  } catch (err) {
+    log(`Telemetry: write FAILED — ${err?.message || err}. Record is lost; the run itself is unaffected.`)
+  }
+}
 
 // telemetryPath: built from args.runId + args.runTs passed by SKILL.md wrapper.
 let _telemetryPath = null
@@ -1166,6 +1243,11 @@ ${blocked.length > 0 ? blocked.map(r => `  ❌ ${r.task.id}: ${r.handoff?.caveat
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`
 
 log(cliSummary)
+
+// First record harness-implement has ever written from code. Every prior run left no
+// trace at all: the append was a SKILL.md instruction to the main agent, and this stage's
+// v2 record count across the whole telemetry history was zero.
+await _writeAuditRecord({ telemetryPath: _telemetryPath, records: [auditRecord], startTs: args.startTs })
 
 return {
   prTitle: planData.prTitle,

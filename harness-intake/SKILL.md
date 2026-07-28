@@ -6,7 +6,7 @@ description: Universal harness entry point. Classifies any ticket or prompt into
 # harness-intake
 
 > **IMPORTANT — invoke via `/harness-intake`, never directly.**
-> Running `workflow.js` directly bypasses the SKILL.md wrapper entirely: `startTs`, `skillsCommit`, `runTs`, `runId`, and the post-workflow telemetry patch (subagentTokens, inputTokens, durationMs, recomputedCost) are all set by the wrapper, not the workflow. A bare Workflow call produces an incomplete audit record and a mismatched or missing telemetry file. Always enter through the skill.
+> Running `workflow.js` directly bypasses the SKILL.md wrapper entirely: `startTs`, `skillsCommit`, `runTs`, `runId`, and the post-workflow telemetry patch (subagentTokens, inputTokens, recomputedCost) are all set by the wrapper, not the workflow. (`durationMs` is measured by the workflow itself as of 2026-07-27 — see step 4.) A bare Workflow call produces an incomplete audit record and a mismatched or missing telemetry file. Always enter through the skill.
 
 ## Philosophy
 
@@ -104,7 +104,13 @@ Build `input` as `${summary}\n\n${description}`. For freeform prompts, use the p
 
 ### 4. Run the workflow
 
-Run the workflow. All metadata (runId, skillsCommit, timestamps) is captured here — the workflow receives them as args and emits them verbatim. After completion, write the audit record to disk (the workflow returns it as a plain JS object — no shell escaping involved) then patch with subagentTokens/durationMs. `usage.subagent_tokens` is in the `<usage>` block of the Workflow completion notification.
+Run the workflow. All metadata (runId, skillsCommit, timestamps) is captured here — the workflow receives them as args and emits them verbatim.
+
+**The workflow writes its own audit record.** Its Debrief phase spawns a `write-telemetry` haiku agent that appends the record and stamps `durationMs` measured from `startTs`. You do not write it and must not re-write it — appending again duplicates the row on the dashboard.
+
+> **Why this moved into the workflow (2026-07-27).** This step used to be `writeAuditTelemetry(result.telemetryPath, result.auditRecord)` right here, i.e. a prose instruction for *you* to run after `Workflow()` returned. Nothing enforced it, so when the context was long or `cliSummary` read like a natural end of turn, it was silently dropped — `harness-implement` never wrote a single record in its entire history, and the one MC-1077 intake record exists only because a human noticed and asked for it. A missing record is indistinguishable from a stage that never ran, which made every telemetry-based conclusion unfalsifiable.
+
+What is left for you is **patch-only**: the three fields no workflow script can see, because they live in the `<usage>` block of the Workflow completion notification. `patchTelemetryRecord` is idempotent and `try`-swallowed, so if *this* step is skipped the record is still complete — it just lacks the input/cache split. That is the inversion: the unreliable step now costs three fields instead of the whole record.
 
 ```js
 // Capture everything before Workflow() — Date.now() is unavailable inside workflow scripts.
@@ -116,9 +122,11 @@ const [startTs, skillsCommit, runTs] = await Promise.all([
 // runId: unique per logical run — shared with harness-plan and harness-implement so all 3 records link together.
 const runId = `${issueKey || 'intake'}-${runTs}`
 
-// Write an audit record object (plain JS, from workflow result) as a JSONL line.
+// CRASH PATH ONLY. The happy path is written by the workflow's own Debrief agent; this
+// exists because a workflow that throws may never have reached Debrief, and a crashed run
+// still needs a dashboard row. Called from the catch block, nowhere else.
 // No shell escaping needed — JSON.stringify goes to Python via sys.argv, not shell interpolation.
-const writeAuditTelemetry = async (path, record) => {
+const writeCrashRecord = async (path, record) => {
   if (!path || !record) return
   try {
     const line = JSON.stringify(record).replace(/'/g, "'\\''")
@@ -132,7 +140,7 @@ with open(path, 'a') as f:
   } catch (_) {}
 }
 
-// Patch fields into the last JSONL line (used for subagentTokens/durationMs after Workflow returns).
+// Patch fields into the last JSONL line — the <usage> figures only the main agent can see.
 const patchTelemetryRecord = async (path, fields) => {
   try {
     const fieldJson = JSON.stringify(fields).replace(/'/g, "'\\''")
@@ -184,12 +192,11 @@ try {
     },
   })
 
-  // Write audit record — workflow returns it as a plain object, no shell escaping needed.
-  await writeAuditTelemetry(result?.telemetryPath, result?.auditRecord)
-
-  // Compute wall-clock duration and token breakdown after Workflow() returns.
-  const endTs = parseInt(await Bash('python3 -c "import time; print(int(time.time()*1000))"').then(r => r.trim()), 10)
-  const durationMs = endTs - parseInt(startTs, 10)
+  // The workflow wrote its own record in Debrief (write-telemetry agent) and stamped
+  // durationMs there. Do NOT append or re-stamp here: a second append duplicates the
+  // dashboard row, and a duration measured from *this* point measures how long the main
+  // agent took to get around to it — which is precisely the bug that made MC-1077's
+  // 239210ms a real measurement of the wrong interval.
 
   // subagent_tokens from the <usage> block in the completion notification above.
   // inputTokens = subagentTokens - outputTokensTotal (both measured by the workflow runtime).
@@ -212,7 +219,6 @@ try {
       }
     }
     await patchTelemetryRecord(result.telemetryPath, {
-      durationMs,
       'tokens.total.subagentTokens': subagentTokens,
       'tokens.total.input': inputTokens,
       ...(recomputedCost != null ? { 'cost.rateLockedUsd': recomputedCost } : {}),
@@ -224,7 +230,7 @@ try {
   // Workflow crashed — it attaches telemetryPath + auditRecord to the error object.
   // Write the crash record before re-throwing so the dashboard always has an entry.
   const subagentTokens = <usage.subagent_tokens from completion notification, or null if absent>
-  await writeAuditTelemetry(err.telemetryPath, err.auditRecord)
+  await writeCrashRecord(err.telemetryPath, err.auditRecord)
   if (subagentTokens && err.telemetryPath) {
     await patchTelemetryRecord(err.telemetryPath, { 'tokens.total.subagentTokens': subagentTokens })
   }

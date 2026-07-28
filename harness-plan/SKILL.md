@@ -6,7 +6,7 @@ description: Use when you have a Jira ticket, freeform description, or rough not
 # harness-plan
 
 > **IMPORTANT — invoke via `/harness-plan`, never directly.**
-> Running `workflow.js` directly bypasses the SKILL.md wrapper entirely: `startTs`, `skillsCommit`, `runTs`, `runId`, and the post-workflow telemetry patch (subagentTokens, inputTokens, durationMs, recomputedCost) are all set by the wrapper, not the workflow. A bare Workflow call produces an incomplete audit record and a mismatched or missing telemetry file. Always enter through the skill.
+> Running `workflow.js` directly bypasses the SKILL.md wrapper entirely: `startTs`, `skillsCommit`, `runTs`, `runId`, and the post-workflow telemetry patch (subagentTokens, inputTokens, recomputedCost) are all set by the wrapper, not the workflow. (`durationMs` is measured by the workflow itself as of 2026-07-27 — see step 4.) A bare Workflow call produces an incomplete audit record and a mismatched or missing telemetry file. Always enter through the skill.
 
 ## Mental Model: Manager Workflow vs Dev Team
 
@@ -231,7 +231,7 @@ const runId = `${issueKey || 'plan'}-${runTs}`
 
 // Write audit record(s) — workflow returns them as plain JS objects, no shell escaping needed.
 // harness-plan may return multiple records (barrier events + final status), all appended in order.
-const writeAuditTelemetry = async (path, records) => {
+const writeCrashRecord = async (path, records) => {
   if (!path || !records?.length) return
   try {
     const lines = records.map(r => JSON.stringify(r).replace(/'/g, "'\\''"))
@@ -299,11 +299,12 @@ try {
     },
   })
 
-  // Write all audit records (barrier events + final status record).
-  await writeAuditTelemetry(result?.telemetryPath, result?.auditRecords)
+  // The workflow wrote its own record in Debrief (write-telemetry agent) and stamped
+  // durationMs there. Do NOT append or re-stamp here: a second append duplicates the
+  // dashboard row, and a duration measured from *this* point measures how long the main
+  // agent took to get around to it — which is precisely the bug that made MC-1077's
+  // 239210ms a real measurement of the wrong interval.
 
-  const endTs = parseInt(await Bash('python3 -c "import time; print(int(time.time()*1000))"').then(r => r.trim()), 10)
-  const durationMs = endTs - parseInt(startTs, 10)
   const subagentTokens = <usage.subagent_tokens from completion notification>
   const outputTokensTotal = result?.outputTokensTotal ?? null
   const inputTokens = (subagentTokens != null && outputTokensTotal != null) ? subagentTokens - outputTokensTotal : null
@@ -321,7 +322,6 @@ try {
   }
   if (result?.telemetryPath) {
     await patchTelemetryRecord(result.telemetryPath, {
-      durationMs,
       'tokens.total.subagentTokens': subagentTokens,
       'tokens.total.input': inputTokens,
       ...(recomputedCost != null ? { 'cost.rateLockedUsd': recomputedCost } : {}),
@@ -331,7 +331,7 @@ try {
 
 } catch (err) {
   const subagentTokens = <usage.subagent_tokens from completion notification, or null if absent>
-  await writeAuditTelemetry(err.telemetryPath, err.auditRecords)
+  await writeCrashRecord(err.telemetryPath, err.auditRecords)
   if (subagentTokens && err.telemetryPath) {
     await patchTelemetryRecord(err.telemetryPath, { 'tokens.total.subagentTokens': subagentTokens })
   }
