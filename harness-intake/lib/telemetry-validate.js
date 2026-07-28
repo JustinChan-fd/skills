@@ -55,6 +55,25 @@ const DASH_FIELDS = [
  */
 const STUB_KEY_FLOOR = REQUIRED_V2_KEYS.length
 
+/**
+ * Which dash fields a caller may legitimately declare pending, given what it knows.
+ *
+ * Extracted rather than left inline in the grader on purpose. Inline, the only assertion
+ * available was "the source text mentions startTs", and mutating the condition away failed
+ * nothing — the word survived in the signature. That is the same shape as the `/logs/`
+ * assertion this whole phase exists to eliminate, so the decision lives here where a test can
+ * actually reach it.
+ *
+ * `durationMs` is stamped by the write agent from `startTs`. With no `startTs` there is nothing
+ * to subtract, so the field will never be filled and the dash is permanent — calling it pending
+ * there would hide a real gap behind a word that means "not yet".
+ *
+ * @returns {string[]} names from DASH_FIELDS that a later stage is contracted to supply.
+ */
+export function pendingFieldsFor(context) {
+  return context && typeof context === 'object' && context.startTs ? ['durationMs'] : []
+}
+
 export function deriveOutcome(status) {
   return OUTCOME_FOR_STATUS[status] || 'failed'
 }
@@ -108,11 +127,19 @@ export function validateV2Record(record) {
  * output) are NOT counted — they are honest, and counting them would make every record
  * PARTIAL forever.
  *
- * @returns {{state: 'FULL'|'PARTIAL'|'STUB', dashes: string[], reasons: string[], problems: string[]}}
+ * `opts.pending` names fields a later stage is contracted to supply, and is how the in-workflow
+ * grader avoids crying PARTIAL on every healthy run: it grades the in-memory record BEFORE the
+ * write agent stamps durationMs onto the file, so that field is legitimately not measured yet.
+ * Pending fields are reported in their own array rather than suppressed — the distinction is
+ * "not yet" versus "never", and only a caller that knows something is still coming may claim it.
+ * Callers reading records off disk (audit-telemetry.mjs) pass nothing, so for them a null is a
+ * real dash. Unrecognized names are ignored, so a typo cannot excuse a genuinely missing field.
+ *
+ * @returns {{state: 'FULL'|'PARTIAL'|'STUB', dashes: string[], pending: string[], reasons: string[], problems: string[]}}
  */
-export function classifyV2Record(record) {
+export function classifyV2Record(record, opts) {
   if (!record || typeof record !== 'object' || Array.isArray(record)) {
-    return { state: 'STUB', dashes: [], reasons: ['not an object'], problems: validateV2Record(record) }
+    return { state: 'STUB', dashes: [], pending: [], reasons: ['not an object'], problems: validateV2Record(record) }
   }
 
   const problems = validateV2Record(record)
@@ -125,8 +152,14 @@ export function classifyV2Record(record) {
   if (keyCount < STUB_KEY_FLOOR) {
     reasons.push(`only ${keyCount} keys, fewer than the ${STUB_KEY_FLOOR} required — cannot be a complete record`)
   }
-  if (reasons.length) return { state: 'STUB', dashes: [], reasons, problems }
+  if (reasons.length) return { state: 'STUB', dashes: [], pending: [], reasons, problems }
 
-  const dashes = DASH_FIELDS.filter(([, get]) => get(record) == null).map(([name]) => name)
-  return { state: dashes.length ? 'PARTIAL' : 'FULL', dashes, reasons, problems }
+  // Only a name that is BOTH a real dash field and currently null can be pending. Filtering
+  // against DASH_FIELDS is what makes a caller's typo inert rather than load-bearing.
+  const claimed = Array.isArray(opts?.pending) ? opts.pending : []
+  const missing = DASH_FIELDS.filter(([, get]) => get(record) == null).map(([name]) => name)
+  const pending = missing.filter(name => claimed.includes(name))
+  const dashes = missing.filter(name => !pending.includes(name))
+
+  return { state: dashes.length ? 'PARTIAL' : 'FULL', dashes, pending, reasons, problems }
 }

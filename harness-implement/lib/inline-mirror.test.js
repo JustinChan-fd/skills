@@ -15,7 +15,7 @@ import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import { buildTelemetryPath, deriveTelemetryDir, repoNameFromPath, slugFromInput } from './telemetry.js'
 import { buildWriteAgentPrompt, buildDurationPatchCmd } from './telemetry-write.js'
-import { validateV2Record, classifyV2Record, REQUIRED_V2_KEYS } from './telemetry-validate.js'
+import { validateV2Record, classifyV2Record, pendingFieldsFor, REQUIRED_V2_KEYS } from './telemetry-validate.js'
 
 const WORKFLOW_SRC = readFileSync(new URL('../workflow.js', import.meta.url), 'utf8')
 
@@ -208,5 +208,14 @@ test('inline _classifyV2Record agrees with lib classifyV2Record on every fixture
   const inline = loadInline('_classifyV2Record', ['_REQUIRED_V2_KEYS', '_OUTCOME_FOR_STATUS', '_DASH_FIELDS', '_STUB_KEY_FLOOR', '_validateV2Record'])
   for (const rec of VALIDATOR_CASES) {
     assert.deepEqual(inline(rec), classifyV2Record(rec), `mirror drift for ${label(rec)}`)
+  }
+})
+
+test('inline _pendingFieldsFor is byte-identical to lib pendingFieldsFor', () => {
+  // This one function decides whether a null field is excused, so drift here silently converts
+  // a real dash into a "pending" that never resolves.
+  const inline = loadInline('_pendingFieldsFor')
+  for (const c of [{ startTs: '1' }, { startTs: 1 }, { startTs: null }, { startTs: '' }, { startTs: 0 }, {}, null, undefined, 'nope', 42]) {
+    assert.deepEqual(inline(c), pendingFieldsFor(c), `mirror drift for ${JSON.stringify(c)}`)
   }
 })

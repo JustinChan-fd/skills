@@ -124,3 +124,41 @@ test('a STUB or PARTIAL grade is called out by name, so the log is diagnosable',
     assert.ok(body.includes(state), `the grade log never mentions ${state}`)
   }
 })
+
+// ── The grader must not cry PARTIAL on every healthy run ──────────────────────
+//
+// _gradeAuditRecord runs before the write agent stamps durationMs onto the file, so grading
+// the in-memory record naively reports PARTIAL every time while the file lands FULL. The log
+// would then contradict audit-telemetry.mjs on every run, which is how a signal becomes noise.
+
+test('the grader declares durationMs pending, and only when something will supply it', () => {
+  const fn = SRC.slice(SRC.indexOf('function _gradeAuditRecord'))
+  const body = fn.slice(0, fn.indexOf('\n}\n') + 1)
+  assert.match(body, /pending:/, 'must pass a pending list — otherwise every run logs a false PARTIAL')
+  assert.match(body, /durationMs/, 'durationMs is the field the write agent stamps after grading')
+  assert.match(
+    body,
+    /startTs/,
+    'pending must be conditional on startTs: with no startTs nothing ever stamps durationMs, ' +
+    'so it is a real dash and must be reported as one'
+  )
+})
+
+test('a pending field is surfaced in the log, not silently swallowed', () => {
+  const fn = SRC.slice(SRC.indexOf('function _gradeAuditRecord'))
+  const body = fn.slice(0, fn.indexOf('\n}\n') + 1)
+  assert.match(body, /pending\b/, 'the grade log must mention pending fields')
+})
+
+test('the write forwards startTs to the grader, so the deferral can actually apply', () => {
+  // Mutating `_gradeAuditRecord(list, { startTs })` down to `_gradeAuditRecord(list)` fails
+  // safe — nothing is deferred, so a dash is over-reported rather than hidden — but it silently
+  // restores the false PARTIAL on every healthy run, which is the bug this guard exists for.
+  const fn = SRC.slice(SRC.indexOf('async function _writeAuditRecord'))
+  const body = fn.slice(0, fn.indexOf('\n}\n') + 1)
+  assert.match(
+    body,
+    /_gradeAuditRecord\(\s*list\s*,\s*\{\s*startTs\s*\}/,
+    'the grader must receive startTs, or durationMs is never deferred and every run logs PARTIAL'
+  )
+})

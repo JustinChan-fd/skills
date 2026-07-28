@@ -19,7 +19,7 @@
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { validateV2Record, classifyV2Record, REQUIRED_V2_KEYS } from './telemetry-validate.js'
+import { validateV2Record, classifyV2Record, pendingFieldsFor, REQUIRED_V2_KEYS } from './telemetry-validate.js'
 
 /** A complete, plausible harness-intake record, built field-by-field from the schema. */
 function fullRecord(over = {}) {
@@ -252,4 +252,107 @@ test('one key below the required count is a STUB, and says so by count', () => {
   const c = classifyV2Record(minimal)
   assert.equal(c.state, 'STUB')
   assert.ok(c.reasons.some(r => /keys/.test(r)), `expected a key-count reason: ${JSON.stringify(c.reasons)}`)
+})
+
+// ── Fields a later stage is contracted to supply are pending, not dashes ──────
+//
+// The grader runs INSIDE the workflow, before the write agent's STEP 2 stamps durationMs
+// onto the file. So the in-memory record it sees always has durationMs === null, and a naive
+// classify calls every healthy run PARTIAL while the file on disk is FULL. The log and
+// audit-telemetry.mjs then disagree on every single run.
+//
+// A grader that cries PARTIAL unconditionally teaches you to ignore it — the same failure as
+// a green test asserting the wrong thing. So a caller that KNOWS a field is still coming can
+// declare it pending. Nothing is suppressed: pending fields are reported separately, and a
+// field is only pending if something is actually going to supply it.
+
+test('a field declared pending does not make the record PARTIAL', () => {
+  const c = classifyV2Record(fullRecord({ durationMs: null }), { pending: ['durationMs'] })
+  assert.equal(c.state, 'FULL')
+  assert.deepEqual(c.dashes, [])
+})
+
+test('a pending field is still reported, so it is never silently dropped', () => {
+  const c = classifyV2Record(fullRecord({ durationMs: null }), { pending: ['durationMs'] })
+  assert.deepEqual(c.pending, ['durationMs'])
+})
+
+test('a pending field that is already populated is not reported as pending', () => {
+  const c = classifyV2Record(fullRecord({ durationMs: 1234 }), { pending: ['durationMs'] })
+  assert.equal(c.state, 'FULL')
+  assert.deepEqual(c.pending, [])
+})
+
+test('declaring one field pending does not excuse the others', () => {
+  const rec = fullRecord({ durationMs: null })
+  rec.cost.rateLockedUsd = null
+  const c = classifyV2Record(rec, { pending: ['durationMs'] })
+  assert.equal(c.state, 'PARTIAL')
+  assert.deepEqual(c.dashes, ['cost.rateLockedUsd'])
+  assert.deepEqual(c.pending, ['durationMs'])
+})
+
+test('with no options, every dash field still counts — the audit script must see the truth', () => {
+  // audit-telemetry.mjs reads records off disk, where nothing further is coming. It passes no
+  // options, so a null durationMs there is a real dash and must stay one.
+  const c = classifyV2Record(fullRecord({ durationMs: null }))
+  assert.equal(c.state, 'PARTIAL')
+  assert.deepEqual(c.dashes, ['durationMs'])
+  assert.deepEqual(c.pending, [])
+})
+
+test('an unrecognized pending field name is ignored rather than trusted', () => {
+  // Guards a typo in the caller: 'duration' must not silently excuse 'durationMs'.
+  const c = classifyV2Record(fullRecord({ durationMs: null }), { pending: ['duration'] })
+  assert.equal(c.state, 'PARTIAL')
+  assert.deepEqual(c.dashes, ['durationMs'])
+})
+
+test('pending survives garbage options without throwing', () => {
+  for (const opts of [null, undefined, {}, { pending: null }, { pending: 'durationMs' }, { pending: [null, 42] }, 'nope']) {
+    const c = classifyV2Record(fullRecord({ durationMs: null }), opts)
+    assert.equal(c.state, 'PARTIAL', `options ${JSON.stringify(opts)} should not excuse anything`)
+    assert.ok(Array.isArray(c.pending))
+  }
+})
+
+test('a STUB reports pending as an empty array, not undefined', () => {
+  const c = classifyV2Record(STUB_INTAKE, { pending: ['durationMs'] })
+  assert.equal(c.state, 'STUB')
+  assert.deepEqual(c.pending, [])
+})
+
+// ── The pending DECISION must be testable, not just present in the text ───────
+//
+// An earlier version of this fix left the startTs condition inline in _gradeAuditRecord, where
+// the only possible assertion was "the source text mentions startTs". Mutating the condition
+// away (`startTs ? [...] : []` → `[...]`) then failed nothing: the word was still in the
+// signature. Extracting the decision is what makes it assertable — otherwise "pending" could
+// quietly become an unconditional excuse, which is worse than the false PARTIAL it replaced.
+
+test('durationMs is pending only when a startTs exists to measure it from', () => {
+  assert.deepEqual(pendingFieldsFor({ startTs: '1769500000000' }), ['durationMs'])
+  assert.deepEqual(pendingFieldsFor({ startTs: 1769500000000 }), ['durationMs'])
+})
+
+test('with no startTs nothing is pending — the dash is real and must be reported', () => {
+  // Without startTs the write agent has nothing to subtract, so durationMs will never be
+  // stamped. Calling it "pending" there would hide a permanent gap behind a temporary word.
+  for (const startTs of [null, undefined, '', 0]) {
+    assert.deepEqual(pendingFieldsFor({ startTs }), [], `startTs ${JSON.stringify(startTs)} should not defer anything`)
+  }
+})
+
+test('pendingFieldsFor survives garbage without throwing', () => {
+  for (const arg of [null, undefined, {}, 'nope', 42]) {
+    assert.ok(Array.isArray(pendingFieldsFor(arg)), `non-array for ${JSON.stringify(arg)}`)
+  }
+})
+
+test('every name pendingFieldsFor can return is a real dash field', () => {
+  // A name outside DASH_FIELDS would be silently ignored by classifyV2Record, so this catches
+  // the two drifting apart rather than waiting for a run to under-report.
+  const c = classifyV2Record(fullRecord({ durationMs: null }), { pending: pendingFieldsFor({ startTs: '1' }) })
+  assert.deepEqual(c.pending, ['durationMs'])
+  assert.deepEqual(c.dashes, [])
 })
