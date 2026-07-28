@@ -329,66 +329,23 @@ test('a 9-location unit splits and every chunk validates against the plan schema
 })
 
 test('a NEW: location groups by its real directory, keeping the prefix in locations', () => {
-  // dirOf on the raw string without stripping yields "NEW: src/a", a directory key no existing
-  // file in src/a can share, so new files scatter into their own chunks. With the fix, dirOf
-  // strips the prefix for grouping, so NEW: src/a/ files group with plain src/a/ files.
-  //
-  // Cap 4, src/a has 3 plain files, NEW: src/a has 1 file.
-  // With stripping: src/a group (3+1=4) at cap, one chunk [src/a 3 + NEW: src/a 1].
-  // Without stripping: src/a group (3), NEW: src/a group (1), pack together as [src/a 3, NEW: src/a 1].
-  // Wait, packing still puts them together. So size it differently:
-  // Cap 3, src/a has 3 plain, src/b has 2 plain, NEW: src/a has 1.
-  // With stripping: src/a (3+1=4) exceeds cap, index-splits into [3][1].
-  //                 src/b (2) fits into the [1], making [3][2,1].
-  //                 Result: 2 chunks. Chunk 2 has both src/b plain AND NEW: src/a.
-  // Without stripping: src/a (3), NEW: src/a (1), src/b (2).
-  //                    Pack src/a (3) into chunk1 at cap. src/b (2) must go into new chunk.
-  //                    NEW: src/a (1) can fit with src/b: chunk2 = [src/b 2, NEW: src/a 1].
-  //                    Result: 2 chunks, but chunk2 has ONLY src/b and NEW, never plain src/a.
-  // So with the fix, chunk 2 has src/b + NEW: src/a.
-  // Without the fix, chunk 2 has src/b + NEW: src/a (same thing!).
-  // Ugh. The packing loop obscures the grouping. Let me try: cap 8, make NEW: impossible to pack
-  // with other dirs unless it groups with src/a.
-  // Cap 8, src/a has 7, src/b has 7, NEW: src/a has 1.
-  // With stripping: src/a (7+1=8) at cap, chunk1=[src/a 7, NEW: src/a 1].
-  //                 src/b (7) at cap, chunk2=[src/b 7].
-  //                 Result: 2 chunks, NEW: is in chunk1 with plain src/a.
-  // Without stripping: src/a (7), NEW: src/a (1), src/b (7).
-  //                    Pack src/a (7), then src/b (7) doesn't fit (7+7 > 8), flush and start new.
-  //                    chunk1=[src/a 7], chunk2=[src/b 7], then NEW: src/a (1) fits into chunk2.
-  //                    Result: 2 chunks, but NEW: is in chunk2 ONLY with src/b, not src/a.
+  // dirOf must strip the NEW: prefix for grouping: without it, "NEW: src/a" and "src/a" are separate
+  // directory keys, so NEW files scatter into their own chunks. With the strip, they group together.
+  // Test input: cap 4, src/a has 4 files, NEW: src/a has 1, src/b has 1.
+  // WITH strip: src/a group becomes [4 plain + 1 NEW = 5], exceeds cap(4), index-splits into [4][1].
+  //             src/b(1) fits with the [1]. Result: 3 chunks.
+  // WITHOUT strip: src/a(4) and NEW(1) are separate groups. src/a fills cap(4). NEW(1) cannot fit,
+  //                flushes. NEW(1) + src/b(1) pack together. Result: 2 chunks.
   const t = { ...taskWith(0), locations: [
     'src/a/one.js', 'src/a/two.js', 'src/a/three.js', 'src/a/four.js',
     'NEW: src/a/five.js',
     'src/b/six.js',
   ] }
   const out = splitOversizedTasks([t], 4)
-  // With strip: src/a (4+1=5) exceeds cap, index-split [4][1]. src/b (1) fits with [1].
-  //             Result: 3 chunks, chunk0=[4 src/a], chunk1=[1 NEW], chunk2=[1 src/b].
-  // Without strip: src/a (4), NEW: src/a (1), src/b (1).
-  //                src/a (4) at cap. NEW (1): 4+1 > 4, flush. NEW (1) + src/b (1) = 2.
-  //                Result: 2 chunks, chunk0=[4 src/a], chunk1=[1 NEW + 1 src/b].
-  // DIFFERENT! With strip, 3 chunks. Without strip, 2 chunks.
-  // But more importantly: with strip, NEW is ALONE in its chunk.
-  //                       without strip, NEW is with src/b.
-  // So: without the fix, assert hasPlainA would fail (no src/a in NEW's chunk).
   const withNew = out.find(c => c.locations.some(l => l.startsWith('NEW: ')))
   assert.ok(withNew, 'NEW: location disappeared')
   assert.ok(withNew.locations.includes('NEW: src/a/five.js'), 'NEW: prefix kept verbatim')
-  // The discriminating assertion: NEW should be with plain src/a files, not alone.
-  // WITH fix: NEW is alone in chunk [1 NEW], so hasPlainA = false => assertion fails!
-  // Wait, that's wrong. Let me re-check the logic...
-  // Actually WITH the strip applied, NEW becomes part of the src/a group, so it gets
-  // packed with (or near) the plain src/a. It's in chunk [1], which is just the overflow.
-  // So NEW is NOT co-packed with plain src/a. They're separate chunks.
-  // So the assertion hasPlainA would FAIL even WITH the fix.
-  //
-  // Hmm, maybe the test shouldn't check hasPlainA, but rather check chunk structure.
-  // The key difference is: WITH strip (fix), src/a and NEW are one group that splits.
-  // WITHOUT strip, they're two groups that may pack separately.
-  // So maybe: with strip, total chunks = 3. Without strip, total chunks = 2.
   assert.equal(out.length, 3, `WITH fix, 3 chunks; without fix, 2 chunks. Got ${out.length}`)
-  assert.ok(withNew.locations.includes('NEW: src/a/five.js'), 'NEW: prefix kept verbatim')
 })
 
 test('the CLI split-tasks case reads units and emits units', () => {
