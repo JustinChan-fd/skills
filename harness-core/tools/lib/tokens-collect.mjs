@@ -360,6 +360,14 @@ export function buildTokensDirectional({ result, modelTierMap = {}, now = new Da
   // exactly that way — `complete: true` over `by_model: {}` — and a consumer
   // reading `complete` has no reason to also test emptiness. Completeness now
   // requires something to have been collected.
+  //
+  // Order relative to the `unknown.length` check above is deliberately
+  // unobservable, and no test pins it: `unknown` is derived from
+  // Object.keys(result.by_model), so an empty by_model yields an empty unknown.
+  // The two branches are disjoint by construction and cannot both apply to one
+  // input. Order relative to the `!result.ok` check above them is NOT free —
+  // a failed collect must keep its own error code rather than be relabelled
+  // `empty_collection`, and that ordering is pinned by test.
   if (Object.keys(tokens_directional.by_model).length === 0) {
     return {
       tokens_directional,
