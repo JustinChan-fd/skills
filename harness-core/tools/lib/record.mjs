@@ -120,10 +120,23 @@ function hasModelSums(tokensDirectional) {
 // so the newest real reading is the most complete one (supersets are expected,
 // which is why this replaces rather than merges).
 //
-// The skip signal rides back as a NON-ENUMERABLE `skipped` property. It must not
-// be enumerable: this same object is what writeRecord validates, and
-// run-record.schema.json is additionalProperties:false, so an enumerable key
-// would both fail validation and leak into record.json.
+// The skip signal rides back as a NON-ENUMERABLE `skipped` property, and the
+// defineProperty call is deliberately placed AFTER the write. Two independent
+// things keep `skipped` out of record.json, and it is worth being precise about
+// which one is doing the work:
+//   1. Ordering (what actually protects today). The object handed to writeRecord
+//      does not carry `skipped` at all — in the write branch the property is
+//      defined afterwards, and in the skip branch writeRecord is never called.
+//   2. Non-enumerability (defense in depth, for whoever moves line 1). Both
+//      gates walk enumerable keys only: validate.mjs checks
+//      additionalProperties via Object.keys, and JSON.stringify skips
+//      non-enumerable properties. Verified empirically — an enumerable
+//      `skipped` on a record object yields `$: unexpected property "skipped"`
+//      from validate(), a non-enumerable one yields no errors. So moving the
+//      defineProperty above writeRecord would still be safe as written, but
+//      only because of `enumerable: false`; run-record.schema.json is
+//      additionalProperties:false and writeRecord throws
+//      HarnessError('invalid_record') on an unexpected key.
 export function stampTokensDirectional({ runDir, tokensDirectional }) {
   const record = readRecord(runDir);
   const skipped = !hasModelSums(tokensDirectional) && hasModelSums(record.tokens_directional);
