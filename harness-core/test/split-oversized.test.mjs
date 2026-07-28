@@ -332,10 +332,11 @@ test('a NEW: location groups by its real directory, keeping the prefix in locati
   // dirOf must strip the NEW: prefix for grouping: without it, "NEW: src/a" and "src/a" are separate
   // directory keys, so NEW files scatter into their own chunks. With the strip, they group together.
   // Test input: cap 4, src/a has 4 files, NEW: src/a has 1, src/b has 1.
-  // WITH strip: src/a group becomes [4 plain + 1 NEW = 5], exceeds cap(4), index-splits into [4][1].
-  //             src/b(1) fits with the [1]. Result: 3 chunks.
+  // WITH strip: src/a group becomes [4 plain + 1 NEW = 5], exceeds cap(4), index-splits into
+  //             [4][1]; src/b is its own chunk. Result: 3 chunks — [4 plain][NEW][src/b].
   // WITHOUT strip: src/a(4) and NEW(1) are separate groups. src/a fills cap(4). NEW(1) cannot fit,
-  //                flushes. NEW(1) + src/b(1) pack together. Result: 2 chunks.
+  //                flushes. NEW(1) + src/b(1) pack together. Result: 2 chunks — and the NEW file
+  //                sits in a chunk with src/b, a directory it has nothing to do with.
   const t = { ...taskWith(0), locations: [
     'src/a/one.js', 'src/a/two.js', 'src/a/three.js', 'src/a/four.js',
     'NEW: src/a/five.js',
@@ -346,6 +347,14 @@ test('a NEW: location groups by its real directory, keeping the prefix in locati
   assert.ok(withNew, 'NEW: location disappeared')
   assert.ok(withNew.locations.includes('NEW: src/a/five.js'), 'NEW: prefix kept verbatim')
   assert.equal(out.length, 3, `WITH fix, 3 chunks; without fix, 2 chunks. Got ${out.length}`)
+  // Directory coherence for the NEW: entry specifically — the grouping key is src/a, so its chunk
+  // must not also carry src/b. Unstripped, NEW lands in the src/b chunk, which this catches.
+  const newDirs = new Set(withNew.locations.map(l => {
+    const s = l.replace(/^NEW:\s*/, '')
+    const i = s.lastIndexOf('/')
+    return i === -1 ? '' : s.slice(0, i)
+  }))
+  assert.deepEqual([...newDirs], ['src/a'], `NEW: chunk mixes directories: ${withNew.locations.join(' ')}`)
 })
 
 test('the CLI split-tasks case reads units and emits units', () => {
