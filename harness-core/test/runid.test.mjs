@@ -27,6 +27,19 @@ test('rejects invalid kind and source', () => {
   assert.throws(() => makeRunId({ repo: 'x', kind: 'intake', source: 'jira-1' }), /invalid source/);
 });
 
+test('accepts a slugified Jira issue key as the source (issue-tars-1271) and round-trips it', () => {
+  const id = makeRunId({ repo: 'webtarsthree', kind: 'intake', source: 'issue-tars-1271', now: NOW, shortid: 'abc123' });
+  assert.equal(id, '2026-07-24T183012Z__webtarsthree__intake__issue-tars-1271__abc123');
+  const parsed = parseRunId(id);
+  assert.equal(parsed.source, 'issue-tars-1271');
+  assert.equal(parsed.kind, 'intake');
+  assert.equal(parsed.repo, 'webtarsthree');
+});
+
+test('still rejects an issue source with uppercase or unsafe chars (must be pre-slugified)', () => {
+  assert.throws(() => makeRunId({ repo: 'x', kind: 'intake', source: 'issue-TARS-1271' }), /invalid source/);
+});
+
 test('slugifyRepo prevents separator ambiguity', () => {
   assert.equal(slugifyRepo('My App!!'), 'my-app');
   assert.equal(slugifyRepo('a--b'), 'a-b');

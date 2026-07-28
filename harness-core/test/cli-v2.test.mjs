@@ -4,7 +4,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync } from 'node:fs';
+import { mkdtempSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
@@ -48,6 +48,28 @@ test('init-run stamps the v2 association + provenance flags onto the record', ()
   assert.equal(r.correlation_id, 'TARS-1271-20260727T090000Z');
   assert.equal(r.repo_path, '/Users/x/Desktop/Repos/webtarsthree');
   assert.equal(r.skills_commit, 'abc1234');
+});
+
+test('jira-normalize reads a getJiraIssue JSON file and prints the neutral intake shape', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'harness-jira-'));
+  const file = join(dir, 'issue.json');
+  writeFileSync(file, JSON.stringify({
+    key: 'TARS-1271',
+    fields: { summary: 'Clear button bug', description: 'stays selected', issuetype: { name: 'Bug' }, project: { key: 'TARS' } },
+  }));
+  const r = run(['jira-normalize', '--file', file]);
+  assert.equal(r.code, 0);
+  assert.equal(r.out.key, 'TARS-1271');
+  assert.equal(r.out.change_type, 'fix');
+  assert.equal(r.out.project_key, 'TARS');
+  assert.ok(r.out.input.includes('Clear button bug'));
+});
+
+test('jira-normalize exits 1 on a malformed issue (no summary)', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'harness-jira-'));
+  const file = join(dir, 'bad.json');
+  writeFileSync(file, JSON.stringify({ key: 'TARS-1', fields: {} }));
+  assert.equal(run(['jira-normalize', '--file', file]).code, 1);
 });
 
 test('run-end persists active-ms, agent-count, and skill-metrics', () => {

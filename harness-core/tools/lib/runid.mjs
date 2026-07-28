@@ -2,8 +2,12 @@
 import { randomBytes } from 'node:crypto';
 
 export const KINDS = ['intake', 'plan', 'implement', 'pipeline'];
-const SOURCE_RE = /^(issue-\d+|adhoc|file)$/;
-const STEM_RE = /^(\d{4}-\d{2}-\d{2}T\d{6}Z)__([a-z0-9][a-z0-9-]*)__(intake|plan|implement|pipeline)__(issue-\d+|adhoc|file)__([0-9a-f]{6})$/;
+// A source is issue-<slug>, adhoc, or file. <slug> is lowercase alphanumerics +
+// hyphens: it covers a numeric GitHub issue (issue-123) AND a slugified Jira key
+// (issue-tars-1271). The key must be pre-slugified (lowercase, hyphen-safe) so
+// the "__" stem separator stays unambiguous — the real key rides in --issue.
+const SOURCE_RE = /^(issue-[a-z0-9][a-z0-9-]*|adhoc|file)$/;
+const STEM_RE = /^(\d{4}-\d{2}-\d{2}T\d{6}Z)__([a-z0-9][a-z0-9-]*)__(intake|plan|implement|pipeline)__(issue-[a-z0-9][a-z0-9-]*|adhoc|file)__([0-9a-f]{6})$/;
 
 export function slugifyRepo(name) {
   // Collapses runs of non-alphanumerics to single "-" — slugs never contain

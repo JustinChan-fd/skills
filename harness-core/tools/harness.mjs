@@ -32,6 +32,7 @@ import { loopState } from './lib/loopstate.mjs';
 import { syncRun, sweep } from './lib/telemetry.mjs';
 import { renderStatusComment, renderPrBody, renderBrief } from './lib/render.mjs';
 import { composeLoopLine } from './lib/looprecord.mjs';
+import { normalizeJiraIssue } from './lib/jira.mjs';
 
 const [subcommand, ...rest] = process.argv.slice(2);
 
@@ -134,6 +135,15 @@ try {
       const project = resolveProject(v.issue);
       if (!project) emit({ error: `no project mapping for issue key: ${v.issue ?? '(none)'}` }, 1);
       emit(project);
+    }
+    case 'jira-normalize': {
+      // Normalize a saved getJiraIssue response into the neutral intake shape.
+      // Fetch-once-to-disk: intake writes the raw response, then this reads it,
+      // so plan/implement never re-hit Jira (they read the manifest). A
+      // malformed issue exits 1 rather than fabricating a shape.
+      const v = opts({ file: { type: 'string' } });
+      const normalized = normalizeJiraIssue(JSON.parse(readFileSync(v.file, 'utf8')));
+      emit(normalized);
     }
     case 'validate': {
       const v = opts({ schema: { type: 'string' }, file: { type: 'string' } });
@@ -392,6 +402,7 @@ try {
         usage: {
           'init-run': '--target <path> --repo <slug> --kind intake|plan|implement --source issue-<n>|adhoc|file [--issue <n>] [--branch <b>] [--parent-run-id <id>] [--loop-run-id <id>] [--correlation-id <id>] [--repo-path <path>] [--skills-commit <sha>]',
           'resolve-project': '--issue <KEY-n>  (map a Jira issue key prefix to { repoPath, cloudId } from config/projects.json; exit 1 if unknown)',
+          'jira-normalize': '--file <issue.json>  (normalize a saved getJiraIssue response into the neutral intake shape {key,summary,description,issue_type,change_type,parent_key,project_key,input}; exit 1 if malformed)',
           validate: '--schema <name> --file <path>',
           audit: '--target <path> --event <json>  (ts auto-stamped if omitted)',
           gate: '--size S|M|L --rounds <n> --result pass|advisory-fail|blocking-fail [--score <0..1>] [--delta <n>]',
