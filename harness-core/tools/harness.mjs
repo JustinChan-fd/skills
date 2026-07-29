@@ -77,12 +77,23 @@ function collectAndStamp(v, routing) {
   const runDir = v['run-dir'];
   const record = readRecord(runDir);
   const now = new Date();
+  const sessionId = v['session-id'] ?? process.env.CLAUDE_CODE_SESSION_ID ?? null;
+  // Default a phase run to subtree collection. The old default (standalone
+  // newest-mtime top-level transcript) cannot find harness tokens at all: the
+  // orchestrator is idle while a phase runs, so 100% of the spend is in
+  // <session>/subagents/agent-*.jsonl. An explicit --mode or --transcript still
+  // wins, which keeps backfill and hand invocations on their existing paths.
+  const mode = v.mode ?? (v.transcript ? undefined : 'subtree');
   const { tokens_directional, note, source, via } = collectForRun({
     transcript: v.transcript,
-    mode: v.mode,
+    mode,
     subagentsDir: v['subagents-dir'],
     projectDir: v['project-dir'],
     cwd: v.cwd ?? process.cwd(),
+    sessionId,
+    // Exact identity when the orchestrator knew it (record-observed-tokens
+    // --agent-id); otherwise the fingerprint or all-drivers path.
+    agentId: v['agent-id'] ?? null,
     // Explicit --start/--end override the record's own run window (the default).
     start: v.start ?? record.started_at ?? null,
     end: v.end ?? record.ended_at ?? now.toISOString(),
@@ -90,7 +101,7 @@ function collectAndStamp(v, routing) {
     modelTierMap: routing.model_id_to_tier ?? {},
     // The Agent-tool subagent_tokens tag, when an orchestrator recorded one — the
     // fingerprint discoverSubagentForRun matches a transcript's peak_context
-    // against. Absent on a plain phase run, which degrades to newest-mtime.
+    // against. Absent on a plain phase run, which degrades to all-drivers.
     observedTotal: record.tokens_observed?.total ?? null,
     now,
   });
@@ -111,6 +122,7 @@ const TOKENS_COLLECT_OPTS = {
   'subagents-dir': { type: 'string' }, 'project-dir': { type: 'string' },
   cwd: { type: 'string' }, 'gap-cap-ms': { type: 'string' },
   start: { type: 'string' }, end: { type: 'string' },
+  'agent-id': { type: 'string' }, 'session-id': { type: 'string' },
 };
 
 try {
@@ -351,7 +363,7 @@ try {
     case 'record-observed-tokens': {
       const v = opts({
         'run-dir': { type: 'string' }, total: { type: 'string' }, tier: { type: 'string' },
-        source: { type: 'string' },
+        source: { type: 'string' }, ...TOKENS_COLLECT_OPTS,
       });
       const record = recordObservedTokens({
         runDir: v['run-dir'],
@@ -359,12 +371,33 @@ try {
         tier: v.tier,
         source: v.source ?? 'agent_tool_usage_tag',
       });
+      // The orchestrator is the ONLY party that knows which agent ran this phase:
+      // the Agent-tool dispatch result carries `agentId`, and a subagent's own env
+      // does not (its CLAUDE_CODE_SESSION_ID is the parent's). So this is the one
+      // call site that can attribute exactly. The driver already stamped
+      // best-effort at its own run-end; this overwrites it with authoritative sums.
+      // Best-effort: never fail the cost update over enrichment, and never clobber
+      // a good stamp with an empty one (stampTokensDirectional guards that).
+      let recollected = false;
+      let via = null;
+      if (v['agent-id']) {
+        try {
+          const { routing } = resolveConfig();
+          const summary = collectAndStamp(v, routing);
+          recollected = true;
+          via = summary.via ?? null;
+        } catch {
+          /* enrichment only; tokens_observed is already written */
+        }
+      }
       const telemetry = telemetryFromConfig();
       const sync = syncRun({ runDir: v['run-dir'], telemetry });
       emit({
         status: record.status,
         tokens_by_tier: record.tokens_by_tier,
         tokens_observed: record.tokens_observed,
+        directional_recollected: recollected,
+        via,
         synced: sync.synced,
       });
     }
