@@ -4,6 +4,7 @@ import { writeFileSync, mkdtempSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir, homedir } from 'node:os';
 import { resolveConfig, sizeBudgets, tierFor, expandHome, issueSourceFor } from '../tools/lib/config.mjs';
+import { tierForModelId } from '../tools/lib/model-tier.mjs';
 
 test('routing defaults load; sizes and tiers resolve', () => {
   const { routing } = resolveConfig({ env: {}, userFile: '/nonexistent' });
@@ -75,10 +76,17 @@ test('model_id_to_tier covers the current flagship and the synthetic-entry senti
 test('every model id the harness itself spawns is present in model_id_to_tier', () => {
   const { routing } = resolveConfig({ env: {}, userFile: '/nonexistent' });
   const map = routing.model_id_to_tier;
-  // A run whose transcript carries an id missing from this map is reported
+  // A run whose transcript carries an id this map cannot resolve is reported
   // complete:false by buildTokensDirectional even when the capture was perfect.
   // A measured M-size run lost its whole by_model breakdown to a flagship rename;
   // this list is the tripwire so the next rename fails here, loudly, instead.
+  //
+  // Every id below was observed in a real local transcript. The dated and
+  // anthropic.-prefixed spellings are the ones this test USED to miss: it listed
+  // only undated ids, so it asserted against the form the map has rather than the
+  // form transcripts carry — and could not have caught the 46.6%-unresolved bug
+  // it was written to catch. Resolution goes through tierForModelId, so a dated id
+  // passes via normalization without needing its own entry.
   const spawned = [
     'claude-opus-5',
     'claude-opus-4-8',
@@ -86,9 +94,36 @@ test('every model id the harness itself spawns is present in model_id_to_tier', 
     'claude-sonnet-4-6',
     'claude-haiku-4-5',
     '<synthetic>',
+    // dated snapshots
+    'claude-sonnet-4-5-20250929',
+    'claude-haiku-4-5-20251001',
+    // Bedrock-style vendor prefix, plain and dated
+    'anthropic.claude-sonnet-4-6',
+    'anthropic.claude-sonnet-5',
+    'anthropic.claude-haiku-4-5-20251001',
+    // bare tier aliases — what tier_models spawns with
+    'opus',
+    'sonnet',
+    'haiku',
   ];
-  const missing = spawned.filter((id) => !(id in map));
-  assert.deepEqual(missing, [], `model ids spawned by harness skills but unmapped: ${missing.join(', ')}`);
+  const unresolved = spawned.filter((id) => tierForModelId(id, map) === null);
+  assert.deepEqual(unresolved, [], `model ids spawned by harness skills but unresolvable: ${unresolved.join(', ')}`);
+  // Every resolved tier must also be a priced tier, or the id is unpriceable.
+  for (const id of spawned) {
+    const tier = tierForModelId(id, map);
+    assert.ok(routing.tier_prices_usd_per_mtok[tier], `${id} resolves to unpriced tier ${tier}`);
+  }
+});
+
+test('bare tier aliases in model_id_to_tier agree with tier_models', () => {
+  const { routing } = resolveConfig({ env: {}, userFile: '/nonexistent' });
+  // tier_models is the source of truth for which model each tier spawns
+  // (LOW: haiku, MID: sonnet, HIGH: opus). Transcripts sometimes carry that bare
+  // alias as the model id, so model_id_to_tier needs the inverse entries — and
+  // the two maps must not drift apart.
+  for (const [tier, alias] of Object.entries(routing.tier_models)) {
+    assert.equal(routing.model_id_to_tier[alias], tier, `alias ${alias} should map to ${tier}`);
+  }
 });
 
 test('price_table provenance version reflects the cache-column addition', () => {

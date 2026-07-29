@@ -380,3 +380,52 @@ test('a failed collect keeps its own error code and is not relabelled empty_coll
   assert.equal(note.code, 'not_found'); // parse/discovery failure wins over emptiness
   assert.equal(tokens_directional.format_version, '1'); // stamped even on failure
 });
+
+test('a dated model id resolves through normalization and stays complete', () => {
+  const { tokens_directional, note } = buildTokensDirectional({
+    result: okResult({ 'claude-sonnet-4-5-20250929': { ...sums } }),
+    modelTierMap: { 'claude-sonnet-4-5': 'MID' },
+    now: NOW,
+  });
+  // 1,739 usage lines in the sampled local transcripts carry exactly this id.
+  // Before normalization this was an unknown_model degradation on a perfect capture.
+  assert.equal(tokens_directional.complete, true);
+  assert.equal(note, null);
+  // The tokens stay filed under the id the transcript actually used — normalization
+  // is a lookup convenience, never a rewrite of captured data.
+  assert.equal(tokens_directional.by_model['claude-sonnet-4-5-20250929'].input, 100);
+  assert.equal(tokens_directional.by_model['claude-sonnet-4-5'], undefined);
+});
+
+test('an anthropic.-prefixed id resolves through normalization too', () => {
+  const { tokens_directional, note } = buildTokensDirectional({
+    result: okResult({ 'anthropic.claude-sonnet-4-6': { ...sums } }),
+    modelTierMap: { 'claude-sonnet-4-6': 'MID' },
+    now: NOW,
+  });
+  assert.equal(tokens_directional.complete, true);
+  assert.equal(note, null);
+});
+
+test('a genuinely unrecognized id is still incomplete — normalization is not family guessing', () => {
+  const { tokens_directional, note } = buildTokensDirectional({
+    result: okResult({ 'claude-sonnet-9': { ...sums } }),
+    modelTierMap: { 'claude-sonnet-4-6': 'MID' },
+    now: NOW,
+  });
+  // A future flagship must still degrade loudly. If this ever passes as complete,
+  // normalization has grown a substring fallback and is mis-pricing new models.
+  assert.equal(tokens_directional.complete, false);
+  assert.equal(note.code, 'unknown_model');
+  assert.match(note.detail, /claude-sonnet-9/);
+});
+
+test('a non-Anthropic vendor id is reported unknown, not silently tiered', () => {
+  const { tokens_directional, note } = buildTokensDirectional({
+    result: okResult({ 'qwen.qwen3-coder-30b-a3b-v1:0': { ...sums } }),
+    modelTierMap: { 'claude-sonnet-4-6': 'MID' },
+    now: NOW,
+  });
+  assert.equal(tokens_directional.complete, false);
+  assert.equal(note.code, 'unknown_model');
+});

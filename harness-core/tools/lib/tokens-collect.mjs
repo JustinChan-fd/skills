@@ -63,6 +63,7 @@
 import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
+import { tierForModelId } from './model-tier.mjs';
 
 // Active-time gap cap. Between two consecutive events, any idle gap longer than
 // this is counted as at most this many ms — so a run that sat idle overnight
@@ -324,8 +325,8 @@ export function resolveTranscript({ transcript, mode, subagentsDir, projectDir, 
  * Turn a parser result into the additive `tokens_directional` record field
  * plus an optional degradation note. The format version is ALWAYS stamped, even
  * on failure. `complete` is true only when parsing succeeded AND at least one
- * model was actually collected AND every model id seen is present in
- * `modelTierMap`. The emptiness clause exists because a parse failure and a
+ * model was actually collected AND every model id seen RESOLVES in
+ * `modelTierMap` (exactly, or via `model-tier.mjs` normalization). The emptiness clause exists because a parse failure and a
  * zero-usage transcript are indistinguishable from `unknown.length` alone: with
  * `by_model: {}` there are no unknown ids, so `complete` used to come out true
  * over nothing at all. The note's code says which degradation happened —
@@ -347,7 +348,13 @@ export function buildTokensDirectional({ result, modelTierMap = {}, now = new Da
       note: { code: result?.error?.code ?? 'unknown', detail: result?.error?.detail ?? 'token collection failed' },
     };
   }
-  const unknown = Object.keys(result.by_model).filter((m) => !(m in modelTierMap));
+  // Resolution is normalizing, not literal: transcripts carry dated
+  // (claude-sonnet-4-5-20250929), anthropic.-prefixed, and bare-alias spellings of
+  // models the map holds one canonical entry for. A literal `m in modelTierMap`
+  // left 46.6% of real usage lines unresolved and degraded healthy runs to
+  // complete:false. See model-tier.mjs for why there is no family-substring
+  // fallback: an id that is genuinely new must still land here and degrade loudly.
+  const unknown = Object.keys(result.by_model).filter((m) => tierForModelId(m, modelTierMap) === null);
   if (unknown.length) {
     return {
       tokens_directional,
