@@ -61,9 +61,10 @@
 //    for context. // TODO(otel): migrate directional collection off transcript
 //    parsing once the OTel exporter is confirmed stable.
 import { readFileSync, readdirSync, statSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, basename } from 'node:path';
 import { homedir } from 'node:os';
 import { tierForModelId } from './model-tier.mjs';
+import { readAgentTree, descendantsOf, driversOf } from './agent-tree.mjs';
 
 // Active-time gap cap. Between two consecutive events, any idle gap longer than
 // this is counted as at most this many ms — so a run that sat idle overnight
@@ -300,6 +301,23 @@ export function discoverStandaloneTranscript(projectDir) {
   return newestJsonl(projectDir, {});
 }
 
+/**
+ * The subagents directory for one session: <projectDir>/<sessionId>/subagents.
+ *
+ * Derivation, not configuration. `CLAUDE_CODE_SESSION_ID` is present in the env of
+ * every Bash call the harness makes, and `projectDirForCwd` already maps a cwd to
+ * its transcript directory — so the caller can always compute this. The previous
+ * design required a skill to remember `--mode loop --subagents-dir`; no skill file
+ * ever did, which is half of why #17 went unnoticed. Deriving it removes the
+ * LLM from a deterministic lookup.
+ */
+export function subagentsDirForSession({ sessionId, projectDir, cwd, home } = {}) {
+  if (!sessionId) return null;
+  const dir = projectDir ?? (cwd ? projectDirForCwd(cwd, { home }) : null);
+  if (!dir) return null;
+  return join(dir, sessionId, 'subagents');
+}
+
 // ---- run-level orchestration (used by the CLI subcommand + phase/run-end wiring) ----
 
 /**
@@ -315,20 +333,12 @@ export function discoverStandaloneTranscript(projectDir) {
  * one would break directional capture for every run that has none — so a missing
  * or unmatched fingerprint degrades to newest-mtime rather than to nothing.
  *
- * NOT YET REACHED ON ANY LIVE RUN — see issue #17. Both preconditions are
- * currently unmet in production, and neither is this function's to fix:
- *   1. `mode: "loop"` + `subagentsDir`. No skill file passes
- *      `--mode loop --subagents-dir`; every phase-end/run-end template omits
- *      them, so live collection falls to standalone and this branch is dead.
- *   2. `observedTotal > 0`. harness.mjs reads `record.tokens_observed?.total`,
- *      but per harness-loop-core/SKILL.md the orchestrator runs
- *      record-observed-tokens against a driver's run dir only AFTER that driver
- *      returns — and the driver already ran its own run-end (hence its own
- *      collect) before returning. So no run has tokens_observed at its own
- *      collect time, and the loop's own LOOP_RUN_DIR never gets one at all.
- * Until both are addressed the fingerprint is reachable only by an explicit CLI
- * `tokens-collect --mode loop --subagents-dir` invocation. The plumbing below is
- * tested and correct; do not read it as evidence that the live path uses it.
+ * SUPERSEDED FOR LIVE COLLECTION by `resolveTranscripts` + `mode: 'subtree'`.
+ * This singular resolver remains for explicit-path and backfill callers. Its
+ * standalone newest-mtime branch must NOT be used for a phase run: the
+ * orchestrator is idle while a phase runs (measured: 0 tokens inside the phase
+ * window across three stages), so the newest top-level transcript is at best
+ * unrelated. See issue #17.
  *
  * Why prefer it at all: newest-mtime is only correct while exactly one run is in
  * flight. With two overlapping runs the newest file belongs to whichever sibling
@@ -354,6 +364,99 @@ export function resolveTranscript({ transcript, mode, subagentsDir, projectDir, 
   const dir = projectDir ?? (cwd ? projectDirForCwd(cwd, { home }) : null);
   if (!dir) return { ok: false, path: null, error: { code: 'not_found', detail: 'no project dir or cwd to discover a standalone transcript' }, via: null };
   return { ...discoverStandaloneTranscript(dir), via: 'newest_mtime' };
+}
+
+/**
+ * Resolve the transcript LIST for a run. `resolveTranscript` (singular) is kept
+ * unchanged for existing callers; this is the plural form the subtree mode needs.
+ *
+ * Why a list: a phase driver's own transcript is not the phase's cost. Measured on
+ * the TARS-1271 implement run, the driver's own spend was 233,607,665 against a
+ * subtree total of 308,519,206 — reading one file undercounts by 24%. Driver
+ * subtrees partition the session exactly (sum of subtrees == grand total across
+ * every agent), so rolling up over `descendantsOf` neither drops nor double-counts.
+ *
+ * Subtree precedence:
+ *   1. explicit `transcript`            -> via 'explicit'
+ *   2. `agentId`                        -> via 'subtree'            (exact identity)
+ *   3. `observedTotal > 0`              -> via 'fingerprint_subtree' (identify, then roll up)
+ *   4. neither                          -> via 'all_drivers'        (whole session)
+ *
+ * There is deliberately NO fallback from subtree mode to standalone newest-mtime.
+ * That path resolved an unrelated later session's transcript on the run that
+ * exposed #17, and 100% of harness spend lives in subagent transcripts anyway
+ * (orchestrator-only spend inside a phase window measured 0 tokens across three
+ * stages) — so falling back would trade a noted absence for a wrong number.
+ */
+export function resolveTranscripts(opts = {}) {
+  const { transcript, mode, subagentsDir, agentId, observedTotal } = opts;
+  if (transcript) return { ok: true, paths: [transcript], error: null, via: 'explicit' };
+  if (mode !== 'subtree') {
+    const single = resolveTranscript(opts);
+    return { ok: single.ok, paths: single.ok ? [single.path] : [], error: single.error, via: single.via };
+  }
+  const tree = readAgentTree(subagentsDir);
+  if (!tree.ok) return { ok: false, paths: [], error: tree.error, via: null };
+
+  const pathsFor = (ids) => ids.map((id) => join(subagentsDir, `agent-${id}.jsonl`));
+
+  if (agentId) {
+    return { ok: true, paths: pathsFor(descendantsOf(tree, agentId)), error: null, via: 'subtree' };
+  }
+  if (Number.isFinite(observedTotal) && observedTotal > 0) {
+    const hit = discoverSubagentForRun({ subagentsDir, observedTotal });
+    if (hit.ok) {
+      const id = basename(hit.path).replace(/^agent-/, '').replace(/\.jsonl$/, '');
+      return { ok: true, paths: pathsFor(descendantsOf(tree, id)), error: null, via: 'fingerprint_subtree' };
+    }
+    // An unmatched fingerprint degrades to every driver rather than to nothing:
+    // the whole session's subagent spend is a superset of this run's, where
+    // newest-mtime standalone was measured to be a disjoint set.
+  }
+  const all = driversOf(tree).flatMap((d) => descendantsOf(tree, d));
+  return { ok: true, paths: pathsFor([...new Set(all)]), error: null, via: 'all_drivers' };
+}
+
+/**
+ * Merge several `collectFromFile` results into one. Per-model directional fields
+ * are summed; `active_ms` is summed; `peak_context` takes the MAX because it is a
+ * high-water mark of a single context window — summing peaks across agents would
+ * invent a context size no agent ever held, and would break the fingerprint match
+ * that reads it back.
+ */
+export function mergeByModel(results) {
+  const by_model = {};
+  let peak_context = 0;
+  let active_ms = 0;
+  for (const r of results) {
+    if (!r?.ok) continue;
+    for (const [model, sums] of Object.entries(r.by_model ?? {})) {
+      const acc = (by_model[model] ??= emptyBucket());
+      // DIRECTIONS is an object mapping our field name -> the transcript's usage
+      // key; its KEYS are the bucket fields. Reuse it rather than re-listing them.
+      for (const k of Object.keys(DIRECTIONS)) acc[k] += sums[k] ?? 0;
+    }
+    peak_context = Math.max(peak_context, r.peak_context ?? 0);
+    active_ms += r.active_ms ?? 0;
+  }
+  return { by_model, peak_context, active_ms };
+}
+
+/**
+ * `collectFromFile` over many paths, merged. An unreadable path is skipped, not
+ * fatal: one missing transcript in a subtree should degrade the sum, not void it.
+ * Returns the same shape as `collectFromFile`.
+ */
+export function collectFromFiles(paths, opts = {}) {
+  const results = (paths ?? []).map((p) => collectFromFile(p, opts));
+  const merged = mergeByModel(results);
+  if (Object.keys(merged.by_model).length === 0) {
+    return {
+      ok: false, by_model: {}, peak_context: 0, active_ms: 0,
+      error: { code: 'no_usage', detail: `no model usage across ${paths?.length ?? 0} transcript(s)` },
+    };
+  }
+  return { ok: true, ...merged, error: null };
 }
 
 /**
@@ -426,13 +529,18 @@ export function buildTokensDirectional({ result, modelTierMap = {}, now = new Da
  * every failure mode routes through `buildTokensDirectional` and degrades to an
  * estimated-with-note result.
  */
-export function collectForRun({ transcript, mode, subagentsDir, projectDir, cwd, home, start, end, gapCapMs, modelTierMap, observedTotal, now = new Date() } = {}) {
-  const resolved = resolveTranscript({ transcript, mode, subagentsDir, projectDir, cwd, home, observedTotal });
+export function collectForRun({ transcript, mode, subagentsDir, projectDir, cwd, home, start, end, gapCapMs, modelTierMap, observedTotal, agentId, sessionId, now = new Date() } = {}) {
+  // Derive the subagents dir when the caller did not pass one but can name the
+  // session — see subagentsDirForSession for why this is derived, not configured.
+  const dir = subagentsDir ?? subagentsDirForSession({ sessionId, projectDir, cwd, home });
+  const resolved = resolveTranscripts({
+    transcript, mode, subagentsDir: dir, projectDir, cwd, home, observedTotal, agentId,
+  });
   const result = resolved.ok
-    ? collectFromFile(resolved.path, { start, end, gapCapMs })
-    : { ok: false, by_model: {}, error: resolved.error };
+    ? collectFromFiles(resolved.paths, { start, end, gapCapMs })
+    : { ok: false, by_model: {}, peak_context: 0, active_ms: 0, error: resolved.error };
   const built = buildTokensDirectional({ result, modelTierMap, now });
-  return { ...built, source: resolved.ok ? resolved.path : null, via: resolved.via ?? null, result };
+  return { ...built, source: resolved.ok ? (resolved.paths[0] ?? null) : null, via: resolved.via ?? null, result };
 }
 
 /**

@@ -1,13 +1,14 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync, mkdtempSync, mkdirSync, writeFileSync, utimesSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, basename } from 'node:path';
 import { tmpdir, homedir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import {
   DEFAULT_GAP_CAP_MS,
   collectFromText,
   collectFromFile,
+  collectForRun,
   buildTokensDirectional,
   mungeProjectDir,
   projectDirForCwd,
@@ -517,4 +518,159 @@ test('a loop-mode resolve with no subagents dir still reports a structured failu
   assert.equal(r.ok, false);
   assert.equal(r.path, null);
   assert.equal(r.error.code, 'not_found');
+});
+
+// ---- subtree resolution (#17) ----
+
+import {
+  subagentsDirForSession, resolveTranscripts, mergeByModel, collectFromFiles,
+} from '../tools/lib/tokens-collect.mjs';
+
+// One usage line, shaped like a real transcript entry.
+function mkUsageLine({ ts, model, input = 0, output = 0, cacheRead = 0, cacheCreation = 0 }) {
+  return JSON.stringify({
+    timestamp: ts,
+    message: {
+      model,
+      usage: {
+        input_tokens: input, output_tokens: output,
+        cache_read_input_tokens: cacheRead, cache_creation_input_tokens: cacheCreation,
+      },
+    },
+  });
+}
+
+/** Build a <dir>/<session>/subagents fixture. spec: id -> {meta, lines[]} */
+function sessionFixture(spec, sessionId = 'sess-1') {
+  const projectDir = mkdtempSync(join(tmpdir(), 'proj-'));
+  const subagentsDir = join(projectDir, sessionId, 'subagents');
+  mkdirSync(subagentsDir, { recursive: true });
+  for (const [id, { meta, lines }] of Object.entries(spec)) {
+    writeFileSync(join(subagentsDir, `agent-${id}.meta.json`), JSON.stringify(meta ?? {}));
+    writeFileSync(join(subagentsDir, `agent-${id}.jsonl`), (lines ?? []).join('\n') + '\n');
+  }
+  return { projectDir, subagentsDir, sessionId };
+}
+
+const TS = '2026-07-28T10:00:00.000Z';
+// driver d1 (own 100 in) -> kid k1 (own 40 in); unrelated driver d2 (own 7 in).
+const SPEC = {
+  d1: { meta: { agentType: 'general-purpose', spawnDepth: 1 },
+        lines: [mkUsageLine({ ts: TS, model: 'claude-opus-5', input: 100, output: 10 })] },
+  k1: { meta: { agentType: 'hp-researcher', spawnDepth: 2, parentAgentId: 'd1' },
+        lines: [mkUsageLine({ ts: TS, model: 'claude-sonnet-4-6', input: 40, output: 4 })] },
+  d2: { meta: { agentType: 'general-purpose', spawnDepth: 1 },
+        lines: [mkUsageLine({ ts: TS, model: 'claude-opus-5', input: 7, output: 1 })] },
+};
+
+test('subagentsDirForSession joins project dir, session id, subagents', () => {
+  const dir = subagentsDirForSession({ sessionId: 'abc', projectDir: '/p' });
+  assert.equal(dir, join('/p', 'abc', 'subagents'));
+});
+
+test('subagentsDirForSession derives the project dir from cwd', () => {
+  const dir = subagentsDirForSession({ sessionId: 'abc', cwd: '/Users/x/Repos/foo', home: '/Users/x' });
+  assert.equal(dir, join('/Users/x/.claude/projects/-Users-x-Repos-foo', 'abc', 'subagents'));
+});
+
+test('subagentsDirForSession returns null without a session id', () => {
+  assert.equal(subagentsDirForSession({ projectDir: '/p' }), null);
+});
+
+test('subtree mode with an agentId collects the driver AND its descendants', () => {
+  const { subagentsDir } = sessionFixture(SPEC);
+  const r = resolveTranscripts({ mode: 'subtree', subagentsDir, agentId: 'd1' });
+  assert.equal(r.ok, true);
+  assert.equal(r.via, 'subtree');
+  assert.deepEqual(r.paths.map((p) => basename(p)), ['agent-d1.jsonl', 'agent-k1.jsonl']);
+});
+
+test('subtree mode without an agentId falls back to every driver subtree', () => {
+  const { subagentsDir } = sessionFixture(SPEC);
+  const r = resolveTranscripts({ mode: 'subtree', subagentsDir });
+  assert.equal(r.via, 'all_drivers');
+  assert.deepEqual(
+    r.paths.map((p) => basename(p)).sort(),
+    ['agent-d1.jsonl', 'agent-d2.jsonl', 'agent-k1.jsonl'],
+  );
+});
+
+test('subtree mode prefers the fingerprint when observedTotal identifies a driver', () => {
+  const { subagentsDir } = sessionFixture(SPEC);
+  // d1's own peak_context is 110 (100 input + 10 output).
+  const r = resolveTranscripts({ mode: 'subtree', subagentsDir, observedTotal: 110 });
+  assert.equal(r.via, 'fingerprint_subtree');
+  assert.deepEqual(r.paths.map((p) => basename(p)), ['agent-d1.jsonl', 'agent-k1.jsonl']);
+});
+
+test('subtree mode refuses rather than falling back to standalone newest-mtime', () => {
+  const r = resolveTranscripts({ mode: 'subtree', subagentsDir: join(tmpdir(), 'nope-4a2f') });
+  assert.equal(r.ok, false);
+  assert.equal(r.error.code, 'not_found');
+  assert.deepEqual(r.paths, []);
+});
+
+test('an explicit transcript still wins in subtree mode', () => {
+  const { subagentsDir } = sessionFixture(SPEC);
+  const r = resolveTranscripts({ mode: 'subtree', subagentsDir, transcript: '/x/y.jsonl', agentId: 'd1' });
+  assert.equal(r.via, 'explicit');
+  assert.deepEqual(r.paths, ['/x/y.jsonl']);
+});
+
+test('resolveTranscripts wraps the singular resolver for non-subtree modes', () => {
+  const { projectDir } = sessionFixture(SPEC);
+  writeFileSync(join(projectDir, 'top.jsonl'), '');
+  const r = resolveTranscripts({ projectDir });
+  assert.equal(r.via, 'newest_mtime');
+  assert.equal(r.paths.length, 1);
+});
+
+test('mergeByModel sums per model and takes the MAX peak_context', () => {
+  const merged = mergeByModel([
+    { ok: true, by_model: { a: { input: 1, output: 2, cache_read: 3, cache_creation: 4 } }, peak_context: 100, active_ms: 10 },
+    { ok: true, by_model: { a: { input: 5, output: 0, cache_read: 0, cache_creation: 0 }, b: { input: 9, output: 0, cache_read: 0, cache_creation: 0 } }, peak_context: 250, active_ms: 20 },
+  ]);
+  assert.deepEqual(merged.by_model.a, { input: 6, output: 2, cache_read: 3, cache_creation: 4 });
+  assert.deepEqual(merged.by_model.b, { input: 9, output: 0, cache_read: 0, cache_creation: 0 });
+  // peak_context is a high-water mark of one context window, never a sum.
+  assert.equal(merged.peak_context, 250);
+  assert.equal(merged.active_ms, 30);
+});
+
+test('mergeByModel ignores failed results but keeps the good ones', () => {
+  const merged = mergeByModel([
+    { ok: false, by_model: {}, peak_context: 0 },
+    { ok: true, by_model: { a: { input: 2, output: 0, cache_read: 0, cache_creation: 0 } }, peak_context: 5 },
+  ]);
+  assert.deepEqual(Object.keys(merged.by_model), ['a']);
+  assert.equal(merged.by_model.a.input, 2);
+});
+
+test('collectFromFiles merges a real driver subtree across two files', () => {
+  const { subagentsDir } = sessionFixture(SPEC);
+  const r = collectFromFiles(
+    [join(subagentsDir, 'agent-d1.jsonl'), join(subagentsDir, 'agent-k1.jsonl')],
+    {},
+  );
+  assert.equal(r.ok, true);
+  assert.equal(r.by_model['claude-opus-5'].input, 100);
+  assert.equal(r.by_model['claude-sonnet-4-6'].input, 40);
+});
+
+test('collectFromFiles on an empty list fails with no_usage, never throws', () => {
+  const r = collectFromFiles([], {});
+  assert.equal(r.ok, false);
+  assert.equal(r.error.code, 'no_usage');
+});
+
+test('collectForRun in subtree mode stamps a non-empty by_model from the subtree', () => {
+  const { subagentsDir } = sessionFixture(SPEC);
+  const { tokens_directional, note, via } = collectForRun({
+    mode: 'subtree', subagentsDir, agentId: 'd1',
+    modelTierMap: { 'claude-opus-5': 'HIGH', 'claude-sonnet-4-6': 'MID' },
+  });
+  assert.equal(note, null);
+  assert.equal(tokens_directional.complete, true);
+  assert.equal(via, 'subtree');
+  assert.deepEqual(Object.keys(tokens_directional.by_model).sort(), ['claude-opus-5', 'claude-sonnet-4-6']);
 });
