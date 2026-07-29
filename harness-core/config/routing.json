@@ -28,15 +28,33 @@
   "advisory_open_score": 0.9,
   "anomalies": { "outlier_multiple": 3, "min_samples": 3, "recent_limit": 50 },
   "tier_prices_usd_per_mtok": {
-    "LOW": { "in": 1, "out": 5, "cache_read": 0.1, "cache_write": 1.25 },
-    "MID": { "in": 3, "out": 15, "cache_read": 0.3, "cache_write": 3.75 },
-    "HIGH": { "in": 5, "out": 25, "cache_read": 0.5, "cache_write": 6.25 }
+    "LOW": { "in": 1, "out": 5, "cache_read": 0.1, "cache_write": 1.25, "cache_write_1h": 2 },
+    "MID": { "in": 3, "out": 15, "cache_read": 0.3, "cache_write": 3.75, "cache_write_1h": 6 },
+    "HIGH": { "in": 5, "out": 25, "cache_read": 0.5, "cache_write": 6.25, "cache_write_1h": 10 }
+  },
+  "model_prices_usd_per_mtok": {
+    "claude-opus-5": { "in": 5, "out": 25, "cache_read": 0.5, "cache_write": 6.25, "cache_write_1h": 10 },
+    "claude-opus-4-8": { "in": 5, "out": 25, "cache_read": 0.5, "cache_write": 6.25, "cache_write_1h": 10 },
+    "claude-opus-4-7": { "in": 5, "out": 25, "cache_read": 0.5, "cache_write": 6.25, "cache_write_1h": 10 },
+    "claude-opus-4-6": { "in": 5, "out": 25, "cache_read": 0.5, "cache_write": 6.25, "cache_write_1h": 10 },
+    "claude-opus-4-5": { "in": 5, "out": 25, "cache_read": 0.5, "cache_write": 6.25, "cache_write_1h": 10 },
+    "claude-opus-4-1": { "in": 15, "out": 75, "cache_read": 1.5, "cache_write": 18.75, "cache_write_1h": 30 },
+    "claude-opus-4-0": { "in": 15, "out": 75, "cache_read": 1.5, "cache_write": 18.75, "cache_write_1h": 30 },
+    "claude-fable-5": { "in": 10, "out": 50, "cache_read": 1, "cache_write": 12.5, "cache_write_1h": 20 },
+    "claude-mythos-5": { "in": 10, "out": 50, "cache_read": 1, "cache_write": 12.5, "cache_write_1h": 20 },
+    "claude-sonnet-5": { "in": 2, "out": 10, "cache_read": 0.2, "cache_write": 2.5, "cache_write_1h": 4, "introductory_until": "2026-08-31", "standard_after": { "in": 3, "out": 15, "cache_read": 0.3, "cache_write": 3.75, "cache_write_1h": 6 } },
+    "claude-sonnet-4-6": { "in": 3, "out": 15, "cache_read": 0.3, "cache_write": 3.75, "cache_write_1h": 6 },
+    "claude-sonnet-4-5": { "in": 3, "out": 15, "cache_read": 0.3, "cache_write": 3.75, "cache_write_1h": 6 },
+    "claude-sonnet-4-0": { "in": 3, "out": 15, "cache_read": 0.3, "cache_write": 3.75, "cache_write_1h": 6 },
+    "claude-haiku-4-5": { "in": 1, "out": 5, "cache_read": 0.1, "cache_write": 1.25, "cache_write_1h": 2 },
+    "<synthetic>": { "in": 0, "out": 0, "cache_read": 0, "cache_write": 0, "cache_write_1h": 0 }
   },
   "price_table": {
-    "version": "2026-07-28.1",
-    "source_url": "https://docs.claude.com/en/docs/about-claude/pricing",
-    "retrieved": "2026-07-28",
-    "note": "Tier-level list rates for the tier_models aliases (haiku/sonnet/opus). in/out are combined-direction bounds; cache_read/cache_write are the standard cache multipliers of the input rate (read ~0.1x, 5-minute write ~1.25x). Reference data for read-time consumers only — the harness stores raw token counts and computes no dollars; tokens_by_tier holds in+out totals so it supports only a lo/hi range, while directional per-model sums (tokens_directional) can be priced to a point via model_id_to_tier. Bump version on any rate/column change so historical records stay re-priceable. '<synthetic>' is not a billable model; it is mapped to the cheapest tier so no-model assistant entries stop forcing tokens_directional.complete:false, and it carries no cost meaning."
+    "version": "2026-07-29.1",
+    "source_url": "https://platform.claude.com/docs/en/about-claude/pricing",
+    "retrieved": "2026-07-29",
+    "billing_assumption": "First-party Claude API, standard (non-batch) list rates, inference_geo global (no 1.1x data-residency multiplier), fast mode off. Batch (-50%), fast mode (Opus $10/$50), and US-only residency (1.1x) all stack on top and are NOT reflected here.",
+    "note": "Per-model list rates in model_prices_usd_per_mtok are the authoritative figures — prefer them over tier_prices_usd_per_mtok, which exists only as a fallback bound when a record carries a tier but no model id. The tier fallback CANNOT distinguish models that share a tier at different prices (Sonnet 5 at introductory $2/$10 vs Sonnet 4.6 at $3/$15 are both MID), so tier-priced figures are a range, not a point. Cache columns are multiples of the model's input rate: read 0.1x, 5-minute write 1.25x, 1-hour write 2x. claude-sonnet-5 carries introductory_until/standard_after because its rate steps up on 2026-09-01; price a record by comparing its started_at to that date. The harness stores raw token counts and computes no dollars at write time; read-time consumers price tokens_directional per-model. Bump version on any rate/column change so historical records stay re-priceable. '<synthetic>' is not a billable model — it is mapped to the cheapest tier so no-model assistant entries stop forcing tokens_directional.complete:false, and it is priced at zero here because it carries no cost meaning."
   },
   "model_id_to_tier": {
     "claude-opus-5": "HIGH",
