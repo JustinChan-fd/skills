@@ -30,6 +30,10 @@ const META_RE = /^agent-(.+)\.meta\.json$/;
  */
 export function readAgentTree(subagentsDir) {
   const agents = new Map();
+  // Sidecars we saw and rejected. Only used to phrase the no_metadata detail:
+  // "no sidecars" and "every sidecar is malformed" are different fixes, and the
+  // detail is what a human reads when directional capture came back empty.
+  let unreadable = 0;
   if (!subagentsDir) {
     return { ok: false, agents, error: { code: 'not_found', detail: 'no subagents dir given' } };
   }
@@ -48,9 +52,13 @@ export function readAgentTree(subagentsDir) {
     try {
       raw = JSON.parse(readFileSync(join(subagentsDir, entry.name), 'utf8'));
     } catch {
+      unreadable += 1;
       continue; // A malformed sidecar loses one agent, not the whole tree.
     }
-    if (!raw || typeof raw !== 'object') continue;
+    if (!raw || typeof raw !== 'object') {
+      unreadable += 1;
+      continue;
+    }
     agents.set(id, {
       id,
       agentType: typeof raw.agentType === 'string' ? raw.agentType : null,
@@ -61,7 +69,10 @@ export function readAgentTree(subagentsDir) {
     });
   }
   if (agents.size === 0) {
-    return { ok: false, agents, error: { code: 'no_metadata', detail: `no agent-*.meta.json sidecars in ${subagentsDir}` } };
+    const detail = unreadable > 0
+      ? `all ${unreadable} agent-*.meta.json sidecars in ${subagentsDir} are unreadable or malformed`
+      : `no agent-*.meta.json sidecars in ${subagentsDir}`;
+    return { ok: false, agents, error: { code: 'no_metadata', detail } };
   }
   return { ok: true, agents, error: null };
 }

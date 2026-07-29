@@ -101,6 +101,25 @@ test('a directory with jsonl but no sidecars returns ok:false no_metadata', () =
   const t = readAgentTree(dir);
   assert.equal(t.ok, false);
   assert.equal(t.error.code, 'no_metadata');
+  assert.match(t.error.detail, /no agent-\*\.meta\.json sidecars/);
+});
+
+test('sidecars that are all unreadable say so instead of claiming none exist', () => {
+  // Both routes yield no_metadata, and no consumer branches on a finer code —
+  // resolveTranscripts just passes tree.error through. But the DETAIL is what a
+  // human reads when directional capture came back empty, and "no sidecars in X"
+  // sends them looking for missing files when the files are right there and
+  // malformed. Two very different fixes; the message must not conflate them.
+  const dir = mkdtempSync(join(tmpdir(), 'agent-tree-'));
+  writeFileSync(join(dir, 'agent-z9.meta.json'), '{ this is not json');
+  writeFileSync(join(dir, 'agent-z8.meta.json'), 'also not json');
+  const t = readAgentTree(dir);
+  assert.equal(t.ok, false);
+  assert.equal(t.error.code, 'no_metadata');
+  assert.match(t.error.detail, /2 .*unreadable|unreadable.*2/,
+    `detail must name the unreadable count, got: ${t.error.detail}`);
+  assert.doesNotMatch(t.error.detail, /no agent-\*\.meta\.json sidecars/,
+    'must not claim there are no sidecars when there are two');
 });
 
 test('readAgentTree ignores non-agent files and nested dirs', () => {
