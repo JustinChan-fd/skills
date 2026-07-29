@@ -77,7 +77,7 @@ function collectAndStamp(v, routing) {
   const runDir = v['run-dir'];
   const record = readRecord(runDir);
   const now = new Date();
-  const { tokens_directional, note, source } = collectForRun({
+  const { tokens_directional, note, source, via } = collectForRun({
     transcript: v.transcript,
     mode: v.mode,
     subagentsDir: v['subagents-dir'],
@@ -88,6 +88,10 @@ function collectAndStamp(v, routing) {
     end: v.end ?? record.ended_at ?? now.toISOString(),
     gapCapMs: v['gap-cap-ms'] !== undefined ? Number(v['gap-cap-ms']) : undefined,
     modelTierMap: routing.model_id_to_tier ?? {},
+    // The Agent-tool subagent_tokens tag, when an orchestrator recorded one — the
+    // fingerprint discoverSubagentForRun matches a transcript's peak_context
+    // against. Absent on a plain phase run, which degrades to newest-mtime.
+    observedTotal: record.tokens_observed?.total ?? null,
     now,
   });
   stampTokensDirectional({ runDir, tokensDirectional: tokens_directional });
@@ -99,7 +103,7 @@ function collectAndStamp(v, routing) {
       data: { type: 'tokens', estimated: true, complete: false, reason: note.code, detail: note.detail },
     });
   }
-  return { complete: tokens_directional.complete, degraded: !!note, source };
+  return { complete: tokens_directional.complete, degraded: !!note, source, via };
 }
 
 const TOKENS_COLLECT_OPTS = {

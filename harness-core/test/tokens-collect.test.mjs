@@ -13,6 +13,7 @@ import {
   projectDirForCwd,
   discoverLoopTranscript,
   discoverStandaloneTranscript,
+  resolveTranscript,
 } from '../tools/lib/tokens-collect.mjs';
 
 const fixture = (name) => fileURLToPath(new URL(`./fixtures/${name}`, import.meta.url));
@@ -428,4 +429,92 @@ test('a non-Anthropic vendor id is reported unknown, not silently tiered', () =>
   });
   assert.equal(tokens_directional.complete, false);
   assert.equal(note.code, 'unknown_model');
+});
+
+// ---- resolveTranscript: the peak-context fingerprint on the live collect path ----
+
+// Build a subagents dir with two agent transcripts whose peak single-call context
+// differs, and whose mtimes are set so the NEWER file is the WRONG one for the
+// given fingerprint. Any test using this fixture fails if resolution falls back to
+// mtime, which is exactly the property under test.
+function twoAgentFixture() {
+  const dir = mkdtempSync(join(tmpdir(), 'harness-fp-'));
+  const mk = (name, peak, mtimeSec) => {
+    // One usage line whose input tokens set the transcript's peak_context.
+    // peak_context is contextTotal(usage) — the SUM of all four direction fields,
+    // not input alone — so every other field must be 0 for the peak to equal
+    // `peak` exactly. A stray output_tokens: 1 would make it peak+1.
+    const line = JSON.stringify({
+      timestamp: '2026-07-28T10:00:00.000Z',
+      message: { model: 'claude-opus-4-8', usage: { input_tokens: peak, output_tokens: 0, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 } },
+    });
+    writeFileSync(join(dir, `${name}.jsonl`), line + '\n');
+    writeFileSync(join(dir, `${name}.meta.json`), '{}\n');
+    utimesSync(join(dir, `${name}.jsonl`), mtimeSec, mtimeSec);
+  };
+  // agent-old holds the fingerprint we will match (100000) but is the OLDER file.
+  mk('agent-old', 100000, 1000);
+  // agent-new is newer by mtime and would win on the old code path.
+  mk('agent-new', 500000, 2000);
+  return dir;
+}
+
+test('loop mode prefers the peak-context fingerprint over newest mtime', () => {
+  const dir = twoAgentFixture();
+  const r = resolveTranscript({ mode: 'loop', subagentsDir: dir, observedTotal: 100000 });
+  assert.equal(r.ok, true);
+  // The fingerprint's transcript wins even though agent-new.jsonl is newer. Under
+  // the previous behaviour this resolved to agent-new.jsonl and mis-attributed
+  // one run's tokens to another whenever two runs overlapped.
+  assert.equal(r.path, join(dir, 'agent-old.jsonl'));
+  assert.equal(r.via, 'fingerprint');
+});
+
+test('loop mode falls back to newest mtime when there is no fingerprint to match', () => {
+  const dir = twoAgentFixture();
+  // A phase run has no tokens_observed at all — only a loop tick records one. The
+  // fingerprint must therefore be a PREFERENCE: failing here instead of falling
+  // back would break directional capture for every phase run.
+  for (const observedTotal of [undefined, 0, null]) {
+    const r = resolveTranscript({ mode: 'loop', subagentsDir: dir, observedTotal });
+    assert.equal(r.ok, true, `observedTotal ${observedTotal} should still resolve`);
+    assert.equal(r.path, join(dir, 'agent-new.jsonl'));
+    assert.equal(r.via, 'newest_mtime');
+  }
+});
+
+test('loop mode falls back to newest mtime when the fingerprint matches nothing', () => {
+  const dir = twoAgentFixture();
+  // An observed total far outside FINGERPRINT_BAND of every candidate. Better to
+  // attribute by mtime than to leave by_model empty — an empty stamp is the
+  // failure mode this whole line of work exists to eliminate.
+  const r = resolveTranscript({ mode: 'loop', subagentsDir: dir, observedTotal: 7 });
+  assert.equal(r.ok, true);
+  assert.equal(r.path, join(dir, 'agent-new.jsonl'));
+  assert.equal(r.via, 'newest_mtime');
+});
+
+test('an explicit transcript path still wins over every discovery route', () => {
+  const r = resolveTranscript({ transcript: '/tmp/explicit.jsonl', mode: 'loop', subagentsDir: '/nope', observedTotal: 100000 });
+  assert.equal(r.path, '/tmp/explicit.jsonl');
+  assert.equal(r.via, 'explicit');
+});
+
+test('standalone mode is untouched by the fingerprint preference', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'harness-fp-standalone-'));
+  writeFileSync(join(dir, 'session.jsonl'), '\n');
+  // The fingerprint matcher only knows about agent-*.jsonl in a subagents dir;
+  // a standalone run has no such directory, so passing an observedTotal must not
+  // change its resolution.
+  const r = resolveTranscript({ projectDir: dir, observedTotal: 100000 });
+  assert.equal(r.ok, true);
+  assert.equal(r.path, join(dir, 'session.jsonl'));
+  assert.equal(r.via, 'newest_mtime');
+});
+
+test('a loop-mode resolve with no subagents dir still reports a structured failure', () => {
+  const r = resolveTranscript({ mode: 'loop', observedTotal: 100000 });
+  assert.equal(r.ok, false);
+  assert.equal(r.path, null);
+  assert.equal(r.error.code, 'not_found');
 });

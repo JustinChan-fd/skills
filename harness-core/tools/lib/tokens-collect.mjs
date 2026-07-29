@@ -305,20 +305,42 @@ export function discoverStandaloneTranscript(projectDir) {
 /**
  * Resolve which transcript to read for a run:
  *  - explicit `transcript` path wins;
- *  - `mode: "loop"` uses the given `subagentsDir` (newest agent-*.jsonl);
+ *  - `mode: "loop"` prefers the peak-context fingerprint match against
+ *    `observedTotal`, falling back to the newest agent-*.jsonl in `subagentsDir`;
  *  - otherwise standalone: the newest top-level .jsonl in `projectDir`, or in
  *    the project dir derived from `cwd` when `projectDir` is not given.
- * Returns a discovery result `{ ok, path, error }`.
+ *
+ * The fingerprint is a PREFERENCE, not a requirement. `discoverSubagentForRun`
+ * needs a positive `tokens_observed.total` to match against, and only a loop tick
+ * has one (recorded by record-observed-tokens in loop step 6, before run-end in
+ * step 7) — a plain phase run has none. Failing without a fingerprint would break
+ * directional capture for every phase run, so a missing or unmatched fingerprint
+ * degrades to newest-mtime rather than to nothing.
+ *
+ * Why prefer it at all: newest-mtime is only correct while exactly one run is in
+ * flight. With two overlapping runs the newest file belongs to whichever sibling
+ * wrote last, and a run gets another run's tokens. The fingerprint is an identity
+ * check, so it stays correct under overlap.
+ *
+ * Returns a discovery result `{ ok, path, error, via }`, where `via` is
+ * 'explicit' | 'fingerprint' | 'newest_mtime' — provenance for the CLI's output.
+ * It is NOT written to the run record: run-record.schema.json's
+ * tokens_directional subschema is additionalProperties:false.
  */
-export function resolveTranscript({ transcript, mode, subagentsDir, projectDir, cwd, home } = {}) {
-  if (transcript) return { ok: true, path: transcript, error: null };
+export function resolveTranscript({ transcript, mode, subagentsDir, projectDir, cwd, home, observedTotal } = {}) {
+  if (transcript) return { ok: true, path: transcript, error: null, via: 'explicit' };
   if (mode === 'loop') {
-    if (!subagentsDir) return { ok: false, path: null, error: { code: 'not_found', detail: 'loop mode requires a subagents dir' } };
-    return discoverLoopTranscript(subagentsDir);
+    if (!subagentsDir) return { ok: false, path: null, error: { code: 'not_found', detail: 'loop mode requires a subagents dir' }, via: null };
+    if (Number.isFinite(observedTotal) && observedTotal > 0) {
+      const fingerprinted = discoverSubagentForRun({ subagentsDir, observedTotal });
+      if (fingerprinted.ok) return { ...fingerprinted, via: 'fingerprint' };
+      // no_fingerprint / not_found both fall through to mtime, deliberately.
+    }
+    return { ...discoverLoopTranscript(subagentsDir), via: 'newest_mtime' };
   }
   const dir = projectDir ?? (cwd ? projectDirForCwd(cwd, { home }) : null);
-  if (!dir) return { ok: false, path: null, error: { code: 'not_found', detail: 'no project dir or cwd to discover a standalone transcript' } };
-  return discoverStandaloneTranscript(dir);
+  if (!dir) return { ok: false, path: null, error: { code: 'not_found', detail: 'no project dir or cwd to discover a standalone transcript' }, via: null };
+  return { ...discoverStandaloneTranscript(dir), via: 'newest_mtime' };
 }
 
 /**
@@ -391,13 +413,13 @@ export function buildTokensDirectional({ result, modelTierMap = {}, now = new Da
  * every failure mode routes through `buildTokensDirectional` and degrades to an
  * estimated-with-note result.
  */
-export function collectForRun({ transcript, mode, subagentsDir, projectDir, cwd, home, start, end, gapCapMs, modelTierMap, now = new Date() } = {}) {
-  const resolved = resolveTranscript({ transcript, mode, subagentsDir, projectDir, cwd, home });
+export function collectForRun({ transcript, mode, subagentsDir, projectDir, cwd, home, start, end, gapCapMs, modelTierMap, observedTotal, now = new Date() } = {}) {
+  const resolved = resolveTranscript({ transcript, mode, subagentsDir, projectDir, cwd, home, observedTotal });
   const result = resolved.ok
     ? collectFromFile(resolved.path, { start, end, gapCapMs })
     : { ok: false, by_model: {}, error: resolved.error };
   const built = buildTokensDirectional({ result, modelTierMap, now });
-  return { ...built, source: resolved.ok ? resolved.path : null, result };
+  return { ...built, source: resolved.ok ? resolved.path : null, via: resolved.via ?? null, result };
 }
 
 /**
