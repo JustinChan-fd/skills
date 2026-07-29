@@ -311,11 +311,24 @@ export function discoverStandaloneTranscript(projectDir) {
  *    the project dir derived from `cwd` when `projectDir` is not given.
  *
  * The fingerprint is a PREFERENCE, not a requirement. `discoverSubagentForRun`
- * needs a positive `tokens_observed.total` to match against, and only a loop tick
- * has one (recorded by record-observed-tokens in loop step 6, before run-end in
- * step 7) — a plain phase run has none. Failing without a fingerprint would break
- * directional capture for every phase run, so a missing or unmatched fingerprint
- * degrades to newest-mtime rather than to nothing.
+ * needs a positive `tokens_observed.total` to match against, and failing without
+ * one would break directional capture for every run that has none — so a missing
+ * or unmatched fingerprint degrades to newest-mtime rather than to nothing.
+ *
+ * NOT YET REACHED ON ANY LIVE RUN — see issue #17. Both preconditions are
+ * currently unmet in production, and neither is this function's to fix:
+ *   1. `mode: "loop"` + `subagentsDir`. No skill file passes
+ *      `--mode loop --subagents-dir`; every phase-end/run-end template omits
+ *      them, so live collection falls to standalone and this branch is dead.
+ *   2. `observedTotal > 0`. harness.mjs reads `record.tokens_observed?.total`,
+ *      but per harness-loop-core/SKILL.md the orchestrator runs
+ *      record-observed-tokens against a driver's run dir only AFTER that driver
+ *      returns — and the driver already ran its own run-end (hence its own
+ *      collect) before returning. So no run has tokens_observed at its own
+ *      collect time, and the loop's own LOOP_RUN_DIR never gets one at all.
+ * Until both are addressed the fingerprint is reachable only by an explicit CLI
+ * `tokens-collect --mode loop --subagents-dir` invocation. The plumbing below is
+ * tested and correct; do not read it as evidence that the live path uses it.
  *
  * Why prefer it at all: newest-mtime is only correct while exactly one run is in
  * flight. With two overlapping runs the newest file belongs to whichever sibling
