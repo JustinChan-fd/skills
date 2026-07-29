@@ -2,10 +2,14 @@
 name: harness-loop-core
 description: >-
   One tick of the autonomous harness loop (Node-CLI spine) — recover any
-  stranded run, pick the lowest open Jira issue without a delivered PR, and
+  stranded run, pick the lowest open issue without a delivered PR, and
   drive the full intake→plan→implement pipeline on it with fresh-context
   drivers at pinned model tiers. Use when the user says "harness loop", "run
-  the loop", "loop tick", or from a scheduled session. Safe to invoke
+  the loop", "loop tick", "tick <repo>", or names a repo and/or a ticket to
+  work on ("run the loop on jarvis", "tick jarvis issue 4", "do TARS-1272"),
+  or from a scheduled session. Reads its target repo and an optional pinned
+  work item from free-form invocation text; given neither, ticks the default
+  repo's lowest actionable issue. Safe to invoke
   repeatedly: a tick with nothing to do is a no-op.
 ---
 
@@ -55,15 +59,54 @@ Let `CLI` = `node ~/.claude/skills/harness-core/tools/harness.mjs`.
 
 ## Tick workflow
 
-**1. Resolve the target repo AND its issue source** from the invocation
-argument (alias in `~/.claude/skills/harness-core/config/user.json` `repos`
-registry, or a path), else `defaultRepo`. No target resolvable → report and
-stop. Read the resolved repo's `issue_source` from that same registry — it is
-`jira` or `github` (unset defaults to `jira`; the CLI helper `issueSourceFor`
-encodes this). For a `github` repo, also read its `github` field (the
-`owner/repo` slug). This `ISSUE_SOURCE` (and `GITHUB_SLUG` when github) governs
-step 4's pick-work-item, the driver prompts' input shape, and every
-status-comment sink — pass it into every driver prompt.
+**0. Extract hints, then let the CLI resolve them.** Your invocation may carry
+free-form text rather than positional flags — `/harness-loop-core jarvis`, `run
+the loop on jarvis`, `tick jarvis issue 4`, `do TARS-1272`, or nothing at all.
+
+Your ONLY interpretive job here is to pull at most two loose strings out of that
+text and treat everything else in it as commentary:
+
+- **`hint`** — the repo, if one is named. Pass the substring verbatim; it may be
+  a registry alias, a Jira key, or a path. Don't normalize it.
+- **`item`** — the work item, if one is named: `TARS-1272`, `#4`, `issue 4`, or
+  a bare `4`. Pass it verbatim too.
+
+Then hand both to the resolver and obey what it says:
+
+    CLI resolve-target [--hint "<hint>"] [--item "<item>"] --cwd "$(pwd)"
+
+Omit a flag entirely when the text carried no such hint. **You do not resolve
+aliases, apply defaults, decide Jira-vs-GitHub, or look up a cloud id
+yourself** — that is the resolver's job, composed from `user.json`'s
+`repos`/`defaultRepo` and `projects.json`'s `projects`, and it is deterministic
+so two identical invocations cannot route differently. The envelope it prints is
+your routing table for the whole tick:
+
+| Field | Use |
+|---|---|
+| `path` | `<target>` in every later step |
+| `alias` | the repo's registry name (`null` for a Jira-only repo) |
+| `issue_source` | `ISSUE_SOURCE` — `jira` or `github` |
+| `github` | `GITHUB_SLUG` (`owner/repo`) when `issue_source` is `github` |
+| `cloud_id`, `project_key` | Jira routing when `issue_source` is `jira` |
+| `pinned_issue` | the pinned work item, or `null` — see step 4 |
+| `resolved_from` | provenance: how the target was decided |
+
+**Exit 1 means STOP and report the error verbatim.** Do not retry with a
+different guess and do not substitute a default repo — the resolver already
+refuses to fall back to `defaultRepo` for a named-but-unresolvable hint,
+because silently ticking a repo the user did not name is the worst available
+outcome. Undo nothing else; you have taken no lock yet.
+
+Echo one line before doing any work, so a reader of the transcript can see what
+was decided: `target: <path> (issue_source=<src>, via=<resolved_from>), work
+item: <pinned_issue or "lowest actionable">`.
+
+**1. Carry the envelope forward.** `ISSUE_SOURCE` (and `GITHUB_SLUG` when
+github) governs step 4's pick-work-item, the driver prompts' input shape, and
+every status-comment sink — pass it into every driver prompt. Nothing later in
+this tick re-resolves the target or re-reads the registry: step 0's envelope is
+the single answer.
 
 **2. Take the lock.** If `<target>/.harness/loop.lock` exists and its mtime
 is under 2 hours old → another tick is mid-pipeline: report "tick skipped:
@@ -80,15 +123,31 @@ so ensure it first, then write the lock:
 
     CLI sweep --target <target>
 
-**4. Pick the work item.** List the target's open issues ascending by number,
+**4. Pick the work item.**
+
+**If step 0 pinned a work item, skip the listing entirely.** Run
+`CLI loop-state --target <target> --issue <PINNED_ID>` and act on it directly:
+`next` == `done` → report "already delivered, nothing to do", append the no-op
+loop line (step 7), remove the lock, stop. Any other `next` → that is your
+phase. A pinned item is an explicit instruction and OVERRIDES the
+lowest-actionable scan, including skipping over lower-numbered actionable
+issues. Do not verify the pin against the issue tracker first — `loop-state` is
+the authority, and a pinned id that does not exist upstream will surface as a
+failure in the phase that needs it, with a real error rather than a guess. One
+exception, because a stranded run outranks any pin: if step 3 found a stranded
+run for a DIFFERENT item, finish that recovery first as it already directs, then
+report that the pin was deferred rather than silently dropping it.
+
+**Otherwise (no pin), scan for the lowest actionable item.** List the target's
+open issues ascending by number,
 then take the FIRST whose `CLI loop-state --target <target> --issue <ID>`
 reports `next` != `done`. The listing depends on `ISSUE_SOURCE`; `loop-state`
 and everything after it are identical either way (the state derives from
 `record.issue` on disk, which is source-neutral).
 
-- **`ISSUE_SOURCE == jira`:** resolve the project key + cloudId from the target
-  (the `projects.json` prefix whose `repoPath` is this target), then via the
-  Jira MCP:
+- **`ISSUE_SOURCE == jira`:** use the `project_key` and `cloud_id` step 0's
+  envelope already resolved — do NOT re-derive them from `projects.json` here.
+  Then via the Jira MCP:
 
       mcp__atlassian__searchJiraIssuesUsingJql({ cloudId,
         jql: 'project = <KEY> AND statusCategory != Done ORDER BY key ASC',
