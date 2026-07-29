@@ -114,13 +114,13 @@ The path depends on the input's tracker:
     CLI init-run --target <path> --repo <slug> --kind intake --source <source> \
       [--issue <KEY>] [--branch <b>] --repo-path <path> \
       --correlation-id "$CORRELATION_ID" --skills-commit "$SKILLS_COMMIT" \
-      [--parent-run-id <LOOP_RUN_ID> --loop-run-id <LOOP_RUN_ID>]
+      [--parent-run-id <LOOP_RUN_ID>]
 
 Pass `--issue <ID>` for an issue source — the Jira KEY (`TARS-1271`) or the
 GitHub issue NUMBER (`2`); it rides in the record while the slug rides in the
 run-id. `CORRELATION_ID` is `<ID>-<runTs>` either way. Pass
-`--parent-run-id`/`--loop-run-id` ONLY when harness-loop dispatched you (it
-supplies the pipeline tick's run-id); a standalone run leaves them off and
+`--parent-run-id` ONLY when harness-loop dispatched you (it
+supplies the pipeline tick's run-id); a standalone run leaves it off and
 still stamps `correlation_id` so its three phases join. Capture `run_id` and
 `run_dir`. All artifacts go under `run_dir`.
 

@@ -117,7 +117,7 @@ try {
         source: { type: 'string' }, issue: { type: 'string' }, branch: { type: 'string' },
         'routing-policy': { type: 'string' },
         // v2 graft: parent-loop association, cross-phase correlation, provenance.
-        'parent-run-id': { type: 'string' }, 'loop-run-id': { type: 'string' },
+        'parent-run-id': { type: 'string' },
         'correlation-id': { type: 'string' }, 'repo-path': { type: 'string' },
         'skills-commit': { type: 'string' },
       });
@@ -130,7 +130,6 @@ try {
         issue: v.issue ?? null, branch: v.branch ?? null,
         routingPolicy: v['routing-policy'] ?? null,
         parentRunId: v['parent-run-id'] ?? null,
-        loopRunId: v['loop-run-id'], // undefined → mirrors parent (see initRun)
         correlationId: v['correlation-id'] ?? null,
         repoPath: v['repo-path'] ?? null,
         skillsCommit: v['skills-commit'] ?? null,
@@ -236,7 +235,7 @@ try {
       const v = opts({
         target: { type: 'string' }, 'run-dir': { type: 'string' }, status: { type: 'string' },
         'reason-code': { type: 'string' }, 'reason-detail': { type: 'string' },
-        'tokens-by-tier': { type: 'string' }, cost: { type: 'string' },
+        'tokens-by-tier': { type: 'string' },
         // v2 graft: active time, per-model/per-phase agent counts, per-skill metrics.
         'active-ms': { type: 'string' }, 'agent-count': { type: 'string' },
         'skill-metrics': { type: 'string' },
@@ -249,8 +248,6 @@ try {
       finalizeRun({
         runDir: v['run-dir'], status: v.status, reason,
         tokensByTier: v['tokens-by-tier'] ? JSON.parse(v['tokens-by-tier']) : null,
-        cost: v.cost !== undefined ? Number(v.cost) : null,
-        prices: routing.tier_prices_usd_per_mtok ?? null,
         billingMode: user.billing_mode ?? null,
         priceTableVersion: routing.price_table?.version ?? null,
         activeMs: v['active-ms'] !== undefined ? Number(v['active-ms']) : null,
@@ -470,7 +467,7 @@ try {
       emit({
         error: `unknown subcommand: ${subcommand ?? '(none)'}`,
         usage: {
-          'init-run': '--target <path> --repo <slug> --kind intake|plan|implement --source issue-<n>|adhoc|file [--issue <n>] [--branch <b>] [--parent-run-id <id>] [--loop-run-id <id>] [--correlation-id <id>] [--repo-path <path>] [--skills-commit <sha>]',
+          'init-run': '--target <path> --repo <slug> --kind intake|plan|implement --source issue-<n>|adhoc|file [--issue <n>] [--branch <b>] [--parent-run-id <id>] [--correlation-id <id>] [--repo-path <path>] [--skills-commit <sha>]',
           'resolve-project': '--issue <KEY-n>  (map a Jira issue key prefix to { repoPath, cloudId } from config/projects.json; exit 1 if unknown)',
           'jira-normalize': '--file <issue.json>  (normalize a saved getJiraIssue response into the neutral intake shape {key,summary,description,issue_type,change_type,parent_key,project_key,input}; exit 1 if malformed)',
           'github-normalize': '--file <issue.json> [--repo <slug>]  (normalize a saved `gh issue view --json number,title,body,labels` response into the SAME neutral intake shape as jira-normalize; --repo becomes project_key; exit 1 if malformed)',
@@ -484,7 +481,7 @@ try {
           'loop-state': '--target <path> --issue <n>  (next pipeline action for an issue: intake|plan|implement|done + stranded run)',
           'residue-scan': '--target <path> --issue <n>  (u1-shaped residue/defect notes for an issue from <target>/.harness/audit.jsonl; { items: [...] }, exit 0 even when empty)',
           'phase-end': '--run-dir <dir> --phase <p> --status <s> [--rounds n] [--score x] [--size S|M|L]',
-          'run-end': '--target <path> --run-dir <dir> --status <s> [--reason-code c --reason-detail d] [--tokens-by-tier json] [--cost usd]',
+          'run-end': '--target <path> --run-dir <dir> --status <s> [--reason-code c --reason-detail d] [--tokens-by-tier json]',
           'render-status-comment': '--phase <p> --status <s> --run-id <id> --next <text> [--size <S|M|L> --size-rationale <text>] [--plan-units <n> --plan-blocking <n>] [--pr-url <url>] [--notes <json-array>]  (print the templates/status-comment.md comment body to stdout)',
           'render-pr-body': '--issue <n> --summary <text> --run-id <id> [--change-type <t>] [--result-rows <json>] [--landing <json>] [--notes <json>]  (print the implement PR body — Closes-#, entry-contract table, landing checklist, run id, Advisory-residue section — to stdout)',
           'render-brief': '--file <path>  (validate a brief JSON against the brief schema and print the rendered seven-item Agent-tool prompt to stdout)',

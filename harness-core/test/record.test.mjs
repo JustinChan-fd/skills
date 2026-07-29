@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { dirname } from 'node:path';
-import { initRun, readRecord, phaseEnd, finalizeRun, recordObservedTokens, stampTokensDirectional, finalizeTokens } from '../tools/lib/record.mjs';
+import { initRun, readRecord, phaseEnd, finalizeRun, recordObservedTokens, stampTokensDirectional, finalizeTokens, writeRecord } from '../tools/lib/record.mjs';
 
 const NOW = new Date('2026-07-24T18:30:12Z');
 
@@ -58,7 +58,7 @@ test('phaseEnd upserts phase and size; finalizeRun sets status and ended_at', ()
   assert.equal(record.phases.length, 1);
   assert.equal(record.phases[0].rounds_used, 3);
   assert.equal(record.size, 'M');
-  record = finalizeRun({ runDir, status: 'succeeded', wallMs: 61000, tokensByTier: { LOW: 100 }, cost: 0.2, now: NOW });
+  record = finalizeRun({ runDir, status: 'succeeded', wallMs: 61000, tokensByTier: { LOW: 100 }, now: NOW });
   assert.equal(record.status, 'succeeded');
   assert.equal(record.ended_at, NOW.toISOString());
 });
@@ -93,32 +93,11 @@ test('finalizeRun computes wall_ms from started_at when not supplied', () => {
   assert.equal(record.wall_ms, 42_000);
 });
 
-test('finalizeRun computes estimated_cost bounds from tokens and a price table', () => {
+test('finalizeRun honors an explicit wallMs and records raw tokens', () => {
   const { runDir } = freshRun();
-  const record = finalizeRun({
-    runDir, status: 'succeeded', now: NOW,
-    tokensByTier: { LOW: 1_000_000, HIGH: 2_000_000 },
-    prices: { LOW: { in: 1, out: 5 }, MID: { in: 3, out: 15 }, HIGH: { in: 5, out: 25 } },
-  });
-  // lo = all-input pricing: 1*1 + 2*5 = 11; hi = all-output: 1*5 + 2*25 = 55; mid = 33
-  assert.deepEqual(record.estimated_cost, { lo: 11, mid: 33, hi: 55 });
-});
-
-test('finalizeRun leaves estimated_cost null when tokens are absent', () => {
-  const { runDir } = freshRun();
-  const record = finalizeRun({
-    runDir, status: 'succeeded', now: NOW,
-    prices: { LOW: { in: 1, out: 5 } },
-  });
-  assert.equal(record.estimated_cost, null);
-});
-
-test('finalizeRun honors an explicit wallMs and records tokens/cost', () => {
-  const { runDir } = freshRun();
-  const record = finalizeRun({ runDir, status: 'succeeded', wallMs: 61_000, tokensByTier: { HIGH: 65_243 }, cost: 0.9, now: NOW });
+  const record = finalizeRun({ runDir, status: 'succeeded', wallMs: 61_000, tokensByTier: { HIGH: 65_243 }, now: NOW });
   assert.equal(record.wall_ms, 61_000);
   assert.equal(record.tokens_by_tier.HIGH, 65_243);
-  assert.equal(record.estimated_cost, 0.9);
 });
 
 test('finalizeRun with structured reason validates against schema', () => {
@@ -152,17 +131,6 @@ test('finalizeRun defaults billing_mode to unknown and price_table_version to nu
   const record = finalizeRun({ runDir, status: 'succeeded', now: NOW });
   assert.equal(record.billing_mode, 'unknown');
   assert.equal(record.price_table_version, null);
-});
-
-test('forced failure: malformed price tables never fail a run finalize', () => {
-  // Constraint: metrics enrichment must never fail the run. Garbage prices of
-  // any shape → run still finalizes, estimated_cost stays null.
-  for (const prices of ['garbage', { MID: 'x' }, { MID: { in: 'x', out: 15 } }, { MID: { in: NaN, out: 15 } }]) {
-    const { runDir } = freshRun();
-    const record = finalizeRun({ runDir, status: 'succeeded', now: NOW, tokensByTier: { MID: 1_000_000 }, prices });
-    assert.equal(record.status, 'succeeded');
-    assert.equal(record.estimated_cost, null);
-  }
 });
 
 test('initRun stamps harness_sha equal to git rev-parse --short HEAD of the harness-core checkout', () => {
@@ -266,15 +234,53 @@ test('recordObservedTokens defaults source to agent_tool_usage_tag', () => {
   assert.equal(record.tokens_observed.source, 'agent_tool_usage_tag');
 });
 
-test('recordObservedTokens does not compute or touch estimated_cost — that stays derived from tokens_by_tier only', () => {
+test('recordObservedTokens introduces no estimated_cost key — the harness stores raw counts only', () => {
   const { runDir } = freshRun();
-  finalizeRun({
-    runDir, status: 'succeeded', tokensByTier: { MID: 1000 }, now: NOW,
-    prices: { MID: { in: 3, out: 15 } },
-  });
-  const before = readRecord(runDir).estimated_cost;
+  finalizeRun({ runDir, status: 'succeeded', tokensByTier: { MID: 1000 }, now: NOW });
+  assert.ok(!('estimated_cost' in readRecord(runDir)));
   const record = recordObservedTokens({ runDir, total: 999_999, tier: 'MID' });
-  assert.deepEqual(record.estimated_cost, before);
+  assert.ok(!('estimated_cost' in record), 'a large observed total must not resurrect cost math');
+  assert.ok(!('estimated_cost' in readRecord(runDir)));
+});
+
+// ---------------------------------------------------------------------------
+// estimated_cost is GONE. It was derived dollars from a price table that goes
+// stale the moment pricing changes, computed off tokens_by_tier — which meant
+// it priced only in/out and silently ignored cache reads and cache creation.
+// On a cache-heavy run that under-counted badly, with nothing in the record to
+// say so. The harness stores raw counts; pricing belongs to the reader.
+// ---------------------------------------------------------------------------
+
+test('initRun does not write an estimated_cost key at all (not even null)', () => {
+  const { runDir } = freshRun();
+  const record = readRecord(runDir);
+  assert.ok(!('estimated_cost' in record), 'estimated_cost must be absent, not null');
+});
+
+test('writeRecord REJECTS a record carrying estimated_cost (schema additionalProperties: false)', async () => {
+  const { runDir } = freshRun();
+  const record = readRecord(runDir);
+  record.estimated_cost = { lo: 11, mid: 33, hi: 55 };
+  assert.throws(
+    () => writeRecord(runDir, record),
+    (err) => err.code === 'invalid_record',
+    'a record with estimated_cost must be refused by the schema',
+  );
+});
+
+test('finalizeRun on a succeeded run writes no estimated_cost key', () => {
+  const { runDir } = freshRun();
+  const record = finalizeRun({ runDir, status: 'succeeded', wallMs: 61_000, tokensByTier: { MID: 1_000_000 }, now: NOW });
+  assert.equal(record.status, 'succeeded');
+  assert.ok(!('estimated_cost' in record));
+  assert.ok(!('estimated_cost' in readRecord(runDir)));
+});
+
+test('the string estimated_cost appears nowhere in a finalized record.json', () => {
+  const { runDir } = freshRun();
+  finalizeRun({ runDir, status: 'succeeded', tokensByTier: { LOW: 100, HIGH: 2_000_000 }, now: NOW });
+  const raw = readFileSync(join(runDir, 'record.json'), 'utf8');
+  assert.ok(!raw.includes('estimated_cost'), 'no cost field should be serialized to disk');
 });
 
 test('recordObservedTokens clears a prior synced_at so the enriched record is picked up for re-sync', () => {

@@ -6,7 +6,6 @@
   "properties": {
     "run_id": { "type": "string" },
     "parent_run_id": { "type": ["string", "null"] },
-    "loop_run_id": { "type": ["string", "null"] },
     "correlation_id": { "type": ["string", "null"] },
     "repo": { "type": "string" },
     "repo_path": { "type": ["string", "null"] },
@@ -81,22 +80,6 @@
       }
     },
     "skill_metrics": { "type": ["object", "null"] },
-    "estimated_cost": {
-      "anyOf": [
-        { "type": "number" },
-        { "type": "null" },
-        {
-          "type": "object",
-          "required": ["lo", "mid", "hi"],
-          "additionalProperties": false,
-          "properties": {
-            "lo": { "type": "number" },
-            "mid": { "type": "number" },
-            "hi": { "type": "number" }
-          }
-        }
-      ]
-    },
     "emit_trigger": { "enum": ["workflow", "sweep", null] },
     "billing_mode": { "enum": ["api", "subscription", "unknown", null] },
     "price_table_version": { "type": ["string", "null"] },

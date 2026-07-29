@@ -13,7 +13,6 @@ import { loadSchema, validate } from '../tools/lib/validate.mjs';
 const v2Record = {
   run_id: '2026-07-24T183012Z__myapp__intake__issue-123__a3f9c1',
   parent_run_id: '2026-07-24T183000Z__myapp__pipeline__issue-123__ff0011',
-  loop_run_id: '2026-07-24T183000Z__myapp__pipeline__issue-123__ff0011',
   correlation_id: 'TARS-1271-20260724T183012Z',
   repo: 'myapp',
   repo_path: '/Users/x/Desktop/Repos/myapp',
@@ -33,7 +32,6 @@ const v2Record = {
   active_ms: 41000,
   agent_count: { by_model: { 'claude-haiku-4-5-20251001': 20 }, by_phase: { Intake: 3 } },
   skill_metrics: { intakeManifestPath: 'docs/x.json', size_from_intake: 'XS', splitRequired: false },
-  estimated_cost: 0.5,
   started_at: '2026-07-24T18:30:12Z',
   ended_at: '2026-07-24T18:31:12Z',
   synced_at: null,
@@ -52,8 +50,8 @@ test('run-record v2: schema_version accepts 2.0.0', () => {
   assert.deepEqual(validate(loadSchema('run-record'), { ...v2Record, schema_version: '2.0.0' }), []);
 });
 
-test('run-record v2: loop_run_id and correlation_id may be null (standalone run)', () => {
-  const standalone = { ...v2Record, parent_run_id: null, loop_run_id: null, correlation_id: 'TARS-1271-20260724T183012Z' };
+test('run-record v2: correlation_id may be set on a standalone run with no parent', () => {
+  const standalone = { ...v2Record, parent_run_id: null, correlation_id: 'TARS-1271-20260724T183012Z' };
   assert.deepEqual(validate(loadSchema('run-record'), standalone), []);
 });
 
@@ -66,7 +64,6 @@ test('run-record v2: a legacy 1.5.0 record (no v2 fields) still validates', () =
   // Backward compatibility: the grafted fields are all optional, so records
   // written by the POC before the graft keep validating unchanged.
   const legacy = { ...v2Record, schema_version: '1.5.0' };
-  delete legacy.loop_run_id;
   delete legacy.correlation_id;
   delete legacy.repo_path;
   delete legacy.skills_commit;

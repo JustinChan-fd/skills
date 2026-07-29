@@ -44,7 +44,6 @@ test('init-run stamps the v2 association + provenance flags onto the record', ()
   assert.equal(init.code, 0);
   const r = readRecord(init.out.run_dir);
   assert.equal(r.parent_run_id, 'LOOP_RUN_ID');
-  assert.equal(r.loop_run_id, 'LOOP_RUN_ID');
   assert.equal(r.correlation_id, 'TARS-1271-20260727T090000Z');
   assert.equal(r.repo_path, '/Users/x/Desktop/Repos/webtarsthree');
   assert.equal(r.skills_commit, 'abc1234');

@@ -17,7 +17,6 @@ const validRecord = {
   phases: [{ phase: 'intake', status: 'succeeded', rounds_used: 2, verifier_score: 0.9, reason: null }],
   tokens_by_tier: { LOW: 1000, MID: 5000 },
   wall_ms: 60000,
-  estimated_cost: 0.5,
   started_at: '2026-07-24T18:30:12Z',
   ended_at: '2026-07-24T18:31:12Z',
   synced_at: null,

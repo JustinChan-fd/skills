@@ -31,7 +31,6 @@ function makeRecord(over = {}) {
     phases: [{ phase: 'intake', status: 'succeeded', rounds_used: 1, verifier_score: 1, ended_at: '2026-07-25T00:01:00Z', wall_ms: 60000 }],
     tokens_by_tier: { MID: 25000 },
     wall_ms: 60000,
-    estimated_cost: null,
     started_at: '2026-07-25T00:00:00Z',
     ended_at: '2026-07-25T00:01:00Z',
     ...over,
@@ -132,17 +131,23 @@ test('estimated-token notes are flagged; platform-reported notes are not', () =>
   assert.deepEqual(checksFor(r, structuredFalse.run_id), []);
 });
 
-test('wall and cost outliers vs the same repo+kind median are flagged', () => {
+test('wall outliers vs the same repo+kind median are flagged', () => {
   const dir = scaffold();
-  const a = makeRecord({ wall_ms: 100000, estimated_cost: { lo: 1, mid: 2, hi: 3 } });
-  const b = makeRecord({ wall_ms: 110000, estimated_cost: { lo: 1, mid: 2.2, hi: 3 } });
-  const c = makeRecord({ wall_ms: 900000, estimated_cost: { lo: 5, mid: 30, hi: 60 } });
+  const a = makeRecord({ wall_ms: 100000 });
+  const b = makeRecord({ wall_ms: 110000 });
+  const c = makeRecord({ wall_ms: 900000 });
   for (const rec of [a, b, c]) writeRun(dir, rec);
   const r = scanAnomalies({ dir, routing: ROUTING });
   assert.ok(checksFor(r, c.run_id).includes('wall_outlier'));
-  assert.ok(checksFor(r, c.run_id).includes('cost_outlier'));
   assert.ok(!checksFor(r, a.run_id).includes('wall_outlier'));
-  assert.ok(!checksFor(r, b.run_id).includes('cost_outlier'));
+  assert.ok(!checksFor(r, b.run_id).includes('wall_outlier'));
+  // No cost rule exists any more. estimated_cost was derived dollars computed
+  // off tokens_by_tier, which meant it priced in/out only and ignored cache
+  // reads entirely — so a cache-heavy run was under-counted with nothing in the
+  // record saying so. Cost outliers belong to whoever prices the raw tokens.
+  for (const rec of [a, b, c]) {
+    assert.ok(!checksFor(r, rec.run_id).some((c2) => c2.includes('cost')));
+  }
 });
 
 test('outliers are not judged below min_samples', () => {

@@ -147,9 +147,8 @@ three phase runs together on the dashboard:
 Capture its `run_id` as `LOOP_RUN_ID` and its `run_dir` as `LOOP_RUN_DIR` (you
 finalize it in step 7), and reuse the SAME `CORRELATION_ID` (`<KEY>-<runTs>`,
 generated once here) for every phase. Pass BOTH into every driver's `init-run` (via the prompt's input):
-`--parent-run-id <LOOP_RUN_ID> --loop-run-id <LOOP_RUN_ID> --correlation-id
-<CORRELATION_ID>`. That is what makes `parent_run_id`/`loop_run_id`/
-`correlation_id` join the intake, plan, and implement records under this tick.
+`--parent-run-id <LOOP_RUN_ID> --correlation-id
+<CORRELATION_ID>`. That is what makes `parent_run_id`/`correlation_id` join the intake, plan, and implement records under this tick.
 Finalize the pipeline run in step 7 (`CLI run-end` with the tick's outcome).
 
 - If `loop-state` reported a `stranded` run for this issue, the FIRST
@@ -333,7 +332,7 @@ the table):
 > 2. Execute it step by step, exactly, with this input: <work-item id (Jira KEY
 >    e.g. TARS-1271, or GitHub issue number e.g. 2) | upstream run id and its
 >    artifact paths>. When you call `CLI init-run`, pass `--parent-run-id
->    <LOOP_RUN_ID> --loop-run-id <LOOP_RUN_ID> --correlation-id
+>    <LOOP_RUN_ID> --correlation-id
 >    <CORRELATION_ID>` (values below) so this phase joins the tick's pipeline
 >    run.
 > 3. The target repo is <target path> (alias <alias> in

@@ -36,7 +36,7 @@
     "version": "2026-07-28.1",
     "source_url": "https://docs.claude.com/en/docs/about-claude/pricing",
     "retrieved": "2026-07-28",
-    "note": "Tier-level list rates for the tier_models aliases (haiku/sonnet/opus). in/out are combined-direction bounds; cache_read/cache_write are the standard cache multipliers of the input rate (read ~0.1x, 5-minute write ~1.25x). tokens_by_tier holds in+out totals, so estimated_cost stays a lo/mid/hi range; directional per-model sums (tokens_directional) can collapse that range to a point via model_id_to_tier. Bump version on any rate/column change so historical records stay re-priceable. '<synthetic>' is not a billable model; it is mapped to the cheapest tier so no-model assistant entries stop forcing tokens_directional.complete:false, and it carries no cost meaning."
+    "note": "Tier-level list rates for the tier_models aliases (haiku/sonnet/opus). in/out are combined-direction bounds; cache_read/cache_write are the standard cache multipliers of the input rate (read ~0.1x, 5-minute write ~1.25x). Reference data for read-time consumers only — the harness stores raw token counts and computes no dollars; tokens_by_tier holds in+out totals so it supports only a lo/hi range, while directional per-model sums (tokens_directional) can be priced to a point via model_id_to_tier. Bump version on any rate/column change so historical records stay re-priceable. '<synthetic>' is not a billable model; it is mapped to the cheapest tier so no-model assistant entries stop forcing tokens_directional.complete:false, and it carries no cost meaning."
   },
   "model_id_to_tier": {
     "claude-opus-5": "HIGH",

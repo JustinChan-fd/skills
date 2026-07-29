@@ -14,12 +14,6 @@ function median(values) {
   return sorted.length % 2 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
 }
 
-function costMid(cost) {
-  if (typeof cost === 'number') return cost;
-  if (cost && typeof cost.mid === 'number') return cost.mid;
-  return null;
-}
-
 export function readEvents(path) {
   if (!existsSync(path)) return null;
   return readFileSync(path, 'utf8')
@@ -135,9 +129,12 @@ function outlierChecks({ records, cfg, findings }) {
   }
   for (const group of groups.values()) {
     if (group.length < cfg.min_samples) continue;
+    // Cost outliers are gone with estimated_cost: the harness stores raw token
+    // counts, so "is this run unusually expensive" is a question for whoever
+    // prices them (the dashboard, an aggregation query), where the price table
+    // is current and cache reads are priced instead of silently ignored.
     for (const [check, valueOf] of [
       ['wall_outlier', (r) => (typeof r.wall_ms === 'number' ? r.wall_ms : null)],
-      ['cost_outlier', (r) => costMid(r.estimated_cost)],
     ]) {
       const values = group.map(valueOf).filter((v) => v !== null);
       if (values.length < cfg.min_samples) continue;

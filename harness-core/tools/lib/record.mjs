@@ -35,10 +35,11 @@ export function harnessSha(dir = HARNESS_CORE_DIR) {
 
 export function initRun({ targetDir, repo, kind, source, issue = null, branch = null, routingPolicy = null, now = new Date(), shaDir = undefined,
   // v2 graft: parent-loop association + cross-phase correlation + provenance.
-  // parentRunId is the loop tick's run-id (the pipeline record); loopRunId
-  // mirrors it by default so a loop-driven phase joins its tick without the
-  // caller stamping the same id twice. All null for a standalone hand-run.
-  parentRunId = null, loopRunId = undefined, correlationId = null, repoPath = null, skillsCommit = null }) {
+  // parentRunId is the loop tick's run-id (the pipeline record) — that single id
+  // is what joins a loop-driven phase to its tick. All null for a standalone
+  // hand-run. (A loop_run_id field used to mirror parentRunId here; it had no
+  // reader and was dropped — parent_run_id is the join key.)
+  parentRunId = null, correlationId = null, repoPath = null, skillsCommit = null }) {
   // The issue number is already encoded in an issue-N source — derive it so
   // the record never carries issue: null for an issue-sourced run.
   if (issue === null && /^issue-\d+$/.test(source)) issue = source.slice('issue-'.length);
@@ -50,7 +51,6 @@ export function initRun({ targetDir, repo, kind, source, issue = null, branch = 
   const record = {
     run_id: runId,
     parent_run_id: parentRunId,
-    loop_run_id: loopRunId === undefined ? parentRunId : loopRunId,
     correlation_id: correlationId,
     repo,
     repo_path: repoPath,
@@ -70,7 +70,6 @@ export function initRun({ targetDir, repo, kind, source, issue = null, branch = 
     active_ms: null,
     agent_count: null,
     skill_metrics: null,
-    estimated_cost: null,
     started_at: now.toISOString(),
     ended_at: null,
     synced_at: null,
@@ -177,29 +176,7 @@ export function phaseEnd({ runDir, phase, status, rounds = null, score = null, r
   return record;
 }
 
-// USD per million tokens. tokens_by_tier holds combined (in+out) counts, so
-// the honest answer is a range: lo prices everything as input, hi as output,
-// mid is their midpoint. Better bounds arrive when per-direction counts do.
-export function estimateCost(tokensByTier, prices) {
-  if (!tokensByTier || !prices) return null;
-  // Metrics enrichment must never fail a run: a malformed price table (wrong
-  // shape, non-numeric rates) yields null, not a throw or a NaN in the record.
-  const usable = ([tier, n]) =>
-    n > 0 && Number.isFinite(prices?.[tier]?.in) && Number.isFinite(prices?.[tier]?.out);
-  const tiers = Object.entries(tokensByTier).filter(usable);
-  if (!tiers.length) return null;
-  let lo = 0;
-  let hi = 0;
-  for (const [tier, n] of tiers) {
-    lo += (n / 1e6) * prices[tier].in;
-    hi += (n / 1e6) * prices[tier].out;
-  }
-  if (!Number.isFinite(lo) || !Number.isFinite(hi)) return null;
-  const round = (x) => Math.round(x * 10000) / 10000;
-  return { lo: round(lo), mid: round((lo + hi) / 2), hi: round(hi) };
-}
-
-export function finalizeRun({ runDir, status, reason = null, wallMs = null, tokensByTier = null, cost = null, prices = null, billingMode = null, priceTableVersion = null, now = new Date(),
+export function finalizeRun({ runDir, status, reason = null, wallMs = null, tokensByTier = null, billingMode = null, priceTableVersion = null, now = new Date(),
   // v2 graft: active (gap-capped) time beside wall clock, per-skill perf metrics,
   // and agent counts by model/phase. All optional — omitting leaves prior values.
   activeMs = null, agentCount = null, skillMetrics = null }) {
@@ -215,11 +192,6 @@ export function finalizeRun({ runDir, status, reason = null, wallMs = null, toke
   if (agentCount !== null) record.agent_count = agentCount;
   if (skillMetrics !== null) record.skill_metrics = skillMetrics;
   if (tokensByTier) record.tokens_by_tier = tokensByTier;
-  if (cost !== null) record.estimated_cost = cost;
-  else {
-    const estimated = estimateCost(record.tokens_by_tier, prices);
-    if (estimated) record.estimated_cost = estimated;
-  }
   writeRecord(runDir, record);
   appendAudit(harnessDirOf(runDir), { ts: now.toISOString(), run_id: record.run_id, event: 'run_end', data: { status, wall_ms: record.wall_ms } });
   return record;
