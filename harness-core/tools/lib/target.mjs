@@ -18,12 +18,15 @@ const JIRA_KEY = /^[A-Za-z][A-Za-z0-9]*-\d+$/;
 
 // A work-item hint is either a Jira key (kept whole, uppercased) or an issue
 // number (reduced to the bare digits, so `4`, `#4`, and `issue 4` agree).
+// Returns `null` for genuinely absent, and `{bad}` for present-but-unparseable —
+// the caller must NOT conflate them. Silently dropping an item the user named
+// falls through to the lowest-actionable scan and ticks a DIFFERENT item.
 function normalizeItem(item) {
   const raw = (item ?? '').trim();
   if (!raw) return null;
-  if (JIRA_KEY.test(raw)) return raw.toUpperCase();
+  if (JIRA_KEY.test(raw)) return { key: raw.toUpperCase() };
   const num = raw.match(/(\d+)\s*$/);
-  return num ? num[1] : null;
+  return num ? { num: num[1] } : { bad: raw };
 }
 
 // Compare two paths that may differ in home-expansion, trailing slash, or
@@ -61,7 +64,7 @@ function findPrefixByPath(projects, path) {
 // Build the envelope from a resolved path. `alias` and `projectKey` are looked
 // up in whichever config the path did NOT come from, so a target reached by
 // either route carries the other route's metadata when one exists.
-function envelope({ path, alias, projectKey, resolvedFrom, user, projects, defaultCloudId, pinnedIssue }) {
+function envelope({ path, alias, projectKey, resolvedFrom, user, projects, defaultCloudId, itemSpec, fallbackKey }) {
   const resolvedAlias = alias ?? findAliasByPath(user, path);
   const resolvedPrefix = projectKey ?? findPrefixByPath(projects, path);
   // A repo with no registry entry cannot have an issue_source declared. When we
@@ -72,6 +75,29 @@ function envelope({ path, alias, projectKey, resolvedFrom, user, projects, defau
   const cloudId = resolvedPrefix
     ? (projects?.[resolvedPrefix]?.cloudId ?? defaultCloudId ?? null)
     : null;
+
+  // The pinned item can only be finished HERE, because qualifying a bare number
+  // needs the issue source and project key this function just resolved.
+  let pinned = fallbackKey ?? null;
+  if (itemSpec?.bad) {
+    return fail('unresolvable_item',
+      `"${itemSpec.bad}" is not a Jira key or an issue number`);
+  }
+  if (itemSpec?.key) {
+    pinned = itemSpec.key;
+  } else if (itemSpec?.num) {
+    if (issueSource === 'github') {
+      pinned = itemSpec.num;
+    } else if (resolvedPrefix) {
+      // "tick webtarsthree 1272" means TARS-1272. An unqualified number cannot
+      // address Jira, so qualify it rather than pinning something unfetchable.
+      pinned = `${resolvedPrefix}-${itemSpec.num}`;
+    } else {
+      return fail('unresolvable_item',
+        `issue number ${itemSpec.num} needs a Jira project key, and no projects.json prefix maps to ${path}`);
+    }
+  }
+
   return {
     ok: true,
     target: {
@@ -81,7 +107,7 @@ function envelope({ path, alias, projectKey, resolvedFrom, user, projects, defau
       github: resolvedAlias ? (user?.repos?.[resolvedAlias]?.github ?? null) : null,
       cloud_id: cloudId,
       project_key: resolvedPrefix,
-      pinned_issue: pinnedIssue ?? null,
+      pinned_issue: pinned,
       resolved_from: resolvedFrom,
     },
   };
@@ -107,7 +133,7 @@ export function resolveTarget({ hint, item, cwd, user, projects, defaultCloudId 
         alias: aliasKey,
         projectKey: null,
         resolvedFrom: 'hint_alias',
-        pinnedIssue: explicitItem,
+        itemSpec: explicitItem,
       });
     }
 
@@ -125,7 +151,8 @@ export function resolveTarget({ hint, item, cwd, user, projects, defaultCloudId 
         alias: null,
         projectKey: prefix,
         resolvedFrom: 'hint_jira_key',
-        pinnedIssue: explicitItem ?? trimmedHint.toUpperCase(),
+        itemSpec: explicitItem,
+        fallbackKey: trimmedHint.toUpperCase(),
       });
     }
 
@@ -141,7 +168,7 @@ export function resolveTarget({ hint, item, cwd, user, projects, defaultCloudId 
         alias: null,
         projectKey: null,
         resolvedFrom: 'hint_path',
-        pinnedIssue: explicitItem,
+        itemSpec: explicitItem,
       });
     }
 
@@ -162,7 +189,7 @@ export function resolveTarget({ hint, item, cwd, user, projects, defaultCloudId 
         alias: cwdAlias,
         projectKey: null,
         resolvedFrom: 'cwd',
-        pinnedIssue: explicitItem,
+        itemSpec: explicitItem,
       });
     }
   }
@@ -177,7 +204,7 @@ export function resolveTarget({ hint, item, cwd, user, projects, defaultCloudId 
       alias: def,
       projectKey: null,
       resolvedFrom: 'default',
-      pinnedIssue: explicitItem,
+      itemSpec: explicitItem,
     });
   }
   return fail('no_target',

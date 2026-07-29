@@ -43,6 +43,20 @@ test('resolve-target --item pins a github issue number', () => {
   assert.equal(r.out.alias, 'jarvis');
 });
 
+test('a bare number on a jira repo is qualified from the real config', () => {
+  // The real user.json alias path and the real projects.json TARS repoPath are
+  // the same repo, so a bare 1272 is addressable as TARS-1272.
+  const r = run(['resolve-target', '--hint', 'webtarsthree', '--item', '1272']);
+  assert.equal(r.code, 0);
+  assert.equal(r.out.pinned_issue, 'TARS-1272');
+});
+
+test('an unparseable item exits 1 rather than silently dropping the pin', () => {
+  const r = run(['resolve-target', '--hint', 'jarvis', '--item', 'banana']);
+  assert.equal(r.code, 1);
+  assert.match(r.out.error, /unresolvable_item/);
+});
+
 test('an unresolvable hint exits 1 with an error, not a default repo', () => {
   const r = run(['resolve-target', '--hint', 'definitely-not-a-repo']);
   assert.equal(r.code, 1);

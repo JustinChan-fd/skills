@@ -89,14 +89,22 @@ your routing table for the whole tick:
 | `issue_source` | `ISSUE_SOURCE` — `jira` or `github` |
 | `github` | `GITHUB_SLUG` (`owner/repo`) when `issue_source` is `github` |
 | `cloud_id`, `project_key` | Jira routing when `issue_source` is `jira` |
-| `pinned_issue` | the pinned work item, or `null` — see step 4 |
+| `pinned_issue` | the pinned work item, or `null` — see step 4. Already normalized: a bare number on a Jira repo comes back qualified (`1272` → `TARS-1272`), on a GitHub repo it stays a number |
 | `resolved_from` | provenance: how the target was decided |
 
 **Exit 1 means STOP and report the error verbatim.** Do not retry with a
-different guess and do not substitute a default repo — the resolver already
-refuses to fall back to `defaultRepo` for a named-but-unresolvable hint,
-because silently ticking a repo the user did not name is the worst available
-outcome. Undo nothing else; you have taken no lock yet.
+different guess, do not substitute a default repo, and do not proceed with the
+pin dropped. The resolver refuses two things on purpose, both for the same
+reason — working on something the user did not name is worse than doing
+nothing:
+
+- `unresolvable_hint` — the named repo is not an alias, a Jira prefix, or an
+  existing path. It will NOT fall back to `defaultRepo`.
+- `unresolvable_item` — the named work item is not a Jira key or an issue
+  number, or is a bare number on a Jira repo with no project key to qualify it.
+  It will NOT drop the pin and scan for the lowest actionable item instead.
+
+Undo nothing else; you have taken no lock yet.
 
 Echo one line before doing any work, so a reader of the transcript can see what
 was decided: `target: <path> (issue_source=<src>, via=<resolved_from>), work

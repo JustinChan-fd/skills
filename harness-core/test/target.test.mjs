@@ -123,6 +123,42 @@ test('an empty item string is treated as absent', () => {
   assert.equal(resolveTarget({ hint: 'jarvis', item: '  ', ...BASE }).target.pinned_issue, null);
 });
 
+test('a bare number on a jira repo is qualified with the project key', () => {
+  // "tick webtarsthree 1272" must not pin the unqualified "1272": Jira has no
+  // such key, and the tick would fetch nothing. Fixture mirrors the REAL
+  // configs, where the alias path and the TARS repoPath are the same repo (the
+  // top-level BASE fixture deliberately keeps them apart for the PIZZA case).
+  const dir = mkdtempSync(join(tmpdir(), 'tgt-'));
+  const repo = join(dir, 'wt3');
+  mkdirSync(repo);
+  const user = { repos: { wt3: { path: repo, issue_source: 'jira' } }, defaultRepo: 'wt3' };
+  const projects = { TARS: { repoPath: repo, cloudId: 'x.atlassian.net' } };
+  const r = resolveTarget({ hint: 'wt3', item: '1272', user, projects, defaultCloudId: null });
+  assert.equal(r.ok, true);
+  assert.equal(r.target.pinned_issue, 'TARS-1272');
+});
+
+test('a bare number on a jira repo with no project key is an error', () => {
+  // Nothing to qualify with, and an unqualified number cannot address Jira.
+  const user = { repos: { orphan: { path: '/tmp', issue_source: 'jira' } }, defaultRepo: 'orphan' };
+  const r = resolveTarget({ hint: 'orphan', item: '7', user, projects: {}, defaultCloudId: null });
+  assert.equal(r.ok, false);
+  assert.equal(r.error.code, 'unresolvable_item');
+});
+
+test('a bare number on a github repo stays a bare number', () => {
+  assert.equal(resolveTarget({ hint: 'jarvis', item: '4', ...BASE }).target.pinned_issue, '4');
+});
+
+test('an unparseable item is an ERROR, never a silent drop', () => {
+  // Dropping it would fall through to the lowest-actionable scan and tick a
+  // DIFFERENT item than the one named — the same failure class as silently
+  // falling back to defaultRepo.
+  const r = resolveTarget({ hint: 'jarvis', item: 'banana', ...BASE });
+  assert.equal(r.ok, false);
+  assert.equal(r.error.code, 'unresolvable_item');
+});
+
 test('no defaultRepo and no hint is no_target', () => {
   const r = resolveTarget({ user: { repos: {} }, projects: {}, defaultCloudId: null });
   assert.equal(r.ok, false);
