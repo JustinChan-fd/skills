@@ -5,6 +5,7 @@ import { execFileSync } from 'node:child_process';
 import { existsSync, mkdirSync, rmdirSync, rmSync, statSync, readdirSync, readFileSync, writeFileSync, renameSync, unlinkSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { readRecord, writeRecord } from './record.mjs';
+import { slugifyRepo } from './runid.mjs';
 
 const FINAL_STATUSES = ['succeeded', 'failed', 'partial', 'cancelled', 'timeout', 'abandoned'];
 
@@ -116,7 +117,12 @@ export function syncRun({ runDir, telemetry, now = new Date(), retries = 3 }) {
     try {
       record = readRecord(runDir);
       const dir = ensureClone({ dir: telemetry.dir, remote: telemetry.remote });
-      const destDir = join(dir, 'log', record.repo);
+      // Slugified, never raw: a repo may arrive owner-qualified
+      // ("Owner-x/myrepo"), and a raw "/" would write a nested dir the
+      // anomalies scan cannot see, split one repo across two dirs, or — with
+      // a "../" — escape log/ altogether. Same normalizer the run-id stem
+      // uses, so dir name and stem always agree.
+      const destDir = join(dir, 'log', slugifyRepo(record.repo));
       mkdirSync(destDir, { recursive: true });
       purgeTempFiles(join(dir, 'log'));
       atomicWrite(join(destDir, `${record.run_id}.json`), readFileSync(join(runDir, 'record.json')));

@@ -1,11 +1,12 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { scanAnomalies } from '../tools/lib/anomalies.mjs';
+import { slugifyRepo } from '../tools/lib/runid.mjs';
 
 const ROUTING = {
   sizes: { S: { revision_cap: 3 }, M: { revision_cap: 5 }, L: { revision_cap: 5 } },
@@ -50,7 +51,8 @@ function skeletonEvents(record) {
 }
 
 function writeRun(dir, record, events = skeletonEvents(record)) {
-  const destDir = join(dir, 'log', record.repo);
+  // Mirrors telemetry.mjs's dest-path derivation, slugification included.
+  const destDir = join(dir, 'log', slugifyRepo(record.repo));
   mkdirSync(destDir, { recursive: true });
   writeFileSync(join(destDir, `${record.run_id}.json`), JSON.stringify(record, null, 2));
   if (events !== null) {
@@ -217,6 +219,43 @@ test('repo filter and limit restrict the scan to the newest matching records', (
   const r = scanAnomalies({ dir, repo: 't', limit: 1, routing: ROUTING });
   assert.equal(r.scanned, 1);
   assert.deepEqual(r.findings, []);
+});
+
+// --repo takes a repo SLUG (per the CLI's own `--repo <slug>` contract), but the
+// scan compared it to the raw directory name. An owner-qualified slug like
+// "JustinChan-fd/jarvis" matched no directory, so the scan examined ZERO records
+// and still reported ok:true — "nothing examined" indistinguishable from
+// "nothing wrong". Both sides are slugified now, so either spelling matches.
+test('repo filter matches an owner-qualified slug against its slugified directory', () => {
+  const dir = scaffold();
+  const rec = makeRecord({ run_id: '2026-07-25T000200Z__justinchan-fd-jarvis__intake__issue-1__qs0001', repo: 'JustinChan-fd/jarvis' });
+  writeRun(dir, rec);
+  for (const spelling of ['JustinChan-fd/jarvis', 'justinchan-fd-jarvis']) {
+    const r = scanAnomalies({ dir, repo: spelling, routing: ROUTING });
+    assert.equal(r.scanned, 1, `--repo ${spelling} should scan the record`);
+  }
+});
+
+// Records written BEFORE the writer flattened slugs sit in a nested dir
+// ("log/JustinChan-fd/jarvis/"). The scan read exactly one level below log/, so
+// those were invisible even unfiltered — the tick the whole cost analysis rests
+// on was among them. The writer no longer creates this shape, but the scan must
+// still read what is already on disk.
+test('legacy nested repo dirs are scanned, and match either spelling of --repo', () => {
+  const dir = scaffold();
+  const rec = makeRecord({ run_id: '2026-07-25T000204Z__justinchan-fd-jarvis__intake__issue-1__lg0001', repo: 'JustinChan-fd/jarvis' });
+  // Deliberately bypass writeRun's slugification to reproduce the old on-disk shape.
+  const nested = join(dir, 'log', 'JustinChan-fd', 'jarvis');
+  mkdirSync(nested, { recursive: true });
+  writeFileSync(join(nested, `${rec.run_id}.json`), JSON.stringify(rec, null, 2));
+  writeFileSync(join(nested, `${rec.run_id}.events.jsonl`), skeletonEvents(rec).map((e) => JSON.stringify(e)).join('\n') + '\n');
+
+  assert.equal(scanAnomalies({ dir, routing: ROUTING }).scanned, 1, 'unfiltered scan must see legacy nested records');
+  for (const spelling of ['JustinChan-fd/jarvis', 'justinchan-fd-jarvis']) {
+    assert.equal(scanAnomalies({ dir, repo: spelling, routing: ROUTING }).scanned, 1, `--repo ${spelling}`);
+  }
+  // A different repo must NOT pick it up.
+  assert.equal(scanAnomalies({ dir, repo: 'jarvis', routing: ROUTING }).scanned, 0);
 });
 
 function gitIn(dir, env, ...args) {
@@ -501,4 +540,32 @@ test('documented step-7 extraction (CLI capture + file read) equals a direct sca
 
   // The two independent codepaths must agree exactly.
   assert.equal(extracted, direct.findings.length);
+});
+
+// The WRITER canonicalizes a github slug to its user.json key, so the directory
+// is "jarvis". A reader given the github spelling must resolve to the same
+// identity — otherwise `--repo JustinChan-fd/jarvis` silently reports
+// scanned:0 / ok:true, which is the original "nothing examined looks like
+// nothing wrong" bug reintroduced from the other side. Canonicalization has to
+// happen on BOTH sides of the sink, not just at write time.
+test('CLI anomalies --repo accepts the github slug for a canonicalized repo dir', () => {
+  const dir = scaffold();
+  // Directory is the canonical key, as the writer now produces.
+  const rec = makeRecord({ run_id: '2026-07-25T000205Z__jarvis__intake__issue-1__cn0001', repo: 'jarvis' });
+  writeRun(dir, rec);
+
+  const scanned = (repoArg) => {
+    const args = [HARNESS_CLI, 'anomalies', '--dir', dir, '--repo', repoArg];
+    let out;
+    try {
+      out = execFileSync(process.execPath, args, { encoding: 'utf8' });
+    } catch (err) {
+      out = err.stdout;
+    }
+    return JSON.parse(out).scanned;
+  };
+
+  assert.equal(scanned('jarvis'), 1);
+  // Registered in config/user.json as jarvis's github slug.
+  assert.equal(scanned('JustinChan-fd/jarvis'), 1, 'github slug must resolve to the canonical repo dir');
 });

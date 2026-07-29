@@ -5,6 +5,7 @@
 import { execFileSync } from 'node:child_process';
 import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
+import { slugifyRepo } from './runid.mjs';
 
 const DEFAULTS = { outlier_multiple: 3, min_samples: 3, recent_limit: 50 };
 
@@ -187,19 +188,38 @@ export function scanAnomalies({ dir, repo = null, limit = null, routing = {} }) 
   const findings = [];
   const logDir = join(dir, 'log');
 
+  // --repo takes a repo SLUG, which may arrive owner-qualified
+  // ("Owner-x/myrepo") while the directory holding it is the flattened slug.
+  // Compare slug-to-slug: a raw !== match found nothing and reported ok:true
+  // with scanned:0, making "nothing examined" look like "nothing wrong".
+  const wanted = repo ? slugifyRepo(repo) : null;
+
+  // Records synced before the writer flattened slugs live one level deeper
+  // ("log/Owner-x/myrepo/"), and a one-level read missed them entirely — even
+  // unfiltered. Walk until the records are found and slugify the whole
+  // path-relative prefix, so "log/Owner-x/myrepo" and "log/owner-x-myrepo"
+  // both resolve to the same repo identity.
   const files = [];
-  if (existsSync(logDir)) {
-    for (const repoDir of readdirSync(logDir)) {
-      if (repo && repoDir !== repo) continue;
-      const full = join(logDir, repoDir);
-      if (!statSync(full).isDirectory()) continue; // .DS_Store and friends
-      for (const name of readdirSync(full)) {
-        if (name.endsWith('.json') && !name.endsWith('.events.jsonl')) {
-          files.push({ name, path: join(full, name) });
-        }
-      }
+  const walk = (abs, segments) => {
+    const entries = readdirSync(abs);
+    const records = entries.filter((n) => n.endsWith('.json'));
+    if (records.length > 0) {
+      if (wanted && slugifyRepo(segments.join('-')) !== wanted) return;
+      for (const name of records) files.push({ name, path: join(abs, name) });
+      return;
     }
-  }
+    for (const name of entries) {
+      const child = join(abs, name);
+      let childStat;
+      try {
+        childStat = statSync(child);
+      } catch {
+        continue; // vanished mid-walk
+      }
+      if (childStat.isDirectory()) walk(child, [...segments, name]); // else .DS_Store and friends
+    }
+  };
+  if (existsSync(logDir)) walk(logDir, []);
   // Run ids open with an ISO timestamp, so filename order is time order.
   files.sort((a, b) => (a.name < b.name ? 1 : -1));
   const recent = files.slice(0, limit ?? cfg.recent_limit);

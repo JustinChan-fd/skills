@@ -35,6 +35,52 @@ test('syncRun pushes record + events, sets synced_at', () => {
   assert.ok(events.includes('"run_end"'));
 });
 
+// record.repo was used raw as a path segment, so an owner-qualified repo
+// ("Owner-x/myrepo") wrote a NESTED dir. The anomalies scan reads exactly one
+// level below log/, so every such record was invisible to it even unfiltered.
+// The dest path is slugified now: one flat, predictable directory level.
+test('syncRun flattens an owner-qualified repo into a single slugified directory', () => {
+  const { telemetry, targetDir, remote } = setup();
+  const { runId, runDir } = initRun({ targetDir, repo: 'Owner-x/myrepo', kind: 'intake', source: 'adhoc', now: NOW });
+  finalizeRun({ runDir, status: 'succeeded', now: NOW });
+  assert.deepEqual(syncRun({ runDir, telemetry, now: NOW }), { synced: true });
+  const verify = join(mkdtempSync(join(tmpdir(), 'harness-verify-')), 'v');
+  execFileSync('git', ['clone', remote, verify]);
+  assert.deepEqual(readdirSync(join(verify, 'log')), ['owner-x-myrepo']);
+  assert.ok(existsSync(join(verify, 'log', 'owner-x-myrepo', `${runId}.json`)));
+});
+
+// Case variants of one repo converge. NOTE the deliberate limit: an
+// owner-qualified spelling does NOT converge with its bare form —
+// "JustinChan-fd/jarvis" slugifies to "justinchan-fd-jarvis", a different slug
+// than "jarvis". Flattening fixes scan visibility, not repo IDENTITY; the
+// owner-qualified/bare split is a separate open question (which spelling is
+// canonical) and is still live in the sink.
+test('syncRun converges case variants of the same repo on one directory', () => {
+  const { telemetry, targetDir, remote } = setup();
+  for (const spelling of ['jarvis', 'Jarvis']) {
+    const { runDir } = initRun({ targetDir, repo: spelling, kind: 'intake', source: 'adhoc', now: NOW });
+    finalizeRun({ runDir, status: 'succeeded', now: NOW });
+    assert.deepEqual(syncRun({ runDir, telemetry, now: NOW }), { synced: true });
+  }
+  const verify = join(mkdtempSync(join(tmpdir(), 'harness-verify-')), 'v');
+  execFileSync('git', ['clone', remote, verify]);
+  assert.deepEqual(readdirSync(join(verify, 'log')), ['jarvis']);
+  assert.equal(readdirSync(join(verify, 'log', 'jarvis')).filter((f) => f.endsWith('.json')).length, 2);
+});
+
+// A repo string is attacker-adjacent input reaching join(): "../.." would have
+// escaped log/ entirely and written outside the sink.
+test('syncRun cannot be walked out of log/ by a traversal in repo', () => {
+  const { telemetry, targetDir, remote } = setup();
+  const { runDir } = initRun({ targetDir, repo: '../../escape', kind: 'intake', source: 'adhoc', now: NOW });
+  finalizeRun({ runDir, status: 'succeeded', now: NOW });
+  assert.deepEqual(syncRun({ runDir, telemetry, now: NOW }), { synced: true });
+  const verify = join(mkdtempSync(join(tmpdir(), 'harness-verify-')), 'v');
+  execFileSync('git', ['clone', remote, verify]);
+  assert.deepEqual(readdirSync(join(verify, 'log')), ['escape']);
+});
+
 test('unconfigured telemetry is a soft no-op', () => {
   const { targetDir } = setup();
   const { runDir } = initRun({ targetDir, repo: 'myapp', kind: 'intake', source: 'adhoc', now: NOW });
