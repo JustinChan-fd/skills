@@ -19,7 +19,8 @@ import { parseArgs } from 'node:util';
 import { readFileSync, appendFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { loadSchema, validate } from './lib/validate.mjs';
-import { resolveConfig, sizeBudgets, expandHome, resolveProject } from './lib/config.mjs';
+import { resolveConfig, sizeBudgets, expandHome, resolveProject, loadProjects } from './lib/config.mjs';
+import { resolveTarget } from './lib/target.mjs';
 import { gateDecision } from './lib/gate.mjs';
 import { qualityScore } from './lib/quality.mjs';
 import { appendAudit, HarnessError } from './lib/audit.mjs';
@@ -157,6 +158,27 @@ try {
       const project = resolveProject(v.issue);
       if (!project) emit({ error: `no project mapping for issue key: ${v.issue ?? '(none)'}` }, 1);
       emit(project);
+    }
+    case 'resolve-target': {
+      // Deterministic target + work-item routing. The calling skill extracts
+      // loose hints from free-form invocation text; every DECISION lives here,
+      // composed from user.json + projects.json so those files stay the single
+      // source of truth. A named-but-unresolvable hint exits 1 rather than
+      // falling back to defaultRepo: silently ticking a repo the user did not
+      // name is the worst available outcome.
+      const v = opts({ hint: { type: 'string' }, item: { type: 'string' }, cwd: { type: 'string' } });
+      const { user } = resolveConfig();
+      const { projects, defaultCloudId } = loadProjects();
+      const r = resolveTarget({
+        hint: v.hint,
+        item: v.item,
+        cwd: v.cwd ?? process.cwd(),
+        user,
+        projects,
+        defaultCloudId,
+      });
+      if (!r.ok) emit({ error: `${r.error.code}: ${r.error.detail ?? ''}`.trim() }, 1);
+      emit(r.target);
     }
     case 'jira-normalize': {
       // Normalize a saved getJiraIssue response into the neutral intake shape.
@@ -506,6 +528,7 @@ try {
         usage: {
           'init-run': '--target <path> --repo <slug> --kind intake|plan|implement --source issue-<n>|adhoc|file [--issue <n>] [--branch <b>] [--parent-run-id <id>] [--correlation-id <id>] [--repo-path <path>] [--skills-commit <sha>]',
           'resolve-project': '--issue <KEY-n>  (map a Jira issue key prefix to { repoPath, cloudId } from config/projects.json; exit 1 if unknown)',
+          'resolve-target': '[--hint <alias|JIRA-KEY|path>] [--item <n|#n|KEY-n>] [--cwd <path>]  (resolve a free-form repo/work-item hint to { alias, path, issue_source, github, cloud_id, project_key, pinned_issue, resolved_from } from user.json + projects.json; a named-but-unresolvable hint exits 1 instead of falling back to defaultRepo)',
           'jira-normalize': '--file <issue.json>  (normalize a saved getJiraIssue response into the neutral intake shape {key,summary,description,issue_type,change_type,parent_key,project_key,input}; exit 1 if malformed)',
           'github-normalize': '--file <issue.json> [--repo <slug>]  (normalize a saved `gh issue view --json number,title,body,labels` response into the SAME neutral intake shape as jira-normalize; --repo becomes project_key; exit 1 if malformed)',
           'plan-order': '--manifest <plan-manifest.json>  (topologically order plans[] by dependsOn; { order:[...] }; exit 1 on cycle/unknown dep)',
