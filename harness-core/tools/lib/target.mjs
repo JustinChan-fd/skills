@@ -16,15 +16,47 @@ import { expandHome, issueSourceFor } from './config.mjs';
 
 const JIRA_KEY = /^[A-Za-z][A-Za-z0-9]*-\d+$/;
 
-// A work-item hint is either a Jira key (kept whole, uppercased) or an issue
-// number (reduced to the bare digits, so `4`, `#4`, and `issue 4` agree).
-// Returns `null` for genuinely absent, and `{bad}` for present-but-unparseable —
-// the caller must NOT conflate them. Silently dropping an item the user named
-// falls through to the lowest-actionable scan and ticks a DIFFERENT item.
+// A pasted URL names BOTH a repo and an item, so it is parsed structurally
+// rather than scraped. `/issues/N` and `/pull/N` share GitHub's one numbering
+// sequence; Jira's `/browse/KEY` is the canonical issue link. Anything else —
+// a repo root, a release tag, an unrelated host — is deliberately NOT matched:
+// a trailing number is not an issue number, and treating it as one pinned
+// comment ids (`#issuecomment-3184779201`) and invented cross-project keys.
+const GITHUB_ITEM_URL = /^https?:\/\/(?:www\.)?github\.com\/([^/\s]+)\/([^/\s]+)\/(?:issues|pull)\/(\d+)(?:[/?#]|$)/i;
+const JIRA_BROWSE_URL = /^https?:\/\/[^/\s]+\/browse\/([A-Za-z][A-Za-z0-9]*-\d+)(?:[/?#]|$)/i;
+
+function looksLikeUrl(raw) {
+  return /^https?:\/\//i.test(raw);
+}
+
+// A work-item hint is a Jira key, an issue number, or a URL that names one of
+// those. Returns `null` for genuinely absent, `{bad}` for
+// present-but-unparseable, and for a URL also the repo it named, so the caller
+// can check it against the repo hint instead of silently merging the two.
+//
+// The caller must NOT conflate absent and unparseable. Silently dropping an item
+// the user named falls through to the lowest-actionable scan and ticks a
+// DIFFERENT item.
 function normalizeItem(item) {
   const raw = (item ?? '').trim();
   if (!raw) return null;
   if (JIRA_KEY.test(raw)) return { key: raw.toUpperCase() };
+
+  if (looksLikeUrl(raw)) {
+    const gh = raw.match(GITHUB_ITEM_URL);
+    // Strip a trailing `.git` so a clone URL and a web URL agree.
+    if (gh) return { num: gh[3], urlSlug: `${gh[1]}/${gh[2].replace(/\.git$/i, '')}`, url: raw };
+    const jira = raw.match(JIRA_BROWSE_URL);
+    if (jira) {
+      const key = jira[1].toUpperCase();
+      return { key, urlPrefix: key.split('-')[0], url: raw };
+    }
+    // A URL we do not recognize. Refuse rather than reach for its digits: the
+    // whole defect class here was "ends in a number" standing in for "is an
+    // issue number".
+    return { bad: raw };
+  }
+
   const num = raw.match(/(\d+)\s*$/);
   return num ? { num: num[1] } : { bad: raw };
 }
@@ -75,13 +107,39 @@ function envelope({ path, alias, projectKey, resolvedFrom, user, projects, defau
   const cloudId = resolvedPrefix
     ? (projects?.[resolvedPrefix]?.cloudId ?? defaultCloudId ?? null)
     : null;
+  const github = resolvedAlias ? (user?.repos?.[resolvedAlias]?.github ?? null) : null;
 
   // The pinned item can only be finished HERE, because qualifying a bare number
   // needs the issue source and project key this function just resolved.
   let pinned = fallbackKey ?? null;
   if (itemSpec?.bad) {
     return fail('unresolvable_item',
-      `"${itemSpec.bad}" is not a Jira key or an issue number`);
+      `"${itemSpec.bad}" is not a Jira key, an issue number, or a recognized issue URL`);
+  }
+
+  // A URL named a repo too. If it disagrees with the repo we resolved, that is a
+  // contradiction the user has to settle: keeping one side and silently
+  // discarding the other is how a PIZZA-9 link became TARS-9. Only checked when
+  // the URL was NOT itself what resolved the target (resolvedFrom 'item_url'),
+  // since there it cannot disagree with itself.
+  if (resolvedFrom !== 'item_url') {
+    if (itemSpec?.urlSlug && github && itemSpec.urlSlug.toLowerCase() !== github.toLowerCase()) {
+      return fail('conflicting_target',
+        `hint resolved to ${resolvedAlias ?? path} (${github}) but the URL names ${itemSpec.urlSlug} — re-run naming one`);
+    }
+    if (itemSpec?.urlSlug && !github) {
+      return fail('conflicting_target',
+        `the URL names github repo ${itemSpec.urlSlug} but ${resolvedAlias ?? path} has no github slug in user.json — re-run naming one`);
+    }
+    if (itemSpec?.urlPrefix && itemSpec.urlPrefix !== resolvedPrefix) {
+      // Note the absent-prefix case is a conflict too, not a pass. If the
+      // resolved repo has no prefix in projects.json, we have no evidence it is
+      // the URL's project — and pinning PIZZA-9 against it would tick a key that
+      // may belong to an entirely different repo.
+      const known = resolvedPrefix ? `project ${resolvedPrefix}` : 'no project in projects.json';
+      return fail('conflicting_target',
+        `hint resolved to ${resolvedAlias ?? path} (${known}) but the URL names project ${itemSpec.urlPrefix} — re-run naming one`);
+    }
   }
   if (itemSpec?.key) {
     pinned = itemSpec.key;
@@ -104,7 +162,7 @@ function envelope({ path, alias, projectKey, resolvedFrom, user, projects, defau
       alias: resolvedAlias,
       path,
       issue_source: issueSource,
-      github: resolvedAlias ? (user?.repos?.[resolvedAlias]?.github ?? null) : null,
+      github,
       cloud_id: cloudId,
       project_key: resolvedPrefix,
       pinned_issue: pinned,
@@ -176,6 +234,41 @@ export function resolveTarget({ hint, item, cwd, user, projects, defaultCloudId 
     // silently ticking a repo the user did not name is the worst outcome here.
     return fail('unresolvable_hint',
       `"${trimmedHint}" is not a repo alias in user.json, a Jira prefix in projects.json, or an existing path`);
+  }
+
+  // No repo hint, but a URL that carries one. A pasted link is fully qualified,
+  // so it routes the whole tick — more specific than the cwd and than
+  // defaultRepo, both of which are guesses about what you meant.
+  if (explicitItem?.urlSlug) {
+    const bySlug = Object.keys(repos).find(
+      (k) => (repos[k]?.github ?? '').toLowerCase() === explicitItem.urlSlug.toLowerCase());
+    if (!bySlug) {
+      return fail('unresolvable_item',
+        `no repo in user.json has github slug ${explicitItem.urlSlug}`);
+    }
+    return envelope({
+      ...common,
+      path: canon(repos[bySlug].path),
+      alias: bySlug,
+      projectKey: null,
+      resolvedFrom: 'item_url',
+      itemSpec: explicitItem,
+    });
+  }
+  if (explicitItem?.urlPrefix) {
+    const project = projects?.[explicitItem.urlPrefix];
+    if (!project?.repoPath) {
+      return fail('unresolvable_item',
+        `prefix ${explicitItem.urlPrefix} from the URL is not in projects.json`);
+    }
+    return envelope({
+      ...common,
+      path: canon(project.repoPath),
+      alias: null,
+      projectKey: explicitItem.urlPrefix,
+      resolvedFrom: 'item_url',
+      itemSpec: explicitItem,
+    });
   }
 
   // No hint: the cwd, if it IS a registered repo (you are running from inside

@@ -7,9 +7,10 @@ description: >-
   drivers at pinned model tiers. Use when the user says "harness loop", "run
   the loop", "loop tick", "tick <repo>", or names a repo and/or a ticket to
   work on ("run the loop on jarvis", "tick jarvis issue 4", "do TARS-1272"),
-  or from a scheduled session. Reads its target repo and an optional pinned
-  work item from free-form invocation text; given neither, ticks the default
-  repo's lowest actionable issue. Safe to invoke
+  or pastes a GitHub or Jira issue URL, or from a scheduled session. Reads its
+  target repo and an optional pinned work item from free-form invocation text
+  — a pasted URL alone is enough to route both; given neither, ticks the
+  default repo's lowest actionable issue. Safe to invoke
   repeatedly: a tick with nothing to do is a no-op.
 ---
 
@@ -61,15 +62,24 @@ Let `CLI` = `node ~/.claude/skills/harness-core/tools/harness.mjs`.
 
 **0. Extract hints, then let the CLI resolve them.** Your invocation may carry
 free-form text rather than positional flags — `/harness-loop-core jarvis`, `run
-the loop on jarvis`, `tick jarvis issue 4`, `do TARS-1272`, or nothing at all.
+the loop on jarvis`, `tick jarvis issue 4`, `do TARS-1272`, a pasted issue URL,
+or nothing at all.
 
 Your ONLY interpretive job here is to pull at most two loose strings out of that
 text and treat everything else in it as commentary:
 
 - **`hint`** — the repo, if one is named. Pass the substring verbatim; it may be
   a registry alias, a Jira key, or a path. Don't normalize it.
-- **`item`** — the work item, if one is named: `TARS-1272`, `#4`, `issue 4`, or
-  a bare `4`. Pass it verbatim too.
+- **`item`** — the work item, if one is named: `TARS-1272`, `#4`, `issue 4`, a
+  bare `4`, or a URL. Pass it verbatim too.
+
+**A URL goes in `--item` whole, exactly as pasted — never in `--hint`, and never
+picked apart.** It names both a repo and an item, and the resolver reads both
+structurally. Do not pull the number out of it yourself, do not strip a
+`#issuecomment-…` anchor, do not drop query params, and do not also set `--hint`
+from the URL's owner/repo. Every one of those is a decision, and decisions are
+the resolver's. Scraping the trailing number is how a comment link came to pin a
+comment id, and a `PIZZA-9` link came to pin `TARS-9`.
 
 Then hand both to the resolver and obey what it says:
 
@@ -89,20 +99,24 @@ your routing table for the whole tick:
 | `issue_source` | `ISSUE_SOURCE` — `jira` or `github` |
 | `github` | `GITHUB_SLUG` (`owner/repo`) when `issue_source` is `github` |
 | `cloud_id`, `project_key` | Jira routing when `issue_source` is `jira` |
-| `pinned_issue` | the pinned work item, or `null` — see step 4. Already normalized: a bare number on a Jira repo comes back qualified (`1272` → `TARS-1272`), on a GitHub repo it stays a number |
-| `resolved_from` | provenance: how the target was decided |
+| `pinned_issue` | the pinned work item, or `null` — see step 4. Already normalized: a bare number on a Jira repo comes back qualified (`1272` → `TARS-1272`), on a GitHub repo it stays a number, and a URL is reduced to whichever of those it named |
+| `resolved_from` | provenance: how the target was decided — including `item_url` when a pasted URL routed the whole tick |
 
 **Exit 1 means STOP and report the error verbatim.** Do not retry with a
 different guess, do not substitute a default repo, and do not proceed with the
-pin dropped. The resolver refuses two things on purpose, both for the same
+pin dropped. The resolver refuses three things on purpose, all for the same
 reason — working on something the user did not name is worse than doing
 nothing:
 
 - `unresolvable_hint` — the named repo is not an alias, a Jira prefix, or an
   existing path. It will NOT fall back to `defaultRepo`.
-- `unresolvable_item` — the named work item is not a Jira key or an issue
-  number, or is a bare number on a Jira repo with no project key to qualify it.
-  It will NOT drop the pin and scan for the lowest actionable item instead.
+- `unresolvable_item` — the named work item is not a Jira key, an issue number,
+  or a recognized issue URL; or it is a bare number on a Jira repo with no
+  project key to qualify it; or it is a URL whose repo is in neither config. It
+  will NOT drop the pin and scan for the lowest actionable item instead.
+- `conflicting_target` — a hint and a URL named DIFFERENT repos. Report it and
+  stop. Do not pick a side: that is the user's call, and both sides are named in
+  the message so they can see which was wrong.
 
 Undo nothing else; you have taken no lock yet.
 

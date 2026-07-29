@@ -68,6 +68,47 @@ test('an unresolvable hint exits 1 with an error, not a default repo', () => {
   assert.equal(r.out.alias, undefined, 'must not emit a target alongside the error');
 });
 
+test('a pasted github URL alone routes the whole tick from the real config', () => {
+  // The invocation this exists for: `/harness-loop-core <url>` with no repo
+  // named. --cwd /tmp so the cwd cannot be what resolved it.
+  const r = run(['resolve-target', '--cwd', '/tmp',
+    '--item', 'https://github.com/JustinChan-fd/jarvis/issues/4']);
+  assert.equal(r.code, 0);
+  assert.equal(r.out.alias, 'jarvis');
+  assert.equal(r.out.issue_source, 'github');
+  assert.equal(r.out.pinned_issue, '4');
+  assert.equal(r.out.resolved_from, 'item_url');
+});
+
+test('a comment-anchor URL pins the issue, not the comment id', () => {
+  // Copying a link out of a comment thread is the normal way to get a URL, and
+  // this shape previously pinned 3184779201 — not an issue at all.
+  const r = run(['resolve-target', '--cwd', '/tmp',
+    '--item', 'https://github.com/JustinChan-fd/jarvis/issues/4#issuecomment-3184779201']);
+  assert.equal(r.code, 0);
+  assert.equal(r.out.pinned_issue, '4');
+});
+
+test('a pasted jira URL alone routes from projects.json', () => {
+  const r = run(['resolve-target', '--cwd', '/tmp',
+    '--item', 'https://fandango.atlassian.net/browse/TARS-1272']);
+  assert.equal(r.code, 0);
+  assert.equal(r.out.project_key, 'TARS');
+  assert.equal(r.out.pinned_issue, 'TARS-1272');
+  assert.equal(r.out.issue_source, 'jira');
+});
+
+test('a URL naming a different repo than the hint exits 1 as a conflict', () => {
+  const r = run(['resolve-target', '--hint', 'jarvis',
+    '--item', 'https://github.com/someone/other/issues/4']);
+  assert.equal(r.code, 1);
+  assert.match(r.out.error, /conflicting_target/);
+  // Both sides must be named — the point is that the user can see which was wrong.
+  assert.match(r.out.error, /jarvis/);
+  assert.match(r.out.error, /someone\/other/);
+  assert.equal(r.out.pinned_issue, undefined, 'must not emit a target alongside the conflict');
+});
+
 test('no args resolves the configured default repo', () => {
   // Deliberately does not hardcode which repo that is — the user owns
   // defaultRepo, and pinning its value here would make their config edit
