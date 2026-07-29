@@ -40,8 +40,10 @@
           "rounds_used": { "type": ["integer", "null"] },
           "verifier_score": { "type": ["number", "null"] },
           "reason": { "type": ["object", "null"] },
+          "started_at": { "type": ["string", "null"] },
           "ended_at": { "type": ["string", "null"] },
-          "wall_ms": { "type": ["number", "null"] }
+          "wall_ms": { "type": ["number", "null"] },
+          "child_run_id": { "type": ["string", "null"] }
         }
       }
     },
@@ -85,6 +87,8 @@
     "price_table_version": { "type": ["string", "null"] },
     "started_at": { "type": "string" },
     "ended_at": { "type": ["string", "null"] },
+    "pr_url": { "type": ["string", "null"] },
+    "pr_created_at": { "type": ["string", "null"] },
     "synced_at": { "type": ["string", "null"] },
     "schema_version": { "enum": ["1.0.0", "1.1.0", "1.2.0", "1.3.0", "1.4.0", "1.5.0", "2.0.0"] }
   }

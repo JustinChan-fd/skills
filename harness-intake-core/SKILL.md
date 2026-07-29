@@ -142,8 +142,18 @@ scan; for small repos, read directly. Each subagent needs a brief:
   `model: haiku`, read-only agent type (Explore).
 - Audit each spawn:
 
-      CLI audit --target <path> --event '{"ts":"<now>","run_id":"<run_id>","phase":"intake","agent_id":"<agent-id>","event":"spawn","data":{"tier":"LOW","task_type":"read_only_discovery"}}'
+      CLI audit --target <path> --event '{"run_id":"<run_id>","phase":"intake","agent_id":"<agent-id>","event":"spawn","data":{"tier":"LOW","task_type":"read_only_discovery"}}'
 
+- **Close each span the moment that subagent returns to you** — before you
+  read its findings, so your own reading time is not charged to it:
+
+      CLI spawn-end --run-dir <run_dir> --agent-id <agent-id> --task-type read_only_discovery
+
+  This is what makes a subagent's duration a recorded number instead of a
+  subtraction a reader has to perform later. The CLI finds the matching open
+  `spawn`, computes `wall_ms` itself, and writes a `spawn_end`. It **exits 1
+  when nothing matches** — that means the `agent_id`/`task_type` pair does not
+  match a spawn you audited, so fix the mismatch rather than moving on.
 - If a subagent returns a needs-decision object: persist it to
   `findings/needs-decision-<agent-id>.json` yourself, then resolve it
   (answer inline or tighten the brief and re-issue), and audit a
@@ -232,7 +242,13 @@ rounds included, with round, score, result, and failures in `data` (the `CLI
 anomalies` integrity scan checks succeeded runs for one `verifier_round` per
 round used and a verifier `spawn`):
 
-    CLI audit --target <path> --event '{"ts":"<now>","run_id":"<run_id>","phase":"intake","agent_id":"<verifier-agent-id>","event":"spawn","data":{"tier":"MID","task_type":"verifier_intake"}}'
+    CLI audit --target <path> --event '{"run_id":"<run_id>","phase":"intake","agent_id":"<verifier-agent-id>","event":"spawn","data":{"tier":"MID","task_type":"verifier_intake"}}'
+
+and close that span when the verifier returns, before you gate — **once per
+round**, with a distinct `agent_id` per round, so round 2's duration is its own
+number and not round 1's absorbed into it:
+
+    CLI spawn-end --run-dir <run_dir> --agent-id <verifier-agent-id> --task-type verifier_intake
 
 Then gate mechanically (always pass the score — a high-scoring round with
 only advisory failures opens immediately with residue instead of burning
@@ -321,7 +337,7 @@ sets `estimated:true` iff any observation was flagged `:estimated` — the
 anomalies scan keys off that flag:
 
     CLI tokens-finalize --tier LOW=<n>:estimated --tier MID=<n>
-    CLI audit --target <path> --event '{"ts":"<now>","run_id":"<run_id>","phase":"intake","event":"note","data":<tokens_note from above>}'
+    CLI audit --target <path> --event '{"run_id":"<run_id>","phase":"intake","event":"note","data":<tokens_note from above>}'
 
 Omit `tokens-finalize` and the note entirely only if you spawned no subagents
 at all.)

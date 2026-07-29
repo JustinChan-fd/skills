@@ -102,9 +102,26 @@ the verifier included (`data.task_type: "verifier_implement"`) — and a
 `verifier_round` event after EVERY round, pass rounds included (the `CLI
 anomalies` integrity scan checks succeeded runs for one `verifier_round` per
 round used and a verifier `spawn`; a measured run skipped the verifier spawn
-audit and now trips that scan). Then (always pass the score — a high-scoring
-advisory-only round opens immediately with residue instead of burning
-another HIGH-tier round):
+audit and now trips that scan).
+
+**Close every span you open, the moment that subagent returns to you** — for
+the verifier this is before you gate:
+
+    CLI spawn-end --run-dir <run_dir> --agent-id <agent-id> --task-type <same task_type as the spawn>
+
+The CLI finds the matching open `spawn`, computes `wall_ms` itself, and writes a
+`spawn_end`, so a subagent's duration is a recorded number rather than a
+subtraction a reader has to perform later. Two rules make the numbers mean
+something: close it **before** you read its output (your reading time is yours,
+not the subagent's), and give each verifier round a **distinct `agent_id`** (a
+reused id makes round 2 close round 1's span, and round 2's own time
+disappears). It **exits 1 when nothing matches** — the `agent_id`/`task_type`
+pair does not match a spawn you audited; fix the mismatch rather than moving on.
+Verification rounds were 56% of a measured hour-long run and were invisible
+until these spans existed.
+
+Then (always pass the score — a high-scoring advisory-only round opens
+immediately with residue instead of burning another HIGH-tier round):
 
     CLI gate --size <size> --rounds <round> --result <pass|advisory-fail|blocking-fail> --score <score>
 
@@ -135,16 +152,57 @@ another HIGH-tier round):
 **5. Deliver — open the PR, never merge.** The code repo is GitHub either way,
 so the PR is created with `gh pr create`. Do NOT hand-assemble the PR body
 markdown: render it with `CLI render-pr-body` and capture its stdout into a
-variable-free `gh pr create --body "$(...)"` invocation. You still author the
-prose `--summary` yourself; the helper assembles the invariant shape (a
-`Closes #<issue>` line, the entry-contract results table, the landing
-checklist, the run id, and the Advisory-residue section). Pass the
-entry-contract results as `--result-rows` (a JSON array of `{criterion, tag,
-result, evidence}`), the post-merge landing checklist as `--landing`, and
-`--notes` as the JSON array of THIS run's own recorded residue/defect notes:
+variable-free `gh pr create --body "$(...)"` invocation. You author every
+judgment field — `--summary`, `--changes`, `--qa-notes`; the helper assembles
+the invariant shape (a `Closes #<issue>` line, the `## Changes` and
+`## QA Notes` sections, the collapsed verification-detail block, and the run
+id). Pass the entry-contract results as `--result-rows` (a JSON array of
+`{criterion, tag, result, evidence}`), the post-merge landing checklist as
+`--landing`, and `--notes` as the JSON array of THIS run's own recorded
+residue/defect notes:
 
     git push -u origin <branch>
-    gh pr create --base <BASE_BRANCH> --title "<change_type>: <ID> <requirement summary>" --body "$(CLI render-pr-body --change-type <change_type> --issue <ID> --summary "<your prose summary>" --run-id <run_id> --result-rows '<json>' --landing '<json>' --notes '<json-array of residue notes, or []>')"
+    gh pr create --base <BASE_BRANCH> --title "<change_type>: <ID> <requirement summary>" --body "$(CLI render-pr-body --change-type <change_type> --issue <ID> --summary "<your prose summary>" --changes '<json-array of 3-8 bullets>' --qa-notes '<json-array of numbered steps>' --run-id <run_id> --result-rows '<json>' --landing '<json>' --notes '<json-array of residue notes, or []>')"
+
+**Capture the PR's url and GitHub's own creation timestamp** right after
+creating it, and carry both to step 6's `run-end`:
+
+    gh pr view --json url,createdAt --jq '.url + " " + .createdAt'
+
+"Pipeline start → PR submitted" is the headline number for a harness run, and
+without `pr_created_at` on the record it needs a live `gh pr view` join to
+answer — which means it is unanswerable from the telemetry sink, and
+unanswerable at all once the PR is gone. Use **GitHub's** `createdAt`, not your
+own clock: it is the moment the deliverable existed, from the system that
+created it.
+
+**`--changes` and `--qa-notes` are the reviewer-facing body**, and they follow
+`push-branch`'s Format Requirements so a harness PR is indistinguishable from a
+hand-pushed one. Both are JSON arrays of strings; the renderer adds the `- ` and
+`1. ` markers, so do not include them yourself.
+
+- **`--changes`: 3–8 bullets, one flat list.** No sub-headings, no nesting, no
+  "Files Changed" or "Migration Notes" inventory — a reviewer wants to know what
+  changed and why, not a directory listing. Each bullet names the file or surface
+  and states the change. Cite real paths and real URLs
+  (`/configuration/rating-classifications`), never page names.
+- **`--qa-notes`: numbered manual verification steps a human can follow.** Each
+  entry is one step. Interleave `**Expected:** ...` entries after the actions
+  they verify. Every command must be runnable as written from a fresh checkout.
+  These are **manual steps for a reviewer**, not a restatement of the entry
+  contract — the contract already has its own table in the details block.
+
+Both are judgment, so the renderer cannot invent them: it emits nothing when the
+array is empty rather than fabricating a section. An empty `--changes` on a run
+that changed files is a bug in your call, not a valid render.
+
+**The verification detail is folded, not dropped.** `push-branch` bans competing
+top-level sections in the body, but the harness carries evidence a human pusher
+does not. So `render-pr-body` puts the entry-contract table, the landing
+checklist, and the advisory residue inside ONE collapsed
+`<details><summary>Harness verification detail</summary>` block below
+`## QA Notes` — audit trail preserved, review surface uncluttered. The block is
+omitted entirely when all three inputs are empty.
 
 `<ID>` is the work-item id — the Jira KEY (`TARS-1271`) or the GitHub issue
 NUMBER (`2`) — and goes in BOTH the PR title and the `--summary` prose (e.g.
@@ -160,16 +218,15 @@ both behaviors are correct:
 
 **Do not merge the PR** — delivery ends here.
 
-**The `## Advisory residue` section** is emitted by `render-pr-body` directly
-below the run-id line. It lists every `residue`/`defect` note THIS implement
-run itself recorded in step 4 (one bullet per gate round that opened with
-residue), reproducing that note's own `data.criterion` and `data.detail`
+**The Advisory residue block** is emitted by `render-pr-body` inside the
+collapsed verification-detail block. It lists every `residue`/`defect` note THIS
+implement run itself recorded in step 4 (one bullet per gate round that opened
+with residue), reproducing that note's own `data.criterion` and `data.detail`
 **verbatim** — no paraphrasing, so a downstream reader (and a follow-up plan
 run's `residue-scan`) sees exactly what the gate flagged. Source the notes
 from this run's own audit events (pass them as `--notes`); no `audit.jsonl`
-re-scan is needed for a run's own residue. The helper **omits the entire
-section — heading and all — when the `--notes` array is empty** (a clean
-gate); never emit an empty `## Advisory residue` heading.
+re-scan is needed for a run's own residue. The helper **omits the block
+entirely when the `--notes` array is empty** (a clean gate).
 
 The title's `<change_type>` prefix comes from the manifest's
 `requirement.change_type` (fall back to the source issue's own title prefix,
@@ -196,8 +253,75 @@ source-neutral; only the post differs (carry `issue_source` from the manifest's
     CLI phase-end --run-dir <run_dir> --phase implement --status <succeeded|partial|failed> --rounds <n> --score <score> --size <size>
     CLI run-end --target <path> --run-dir <run_dir> --status <same> [--reason-code <code> --reason-detail "<why>"] --tokens-by-tier '{"LOW":<n>,"MID":<n>,"HIGH":<n>}' \
       --active-ms <n> \
+      --pr-url <url> --pr-created-at <the createdAt from step 5> \
       --agent-count '{"by_model":{"<model-id>":<n>},"by_phase":{"Implement":<n>,"Verify":<n>}}' \
       --skill-metrics '{"planPath":"<plan_path>","branch":"<branch>","tasksTotal":<n>,"tasksPassed":<n>,"tasksBlocked":<n>,"criticalFindings":<n>,"testsPassed":<bool>,"typeCheckPassed":<bool>}'
+
+Omit both PR flags on a run that opened no PR (a `shut` gate, a failed push) —
+they stay null, which is the honest answer, not zero.
+
+Then read back the timeline you just recorded:
+
+    CLI timing --run-dir <run_dir>
+
+It prints the phase spans, the subagent spans, `start_to_pr_ms`, and whether the
+spans account for the run's wall clock within tolerance (5%, floor 60s).
+**`reconciled: false` exits 1 but does NOT fail the run** — the work is already
+delivered and a bookkeeping gap must never retract it. Treat it as a finding:
+`spawns_unclosed > 0` names a missing `spawn-end`, and a large
+`unaccounted_ms` means time went somewhere no span covers. Report either in
+your closing summary so the gap is visible instead of silently absorbed.
+
+**6b. Jira cleanup — QA notes onto the ticket, then Code Review (jira-sourced
+runs ONLY).** Ported from `push-branch`'s Jira Cleanup so a harness ticket ends
+up in the same state a hand-pushed one would. **Skip entirely when**
+`issue_source != jira`, when no PR was created, or when the run status is
+`failed` — a failed gate has nothing to review, and the status comment plus the
+pushed branch already say so. Run it for `succeeded` and `partial`; a partial run
+has a reviewable PR, and the `--next` prose already carries the caveat.
+
+Build the ADF from the SAME `--qa-notes` array you passed to `render-pr-body` in
+step 5 — do NOT re-parse your own PR body, and do NOT re-author the steps (the
+ticket and the PR must not drift):
+
+    ADF=$(CLI render-qa-notes-adf --qa-notes '<the same json array from step 5>' --pr-url <pr_url>)
+
+Then transition the ticket. Resolve every id from the live API — never hardcode a
+transition id, and never assume the transition's display name, which differs
+between projects (`Code Review` in some, `Ready for Code Review` in others):
+
+    mcp__atlassian__getJiraIssue({ cloudId, issueIdOrKey: '<KEY>', fields: ['status'] })
+    mcp__atlassian__getTransitionsForJiraIssue({ cloudId, issueIdOrKey: '<KEY>' })
+    # Pick the transition whose name matches /code review/i. If none does, STOP
+    # the cleanup and say so in step 7 — do not guess a neighbouring transition.
+    # If the ticket is still in "To Do", transition to the /in progress/i one
+    # first (some workflows have no direct To Do → Code Review edge).
+    mcp__atlassian__transitionJiraIssue({
+      cloudId, issueIdOrKey: '<KEY>',
+      transition: { id: '<resolved id>' },
+      fields: { customfield_14226: <ADF> },   // QA Notes
+    })
+
+Three deliberate departures from `push-branch`, each load-bearing:
+
+- **`customfield_13504` (Covered Information Data Inventory) is OMITTED.**
+  push-branch sets it to `No Impact` because a human is present and asserting
+  that themselves. An unattended harness setting it would be making a
+  data-privacy determination nobody reviewed. Leave the field untouched and let
+  the human set it at review time.
+- **No subtask loop.** The harness creates no Jira subtasks (phased work becomes
+  commits on the one PR), so there are none to transition.
+- **The ADF comes from the driver's array, not from parsing the PR body.**
+  push-branch re-parses because the body is its only artifact; the harness still
+  holds the array.
+
+**Jira failures never fail the run.** If any call errors — ticket not found, no
+matching transition, field rejected — record a `residue` note with the error, let
+`run-end` proceed on its existing status, and report the ticket as un-transitioned
+in step 7. The PR is the deliverable; the ticket state is bookkeeping. Never
+retry a transition that returned a field-validation error with the field removed;
+surface it instead, so a schema change in the project shows up as a visible gap
+rather than a silently degraded write.
 
 `partial` requires a reason (usually `subagent_budget_exhausted` or a unit
 blocker described in `--reason-detail`). Wall-clock durations are stamped
@@ -212,13 +336,16 @@ argument above, and its `tokens_note` is the `data` payload for the tokens
 observation was flagged `:estimated` — the anomalies scan keys off that flag:
 
     CLI tokens-finalize --tier HIGH=<n> --tier MID=<n>
-    CLI audit --target <path> --event '{"ts":"<now>","run_id":"<run_id>","phase":"implement","event":"note","data":<tokens_note from above>}'
+    CLI audit --target <path> --event '{"run_id":"<run_id>","phase":"implement","event":"note","data":<tokens_note from above>}'
 
 Omit `tokens-finalize` and the note entirely only if you spawned no subagents
 at all.
 
 **7. Report.** Tell the user: run id, per-criterion verification results, PR
-URL, and anything `partial`/`deferred` (including the landing checklist).
+URL, and anything `partial`/`deferred` (including the landing checklist). For
+jira-sourced runs also state the ticket outcome — the transition that landed
+(e.g. `TARS-1272: To Do → In Progress → Code Review`), or, if step 6b was
+skipped or errored, that the ticket was left where it was and why.
 
 ## Failure handling
 

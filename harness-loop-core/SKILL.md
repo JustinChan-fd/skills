@@ -314,6 +314,20 @@ Finalize the pipeline run in step 7 (`CLI run-end` with the tick's outcome).
   `record.json` for the next tick's stranded handling, same as today. This is
   harness-loop's whole role here: aggregate and summarize what each run
   already reported about itself, never author over it.
+- **Close that phase's timing span on the PIPELINE record, in the same breath
+  as `record-observed-tokens`** — you are the only party who can, because the
+  driver's own record covers only its own process:
+
+      CLI pipeline-phase --run-dir <LOOP_RUN_DIR> --phase <intake|plan|implement> --status <the driver's reported status> --child-run-id <the driver's run_id>
+
+  `--run-dir` is the LOOP's run dir, not the driver's. Spans chain: each one
+  starts where the previous ended (the first starts at the pipeline's
+  `started_at`), so the phases sum to the tick's wall clock **by construction**
+  and the dispatcher overhead between phases lands inside a span rather than
+  vanishing between them. On a measured hour-long pipeline that overhead was
+  5m36s — 9% of the run — invisible because the pipeline's `phases` array
+  shipped empty. Close the span even when the phase FAILED: a failed phase
+  still consumed clock time, and omitting it puts the gap back.
 - After EVERY driver returns, re-run `CLI loop-state` and act on `next`:
   advanced → dispatch the next phase; unchanged with the phase now `failed`
   → stop climbing (do not cascade a broken pipeline); unchanged and still
@@ -348,7 +362,34 @@ then appends the composed line to `<target>/.harness/loop.jsonl`:
 Then finalize THIS tick's pipeline run (opened in step 6) so the parent record
 carries the tick's outcome and syncs:
 
-    CLI run-end --target <target> --run-dir <LOOP_RUN_DIR> --status <succeeded if delivered/advanced, failed if the pipeline failed, cancelled if interrupted>
+    CLI run-end --target <target> --run-dir <LOOP_RUN_DIR> --status <succeeded if delivered/advanced, failed if the pipeline failed, cancelled if interrupted> [--pr-url <url> --pr-created-at <the PR's GitHub createdAt>]
+
+Pass the two PR flags on a tick that delivered one — the same url and
+`createdAt` the implement driver reported, from `gh pr view --json
+url,createdAt`. They are what make `start_to_pr_ms` (pipeline start → PR
+submitted) answerable from the record alone instead of by a live GitHub join.
+Omit both on a tick that opened no PR; they stay null, which is honest.
+
+Then read back the tick's timeline:
+
+    CLI timing --run-dir <LOOP_RUN_DIR>
+
+Every run on a target appends to the SAME `<target>/.harness/audit.jsonl`, which
+`timing` reads by default — so the dispatched phases' subagent spans are already
+counted and you do not pass `--events-from` for them. That flag is for a log
+`--run-dir` does not reach (a run whose phases executed against a DIFFERENT
+target repo); naming this target's own log there is redundant.
+
+The report answers the tick-level questions directly: `wall_ms` (total clock),
+`phases[]` (each phase's own clock, chained), `subagents[]` (every verifier
+round and discovery reader, with its tier), and `start_to_pr_ms` — pipeline
+start → the moment GitHub created the PR, the headline number for a harness
+run. `reconciled` compares the phase spans against wall clock within 5%
+(floor 60s). A `false` verdict exits 1 and is a **finding, not a tick
+failure**: never let it change the tick's outcome or retract delivered work.
+Surface it in the tick summary — `spawns_unclosed > 0` names a driver that
+audited a `spawn` without a `spawn-end`, and a large `unaccounted_ms` on a tick
+whose phases all closed means time went somewhere no span covers.
 
 Pass one `--phase-run <phase>=<run_dir>` for every phase THIS tick dispatched,
 in order (omit them all for a noop tick). loop-record builds the exact line
@@ -503,8 +544,10 @@ the table):
 >   truth — never re-read the source issue; carry forward any intake
 >   claims-audit corrections verbatim. For implement: PR title prefix from
 >   the manifest's change_type + the work-item id. If ISSUE_SOURCE==jira, the
->   Jira key rides in the title and summary only (NO GitHub Closes-# — the Jira
->   issue transitions in Jira after review). If ISSUE_SOURCE==github, the PR
+>   Jira key rides in the title and summary only (NO GitHub Closes-# — GitHub
+>   cannot auto-close a Jira key); instead step 6b moves the ticket to Code
+>   Review with the QA notes, and a human does the final resolve after review.
+>   If ISSUE_SOURCE==github, the PR
 >   body's `Closes-#<number>` is desired (auto-closes the issue on merge) —
 >   render-pr-body already emits it from --issue <number>. Either way, open the
 >   PR but NEVER merge it.>

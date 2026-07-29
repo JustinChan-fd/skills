@@ -18,21 +18,22 @@
 import { parseArgs } from 'node:util';
 import { readFileSync, appendFileSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
-import { join, dirname } from 'node:path';
+import { join, dirname, resolve } from 'node:path';
 import { loadSchema, validate } from './lib/validate.mjs';
 import { resolveConfig, sizeBudgets, expandHome, resolveProject, loadProjects, canonicalRepo } from './lib/config.mjs';
 import { resolveTarget } from './lib/target.mjs';
 import { gateDecision } from './lib/gate.mjs';
 import { qualityScore } from './lib/quality.mjs';
 import { appendAudit, HarnessError } from './lib/audit.mjs';
-import { initRun, readRecord, phaseEnd, finalizeRun, recordObservedTokens, stampTokensDirectional, finalizeTokens } from './lib/record.mjs';
+import { initRun, readRecord, phaseEnd, finalizeRun, recordObservedTokens, stampTokensDirectional, finalizeTokens, spawnEnd, pipelinePhase } from './lib/record.mjs';
+import { reconcileTiming } from './lib/timing.mjs';
 import { collectForRun, backfillDirectional } from './lib/tokens-collect.mjs';
 import { preflight } from './lib/preflight.mjs';
 import { scanAnomalies } from './lib/anomalies.mjs';
 import { scanResidue } from './lib/residue.mjs';
 import { loopState } from './lib/loopstate.mjs';
 import { syncRun, sweep } from './lib/telemetry.mjs';
-import { renderStatusComment, renderPrBody, renderBrief } from './lib/render.mjs';
+import { renderStatusComment, renderPrBody, renderBrief, renderQaNotesAdf } from './lib/render.mjs';
 import { composeLoopLine } from './lib/looprecord.mjs';
 import { normalizeJiraIssue } from './lib/jira.mjs';
 import { normalizeGithubIssue } from './lib/github.mjs';
@@ -267,6 +268,58 @@ try {
       appendAudit(join(v.target, '.harness'), JSON.parse(v.event));
       emit({ ok: true });
     }
+    case 'spawn-end': {
+      const v = opts({ 'run-dir': { type: 'string' }, 'agent-id': { type: 'string' }, 'task-type': { type: 'string' } });
+      const result = spawnEnd({ runDir: v['run-dir'], agentId: v['agent-id'], taskType: v['task-type'] });
+      // Exit 1 on an unmatched close: the driver is claiming to have closed a
+      // subagent it never opened, which means its own bookkeeping is wrong.
+      // Exiting 0 would let that pass as a successful call.
+      emit(result, result.matched ? 0 : 1);
+    }
+    case 'pipeline-phase': {
+      const v = opts({
+        'run-dir': { type: 'string' }, phase: { type: 'string' }, status: { type: 'string' },
+        'child-run-id': { type: 'string' },
+      });
+      emit(pipelinePhase({
+        runDir: v['run-dir'], phase: v.phase, status: v.status,
+        childRunId: v['child-run-id'] ?? null,
+      }));
+    }
+    case 'timing': {
+      const v = opts({ 'run-dir': { type: 'string' }, 'events-from': { type: 'string', multiple: true } });
+      const record = readRecord(v['run-dir']);
+      // This run's own audit slice by default. --events-from takes extra
+      // .harness dirs (or audit.jsonl paths) so a PIPELINE reconciliation can
+      // fold in its children's subagent spans, which live on the child runs.
+      const auditPaths = [join(v['run-dir'], '..', '..', 'audit.jsonl'), ...(v['events-from'] ?? [])];
+      const events = [];
+      // Dedupe on the RESOLVED path: the default is built with '..' segments and
+      // so is never string-equal to the same file typed by a caller. Naming a
+      // log twice used to read it twice and double every span it held.
+      const seenLogs = new Set();
+      for (const p of auditPaths) {
+        const path = resolve(p.endsWith('.jsonl') ? p : join(p, 'audit.jsonl'));
+        if (seenLogs.has(path)) continue;
+        seenLogs.add(path);
+        let text;
+        try {
+          text = readFileSync(path, 'utf8');
+        } catch {
+          continue; // a missing audit log contributes no spans; not an error
+        }
+        for (const line of text.split('\n')) {
+          if (!line) continue;
+          try {
+            events.push(JSON.parse(line));
+          } catch {
+            /* a torn line contributes no span */
+          }
+        }
+      }
+      const summary = reconcileTiming({ record, events });
+      emit(summary, summary.reconciled ? 0 : 1);
+    }
     case 'gate': {
       const v = opts({
         size: { type: 'string' }, rounds: { type: 'string' }, result: { type: 'string' }, delta: { type: 'string' },
@@ -315,6 +368,8 @@ try {
         // v2 graft: active time, per-model/per-phase agent counts, per-skill metrics.
         'active-ms': { type: 'string' }, 'agent-count': { type: 'string' },
         'skill-metrics': { type: 'string' },
+        // The delivered PR, so start-to-PR needs no live GitHub join.
+        'pr-url': { type: 'string' }, 'pr-created-at': { type: 'string' },
         ...TOKENS_COLLECT_OPTS,
       });
       const reason = v['reason-code']
@@ -329,6 +384,8 @@ try {
         activeMs: v['active-ms'] !== undefined ? Number(v['active-ms']) : null,
         agentCount: v['agent-count'] ? JSON.parse(v['agent-count']) : null,
         skillMetrics: v['skill-metrics'] ? JSON.parse(v['skill-metrics']) : null,
+        prUrl: v['pr-url'] ?? null,
+        prCreatedAt: v['pr-created-at'] ?? null,
       });
       // Final directional-token collection, before the sync, so the synced copy
       // carries the sums. Best-effort: never fail run-end over enrichment.
@@ -361,6 +418,7 @@ try {
     case 'render-pr-body': {
       const v = opts({
         'change-type': { type: 'string' }, issue: { type: 'string' }, summary: { type: 'string' },
+        changes: { type: 'string' }, 'qa-notes': { type: 'string' },
         'result-rows': { type: 'string' }, landing: { type: 'string' }, 'run-id': { type: 'string' },
         notes: { type: 'string' },
       });
@@ -368,11 +426,23 @@ try {
         changeType: v['change-type'],
         issue: v.issue ?? null,
         summary: v.summary ?? '',
+        changes: v.changes ? JSON.parse(v.changes) : [],
+        qaNotes: v['qa-notes'] ? JSON.parse(v['qa-notes']) : [],
         resultRows: v['result-rows'] ? JSON.parse(v['result-rows']) : [],
         landingChecklist: v.landing ? JSON.parse(v.landing) : [],
         runId: v['run-id'],
         notes: v.notes ? JSON.parse(v.notes) : [],
       }));
+    }
+    case 'render-qa-notes-adf': {
+      // Jira-only: the ADF payload for a ticket's QA Notes field. Emitted as
+      // JSON on stdout so the driver can pass it straight to
+      // transitionJiraIssue's fields.customfield_14226.
+      const v = opts({ 'qa-notes': { type: 'string' }, 'pr-url': { type: 'string' } });
+      emitText(JSON.stringify(renderQaNotesAdf({
+        qaNotes: v['qa-notes'] ? JSON.parse(v['qa-notes']) : [],
+        prUrl: v['pr-url'] ?? '',
+      })));
     }
     case 'tokens-finalize': {
       const v = opts({ tier: { type: 'string', multiple: true } });
@@ -586,9 +656,13 @@ try {
           'loop-state': '--target <path> --issue <n>  (next pipeline action for an issue: intake|plan|implement|done + stranded run)',
           'residue-scan': '--target <path> --issue <n>  (u1-shaped residue/defect notes for an issue from <target>/.harness/audit.jsonl; { items: [...] }, exit 0 even when empty)',
           'phase-end': '--run-dir <dir> --phase <p> --status <s> [--rounds n] [--score x] [--size S|M|L]',
-          'run-end': '--target <path> --run-dir <dir> --status <s> [--reason-code c --reason-detail d] [--tokens-by-tier json]',
+          'run-end': '--target <path> --run-dir <dir> --status <s> [--reason-code c --reason-detail d] [--tokens-by-tier json] [--pr-url <url> --pr-created-at <iso>]',
+          'spawn-end': '--run-dir <dir> --agent-id <id> --task-type <t>  (close the span opened by a spawn; writes a spawn_end carrying the computed wall_ms — exit 1 when no open spawn matches)',
+          'pipeline-phase': '--run-dir <dir> --phase intake|plan|implement --status <s> [--child-run-id <id>]  (close a timing span on the PIPELINE record for a child phase run; spans chain so they sum to wall clock)',
+          timing: '--run-dir <dir> [--events-from <.harness-dir-or-audit.jsonl> ...]  (wall-clock accounting: phase spans, subagent spans, start_to_pr_ms, phase_sum_ms vs wall_ms against a 5%/60s tolerance; exit 1 when unreconciled. --events-from is only for a log --run-dir does not reach — this target\'s own audit.jsonl is already read, and naming it again is deduped)',
           'render-status-comment': '--phase <p> --status <s> --run-id <id> --next <text> [--size <S|M|L> --size-rationale <text>] [--plan-units <n> --plan-blocking <n>] [--pr-url <url>] [--notes <json-array>]  (print the templates/status-comment.md comment body to stdout)',
-          'render-pr-body': '--issue <n> --summary <text> --run-id <id> [--change-type <t>] [--result-rows <json>] [--landing <json>] [--notes <json>]  (print the implement PR body — Closes-#, entry-contract table, landing checklist, run id, Advisory-residue section — to stdout)',
+          'render-qa-notes-adf': '--qa-notes <json> --pr-url <url>  (print the Jira QA-Notes ADF payload for customfield_14226 as JSON to stdout; falls back to a See-PR paragraph when there are no steps — jira-sourced runs only)',
+          'render-pr-body': '--issue <n> --summary <text> --run-id <id> --changes <json> --qa-notes <json> [--change-type <t>] [--result-rows <json>] [--landing <json>] [--notes <json>]  (print the implement PR body — Closes-#, ## Changes, ## QA Notes, then a collapsed <details> block holding the entry-contract table, landing checklist, and advisory residue — to stdout)',
           'render-brief': '--file <path>  (validate a brief JSON against the brief schema and print the rendered seven-item Agent-tool prompt to stdout)',
           'tokens-finalize': '--tier <TIER>=<amount>[:estimated] [--tier ...]  (sum per-tier subagent-token observations; print { tokens_by_tier, tokens_note } — the note carries estimated:true when any observation is :estimated)',
           'loop-record': '--target <path> --issue <n> --actions <json> --outcome <s> --anomalies-scan <path> [--pr-url <url>] [--phase-run <phase>=<run_dir> ...] [--ts <iso>]  (compose one tick\'s loop.jsonl line from the anomalies scan + each dispatched run\'s tokens_observed, and append it to <target>/.harness/loop.jsonl)',

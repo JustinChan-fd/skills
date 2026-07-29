@@ -96,8 +96,9 @@ files/symbols your units will reference match what `repo_scan` says (things
 drift between runs). Spawn budgeted discovery subagents (at most
 `max_parallel_readers` for the manifest's size; task type
 `read_only_discovery`, LOW/haiku, MINIMAL reasoning, brief-file + validate +
-render the prompt with `CLI render-brief --file <path>` + audit `spawn`) ONLY
-when the manifest's `repo_scan`
+render the prompt with `CLI render-brief --file <path>` + audit `spawn`, then
+`CLI spawn-end --run-dir <run_dir> --agent-id <agent-id> --task-type
+read_only_discovery` the moment it returns) ONLY when the manifest's `repo_scan`
 lacks something planning genuinely needs — and audit a `note` event naming
 the gap, so intake learns what it should have captured. Persist any findings
 you use to `findings/`, and resolve any `needs-decision-*.json` before
@@ -173,7 +174,18 @@ without a non-empty `task_type` is rejected as `invalid_audit_entry`) and a
 anomalies` integrity scan checks succeeded runs for one `verifier_round` per
 round used and a verifier `spawn`):
 
-    CLI audit --target <path> --event '{"ts":"<now>","run_id":"<run_id>","phase":"plan","agent_id":"<verifier-agent-id>","event":"spawn","data":{"tier":"MID","task_type":"verifier_plan"}}'
+    CLI audit --target <path> --event '{"run_id":"<run_id>","phase":"plan","agent_id":"<verifier-agent-id>","event":"spawn","data":{"tier":"MID","task_type":"verifier_plan"}}'
+
+and close that span the moment the verifier returns, before you gate — **once
+per round**, with a distinct `agent_id` per round, so each round's duration is
+its own number:
+
+    CLI spawn-end --run-dir <run_dir> --agent-id <verifier-agent-id> --task-type verifier_plan
+
+The CLI finds the matching open `spawn`, computes `wall_ms` itself, and writes a
+`spawn_end`. It **exits 1 when nothing matches** — that means the
+`agent_id`/`task_type` pair does not match a spawn you audited; fix the
+mismatch rather than moving on.
 
 Then `CLI gate --size <size> --rounds <n> --result <r> --score <score>` (always pass
 the score: a high-scoring advisory-only round opens immediately with
@@ -217,7 +229,11 @@ Post-merge outcomes are NOT contract criteria (they're unverifiable pre-merge)
   verdicts the verifier could issue in the same pass.
 - **Size L:** spawn a fresh `entry_contract` agent (MID/sonnet, FULL
   reasoning) with the proposal, the plan, and the manifest; it approves or
-  amends each criterion. One pass, no loop.
+  amends each criterion. One pass, no loop. Audit its `spawn`
+  (`data.task_type: "entry_contract"`) and `CLI spawn-end --run-dir <run_dir>
+  --agent-id <agent-id> --task-type entry_contract` when it returns — this is
+  the one L-only span, and without it an L run's timeline has a hole exactly
+  where S and M runs have none.
 - Either path: you (single writer) apply the amendments, ground-check any
   factual claims in them against the repo before accepting, and audit a
   `note` event summarizing verdicts.
@@ -272,7 +288,7 @@ event. It omits untouched tiers and sets `estimated:true` iff any observation
 was flagged `:estimated` — the anomalies scan keys off that flag:
 
     CLI tokens-finalize --tier MID=<n> --tier LOW=<n>:estimated
-    CLI audit --target <path> --event '{"ts":"<now>","run_id":"<run_id>","phase":"plan","event":"note","data":<tokens_note from above>}'
+    CLI audit --target <path> --event '{"run_id":"<run_id>","phase":"plan","event":"note","data":<tokens_note from above>}'
 
 Omit `tokens-finalize` and the note entirely only if you spawned no subagents
 at all.)

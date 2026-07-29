@@ -72,6 +72,8 @@ export function initRun({ targetDir, repo, kind, source, issue = null, branch = 
     skill_metrics: null,
     started_at: now.toISOString(),
     ended_at: null,
+    pr_url: null,
+    pr_created_at: null,
     synced_at: null,
     schema_version: SCHEMA_VERSION,
   };
@@ -170,17 +172,121 @@ export function phaseEnd({ runDir, phase, status, rounds = null, score = null, r
     record.started_at,
   );
   const wallMs = now.getTime() - new Date(phaseStart).getTime();
-  record.phases.push({ phase, status, rounds_used: rounds, verifier_score: score, reason, ended_at: now.toISOString(), wall_ms: wallMs });
+  // started_at is stamped, not just used to derive wall_ms: a span that carries
+  // only an end and a duration forces every reader to re-derive its start, and
+  // two readers deriving it differently is how a timeline stops adding up.
+  record.phases.push({ phase, status, rounds_used: rounds, verifier_score: score, reason, started_at: phaseStart, ended_at: now.toISOString(), wall_ms: wallMs });
   if (size) record.size = size;
   writeRecord(runDir, record);
   appendAudit(harnessDirOf(runDir), { ts: now.toISOString(), run_id: record.run_id, phase, event: 'phase_end', data: { status, rounds, score, wall_ms: wallMs } });
   return record;
 }
 
+// Close a phase span on the PIPELINE record — the loop's own tick record, whose
+// `phases` array shipped EMPTY on every run to date. Its 59m59s wall clock had
+// no internal structure, so the three child phase runs summing to 54m23s left
+// 5m36s of dispatcher hand-off time invisible rather than merely unlabelled.
+//
+// Deliberately NOT phaseEnd: that function belongs to a phase driver reporting
+// its own verifier rounds and score, and its CLI wrapper triggers token
+// collection. The loop is reporting elapsed time for a child run it dispatched,
+// so a span here carries the child's run id and nothing about tokens or scores.
+// Spans chain from the previous span's end (the run start for the first), which
+// is what makes them sum to wall clock by construction rather than by luck.
+export function pipelinePhase({ runDir, phase, status, childRunId = null, now = new Date() }) {
+  const record = readRecord(runDir);
+  record.phases = record.phases.filter((p) => p.phase !== phase);
+  const startedAt = record.phases.reduce(
+    (latest, p) => (p.ended_at && p.ended_at > latest ? p.ended_at : latest),
+    record.started_at,
+  );
+  const wallMs = now.getTime() - new Date(startedAt).getTime();
+  record.phases.push({
+    phase, status, child_run_id: childRunId,
+    started_at: startedAt, ended_at: now.toISOString(), wall_ms: wallMs,
+  });
+  writeRecord(runDir, record);
+  appendAudit(harnessDirOf(runDir), {
+    ts: now.toISOString(), run_id: record.run_id, phase, event: 'phase_end',
+    data: { status, wall_ms: wallMs, child_run_id: childRunId },
+  });
+  return record;
+}
+
+// Close the span opened by a `spawn` event and write a `spawn_end` carrying the
+// subagent's wall time.
+//
+// Why the harness computes the duration instead of the driver reporting it: a
+// subagent's wall time was only ever measurable when its return coincided with
+// a `verifier_round` event. Discovery agents emitted a `spawn` and nothing
+// else, so on TARS-1272 the 6m32s window after intake's two parallel discovery
+// spawns was two agents PLUS driver work, with no way to separate them. Asking
+// the driver to subtract two timestamps would put arithmetic in the LLM's hands
+// and re-introduce the precision problem; the spawn's own `ts` is already on
+// disk, so the deterministic spine does the subtraction.
+//
+// Returns { matched, wall_ms, spawn_ts }. An unmatched close writes NOTHING and
+// does not throw: a driver that emits a spawn_end for an agent it never spawned
+// has a bookkeeping bug, and fabricating a duration would hide it — the caller
+// reports matched:false and the run continues.
+export function spawnEnd({ runDir, agentId, taskType, now = new Date() }) {
+  const record = readRecord(runDir);
+  const harnessDir = harnessDirOf(runDir);
+  const auditPath = join(harnessDir, 'audit.jsonl');
+  let lines = [];
+  try {
+    lines = readFileSync(auditPath, 'utf8').split('\n').filter(Boolean);
+  } catch {
+    return { matched: false, wall_ms: null, spawn_ts: null };
+  }
+
+  // Walk newest-first and take the first OPEN spawn: a re-spawned agent id (the
+  // implement verifier runs as the same logical agent across rounds) must close
+  // its latest spawn, not its first, or round 2's duration would absorb round 1
+  // and the sum would exceed the phase it sits in.
+  let closed = 0;
+  for (let i = lines.length - 1; i >= 0; i -= 1) {
+    let e;
+    try {
+      e = JSON.parse(lines[i]);
+    } catch {
+      continue; // a torn line is not a spawn we can match
+    }
+    if (e.run_id !== record.run_id) continue;
+    if (e.agent_id !== agentId) continue;
+    if (e.data?.task_type !== taskType) continue;
+    if (e.event === 'spawn_end') {
+      closed += 1;
+      continue;
+    }
+    if (e.event !== 'spawn') continue;
+    if (closed > 0) {
+      closed -= 1; // this spawn is already accounted for by a later spawn_end
+      continue;
+    }
+    const spawnMs = Date.parse(e.ts);
+    if (Number.isNaN(spawnMs)) return { matched: false, wall_ms: null, spawn_ts: null };
+    const wallMs = now.getTime() - spawnMs;
+    appendAudit(harnessDir, {
+      ts: now.toISOString(), run_id: record.run_id, phase: e.phase ?? null, agent_id: agentId,
+      event: 'spawn_end',
+      data: { task_type: taskType, tier: e.data?.tier ?? null, round: e.data?.round ?? null, wall_ms: wallMs },
+    });
+    return { matched: true, wall_ms: wallMs, spawn_ts: e.ts };
+  }
+  return { matched: false, wall_ms: null, spawn_ts: null };
+}
+
 export function finalizeRun({ runDir, status, reason = null, wallMs = null, tokensByTier = null, billingMode = null, priceTableVersion = null, now = new Date(),
   // v2 graft: active (gap-capped) time beside wall clock, per-skill perf metrics,
   // and agent counts by model/phase. All optional — omitting leaves prior values.
-  activeMs = null, agentCount = null, skillMetrics = null }) {
+  activeMs = null, agentCount = null, skillMetrics = null,
+  // The delivered artifact and when GitHub created it. Without these,
+  // "pipeline start → PR submitted" — the headline number for a harness run —
+  // needs a live `gh pr view` join, so it is unanswerable from the sink and
+  // unanswerable at all once the PR is gone. A run that opens no PR (any
+  // failure, and every intake/plan phase) leaves both null.
+  prUrl = null, prCreatedAt = null }) {
   const record = readRecord(runDir);
   record.status = status;
   record.reason = reason;
@@ -192,6 +298,8 @@ export function finalizeRun({ runDir, status, reason = null, wallMs = null, toke
   if (activeMs !== null) record.active_ms = activeMs;
   if (agentCount !== null) record.agent_count = agentCount;
   if (skillMetrics !== null) record.skill_metrics = skillMetrics;
+  if (prUrl !== null) record.pr_url = prUrl;
+  if (prCreatedAt !== null) record.pr_created_at = prCreatedAt;
   if (tokensByTier) record.tokens_by_tier = tokensByTier;
   writeRecord(runDir, record);
   appendAudit(harnessDirOf(runDir), { ts: now.toISOString(), run_id: record.run_id, event: 'run_end', data: { status, wall_ms: record.wall_ms } });
