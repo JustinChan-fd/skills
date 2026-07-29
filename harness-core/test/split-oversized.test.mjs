@@ -17,9 +17,11 @@
 // makes the agent retry blind with no instruction on HOW to split. So the enforcement is
 // deterministic and post-hoc: split the array in code, after the architect returns.
 //
-// The leverage is already in harness-implement: it runs same-group tasks concurrently
-// (workflow.js:638), downgrades to sequential only on shared files, and lands ONE commit per
-// group. So N same-groupId, block:'parallel' siblings with disjoint files[] need no new
+// The leverage is already in harness-implement: it runs same-group tasks concurrently,
+// downgrades to sequential only on shared files, and lands ONE commit per group. (That
+// orchestrator lives outside this repo — the file/line it used to cite here does not exist
+// locally, so do not go looking for it.) So N same-group_id, block:'parallel' siblings with
+// disjoint locations[] need no new
 // orchestration. This is not a token-limit fallback — it is 1 agent doing 102 sequential edits
 // versus 10 doing ~10 each.
 

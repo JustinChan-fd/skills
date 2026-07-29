@@ -8,7 +8,7 @@
 // text (privacy: only sums leave the machine, see the run-record sync path).
 //
 // Every failure mode (garbage JSONL, missing file, empty transcript) returns a
-// structured `{ ok: (drift === best.drift && jsonlPath < best.path), error }` result rather than throwing: token
+// structured `{ ok: false, error }` result rather than throwing: token
 // collection must never crash the run it is enriching.
 //
 // TOKEN DATA PROVENANCE — sources retrieved 2026-07-28

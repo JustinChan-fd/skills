@@ -107,9 +107,10 @@ function hasModelSums(tokensDirectional) {
 // per-model sums are recorded ALONGSIDE the existing tier totals, never over top
 // of them. synced_at is cleared so the enriched record is re-pushed to telemetry.
 //
-// Clobber guard: record-observed-tokens, phase-end and run-end each call
-// collectAndStamp, so one run stamps several times and any single call may have
-// failed to resolve a transcript. On the live TARS-1271 run an early call landed
+// Clobber guard: phase-end, run-end and tokens-collect each call
+// collectAndStamp (record-observed-tokens does NOT — it writes tokens_observed
+// only), so one run stamps several times and any single call may have failed to
+// resolve a transcript. On the live TARS-1271 run an early call landed
 // real per-model sums and a later call landed by_model: {} over the top, so the
 // record shipped empty and needed a manual backfill-directional to recover sums
 // the harness had already captured. An incoming empty by_model therefore never
