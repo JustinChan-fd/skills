@@ -10,33 +10,42 @@ corrected here.
 
 ## 1. What the numbers actually are
 
-One delivered issue (jarvis #4, 2026-07-29, pipeline run `…172b51`) cost
-**$104.69** at published first-party API list rates.
+> **CORRECTED 2026-07-29 (later session).** Every figure first written in this
+> section was **2.18× too high**. `tokens-collect.mjs` summed one usage row per
+> transcript *line*, but Claude Code writes one line per **content block** of an
+> assistant response, repeating the same `message.usage` on each — so a single
+> API call was billed up to 4 times. Fixed test-first; see §5. The numbers below
+> are re-measured through the fixed collector over the same run windows. The
+> struck figures are kept only so a reader who saw the old demo can reconcile.
 
-| phase | cost | share |
-|---|---|---|
-| intake | $2.89 | 3% |
-| plan | $1.64 | 2% |
-| **implement** | **$93.83** | **90%** |
-| residual opus outside implement | $5.12 | 5% |
-| sonnet across all phases | $5.73 | 5% |
-| **tick total** | **$104.69** | |
+One delivered issue (jarvis #4, 2026-07-29, pipeline run `…172b51`) cost
+**$48.05** at published first-party API list rates (~~$104.69~~).
+
+| phase | cost | share | as first reported |
+|---|---|---|---|
+| intake | $1.62 | 3% | ~~$2.89~~ |
+| plan | $0.99 | 2% | ~~$1.64~~ |
+| **implement** | **$42.30** | **88%** | ~~$93.83~~ |
+| residual opus outside implement + sonnet | $3.14 | 7% | ~~$10.85~~ |
+| **tick total** | **$48.05** | | ~~$104.69~~ |
 
 Implement, by token column (all Opus 5):
 
 | column | tokens | cost | share |
 |---|---|---|---|
-| uncached input | 8,554,331 | $45.63 | **46%** |
-| cache_read | 55,500,066 | $28.82 | 29% |
-| cache_creation | 1,915,258 | $12.94 | 13% |
-| output | 453,656 | $11.56 | 12% |
+| uncached input | 3,925,128 | $19.63 | **46%** |
+| cache_read | 28,075,283 | $14.04 | 33% |
+| cache_creation | 668,055 | $4.18 | 10% |
+| output | 178,440 | $4.46 | 11% |
 
-Uncached input is 13% of input tokens but 46% of cost. Cache saved $284.73
-(73%) against a no-cache counterfactual of $389.42.
+Uncached input is 12% of input tokens but 46% of cost — the shape survived the
+correction intact, which is why the wrong absolutes still pointed at the right
+problem. Cache saved $125.50 (75%) against a no-cache counterfactual of $167.80.
 
 **Finance frame:** enterprise average is ~$13/developer/active-day,
 $150–250/developer/month, 90% of users under $30/active-day. This tick is
-**8.1× an average developer's entire day**, 52% of a monthly seat.
+**3.7× an average developer's entire day**, 24% of a monthly seat
+(~~8.1×, 52%~~).
 
 ---
 
@@ -47,7 +56,12 @@ $150–250/developer/month, 90% of users under $30/active-day. This tick is
 transcribed, and named rate verification as the blocker on everything else.
 That was wrong. Published Opus 5 is **$5/$25**, not $15/$75 — the $15 tier is
 Opus **4.1**, deprecated. Our HIGH and MID matched Opus 5 and Sonnet 4.6
-exactly. **$104.69 is the real figure. Do not re-open this.**
+exactly. **The rate table is right. Do not re-open it.**
+
+That said, the tick total this section originally derived from those correct
+rates — $104.69 — was **not** right: the token counts fed into them were
+double-counted. The rates were never the problem; the collector was. Correct
+figure **$48.05** (§1, §5).
 
 **Published rates** (platform.claude.com/docs/en/about-claude/pricing,
 retrieved 2026-07-29), per MTok:
@@ -151,30 +165,75 @@ exited 0. If a sonnet driver needs a 3rd round, 3 × $56 ≈ $169 vs Opus's
 2 × $47 ≈ $94 — **worse off.** That risk is precisely what the Opus verifier
 seat is there to absorb. Measure rounds, not just price.
 
-### Lever B — the 5-minute cache TTL. Free; no quality tradeoff.
+### ~~Lever B — the 5-minute cache TTL~~ — **DISPROVED. Do not act on this.**
 
-The implement driver blocks synchronously on each nested verifier dispatch.
-From its own `events.jsonl`:
-- round 1: spawn **07:15:45** → return **07:24:10** = **8m 25s**
-- round 2: spawn **07:39:41** → return **07:49:50** = **10m 09s**
+The original claim: the implement driver blocks synchronously on each nested
+verifier dispatch (round 1 spawn 07:15:45 → return 07:24:10 = 8m 25s; round 2
+07:39:41 → 07:49:50 = 10m 09s), both gaps exceed the 5-minute TTL, so its cache
+expired while it waited and it re-sent full context at full input rate.
 
-Both exceed the 5-minute TTL. The driver's own cache expired while it waited,
-then it re-sent the full context at full input rate. That is the 8.55M
-uncached input tokens and $45.63.
+**Measured against the driver's own transcript: false.** The three calls
+immediately following those gaps (7.9m / 5.1m / 9.4m of idle) each report
+`input_tokens = 2` and a full `cache_read`. The cache survived every gap — TTL
+is refreshed on each hit and is inactivity-based, and nothing here was inactive
+long enough to matter. Lever B would buy nothing.
 
-Fixing it: **implement $93.83 → $57.89.** Paying the 1h-write premium
-(2× instead of 1.25×) on all 1.92M cache_creation costs **$7.77** and saves
-**$41.06** — a 5:1 return.
+It was also never ours to pull: the TTL is chosen by auth path
+(`ENABLE_PROMPT_CACHING_1H` / `FORCE_PROMPT_CACHING_5M` env vars, 1h automatic
+on a subscription, 5m on API key / Bedrock). **No TTL surface exists anywhere in
+`harness-core`**, so "flip the TTL" was never a config change.
+
+### Lever B′ — the real cause: cache-breakpoint rejections at the gateway
+
+Same 46% uncached-input line, different mechanism. Of 162 deduplicated driver
+calls, **28 share one signature**: `cache_read` exactly 45,135 (the
+system-prompt prefix — identical to the run's very first cache write),
+`cache_creation` = 0, preceding gap 4s / 6s / 43s (min / median / max, nowhere
+near the 300s TTL), directly following a call that wrote cache successfully, and
+every miss streak exactly 1 call long. **Those 28 calls carry 3,449,523 of the
+driver's 3,459,601 uncached input tokens — 99.7%.**
+
+The pattern is not confined to the driver. Across the whole implement subtree in
+its run window (208 deduplicated calls, 3,925,128 uncached input), **41 calls
+wrote no cache while sending >1,000 uncached input tokens, and those 41 carry
+3,922,137 tokens — 99.9% of the phase's uncached input.** Nearly all of the
+phase's most expensive line item sits in 20% of its calls, each of which looks
+like a cache write that didn't take.
+
+Non-sticky, isolated, sub-minute misses are not expiry — expiry is sticky and
+time-correlated. They match the documented custom-`ANTHROPIC_BASE_URL`
+behaviour: *if the gateway rejects the cache breakpoint on a block, Claude Code
+retries the request without it.* Requests here are Bedrock-served (`msg_bdrk_*`
+ids) through `ANTHROPIC_BASE_URL=https://developer-bedrock-platform.fandango.com`
+(Keystone), with `ANTHROPIC_API_KEY` unset.
+
+**This is a gateway question, not a harness change.** Two things to ask the
+Keystone owners, both of which produce exactly this signature:
+1. Does the gateway forward `cache_control` breakpoints unmodified?
+2. What is its per-model **minimum cacheable prefix length**? A prefix under the
+   minimum is silently not cached.
+
+Until one of those is answered there is no harness-side action. Do not spend
+effort on a code fix for this line.
 
 ### Both levers together
 
+Baseline is the corrected $48.05. Lever A's percentages are re-applied to it;
+they were ratios between model rates, so the correction rescales them without
+changing the ranking. **B is dropped — it was arithmetic over a false premise.**
+
 | scenario | tick | vs baseline | dev-days |
 |---|---|---|---|
-| baseline (as run) | $104.69 | — | 8.1× |
-| A only (Sonnet 4.6 driver) | $70.73 | −32% | 5.4× |
-| B only (cache misses fixed, keep Opus) | $63.62 | −39% | 4.9× |
-| A + B (Sonnet 5 intro + no misses) | $26.98 | **−74%** | 2.1× |
-| A + B with 1h writes | $30.64 | −71% | 2.4× |
+| baseline (as run) | $48.05 | — | 3.7× |
+| A only (Sonnet 4.6 driver) | ≈$32.47 | −32% | 2.5× |
+| A (Sonnet 5 intro driver) | ≈$21.62 | −55% | 1.7× |
+| B′ (gateway caching fixed, keep Opus) | $30.40 | −37% | 2.3× |
+
+B′ is **measured, not estimated**: if those 41 implement-subtree calls had read
+their 3,922,137 tokens from cache ($0.50/Mtok) instead of paying uncached input
+rate ($5.00/Mtok), that line drops by **$17.65** — implement $42.30 → **$24.65**,
+tick $48.05 → **$30.40**. It is an upper bound on the prize (it assumes a perfect
+hit on every one of them), **not** a plan — the fix, if any, is not in this repo.
 
 ---
 

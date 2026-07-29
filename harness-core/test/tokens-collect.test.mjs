@@ -690,6 +690,155 @@ test('collectFromFiles on an empty list fails with no_usage, never throws', () =
   assert.equal(r.error.code, 'no_usage');
 });
 
+// ---- one API call, many transcript lines: the message.id dedupe ----
+//
+// Claude Code writes ONE JSONL LINE PER CONTENT BLOCK of an assistant response
+// (thinking / text / tool_use / tool_use …), repeating the SAME `message.usage`
+// on every one and chaining them by parentUuid under a single `message.id`.
+// Summing per line therefore bills one API call two, three, or four times.
+//
+// Measured on the jarvis #4 implement driver: 310 usage rows carrying only 162
+// distinct message.ids, 108 ids repeating up to 4x — a ~2.2x inflation of every
+// token and dollar figure the harness has ever reported.
+//
+// This shipped in the original port and survived 470 tests because no fixture
+// had the shape: fixtures/iterations.jsonl was hand-authored for the
+// iterations[] path and carries a null id on every row. Across 94,416 real
+// usage rows in 6,254 local transcripts, top-level `iterations` never occurs,
+// `message.usage.iterations` is always empty, and EVERY row carries a
+// message.id — so the split-block shape is the universal one and the
+// iterations[] branch is speculative. fixtures/split-blocks.jsonl is generated
+// from the real transcript (content reduced to block-type names) rather than
+// hand-authored, because hand-authoring is precisely what missed this.
+
+const SPLIT_BLOCKS = 'split-blocks.jsonl';
+
+// Keep only the first line per message.id — an independently-computed
+// deduplication used to pin invariants the parser must satisfy either way.
+function firstPerMessageId(text) {
+  const seen = new Set();
+  return text
+    .split('\n')
+    .filter((l) => l.trim() !== '')
+    .filter((l) => {
+      const id = JSON.parse(l)?.message?.id;
+      if (id == null) return true;
+      if (seen.has(id)) return false;
+      seen.add(id);
+      return true;
+    })
+    .join('\n');
+}
+
+// One usage line with an explicit message.id.
+const idLine = (id, ts, model, u) =>
+  JSON.stringify({ timestamp: ts, message: { id, model, usage: u } });
+
+test('two lines sharing one message.id count that API call once', () => {
+  // The minimal real shape: a text block and a tool_use block from one response.
+  const u = { input_tokens: 100, output_tokens: 20, cache_read_input_tokens: 5_000, cache_creation_input_tokens: 40 };
+  const text = [
+    idLine('msg_a', '2026-07-29T00:00:10.000Z', 'claude-opus-5', u),
+    idLine('msg_a', '2026-07-29T00:00:10.002Z', 'claude-opus-5', u),
+  ].join('\n');
+  const r = collectFromText(text);
+  assert.equal(r.ok, true);
+  assert.deepEqual(r.by_model['claude-opus-5'], {
+    input: 100, output: 20, cache_read: 5_000, cache_creation: 40,
+  });
+});
+
+test('four lines sharing one message.id count that API call once (real split-block shape)', () => {
+  // fixtures/split-blocks.jsonl: 7 lines, 3 distinct message.ids (4x, 2x, 1x).
+  const r = collectFromText(readFixture(SPLIT_BLOCKS));
+  assert.equal(r.ok, true);
+  assert.deepEqual(r.by_model['claude-opus-5'], {
+    input: 8_926, // 2 + 8922 + 2
+    output: 610, // 426 + 71 + 113
+    cache_read: 138_576, // 67992 + 0 + 70584
+    cache_creation: 49_941, // 2592 + 45135 + 2214
+  });
+  // Per-line summing gives 17,854 input — the 2.0x here is the same defect that
+  // inflated the real run by 2.2x. Pinned as a number so a partial fix fails.
+  assert.notEqual(r.by_model['claude-opus-5'].input, 17_854, 'per-line summing is back');
+});
+
+test('usage rows with no message.id are each counted, never collapsed together', () => {
+  // The trap in the obvious fix: `seen.add(msg.id)` treats undefined as one key
+  // and folds every id-less row into a single call — swapping a 2.2x overcount
+  // for a silent undercount. Older transcript lines and every synthetic fixture
+  // here lack an id, so this must stay additive.
+  const u = { input_tokens: 10, output_tokens: 1, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 };
+  const text = [
+    usageLine('2026-07-29T00:00:10.000Z', 'claude-opus-5', u),
+    usageLine('2026-07-29T00:00:20.000Z', 'claude-opus-5', u),
+    usageLine('2026-07-29T00:00:30.000Z', 'claude-opus-5', u),
+  ].join('\n');
+  const r = collectFromText(text);
+  assert.equal(r.by_model['claude-opus-5'].input, 30, 'id-less rows collapsed into one');
+  assert.equal(r.by_model['claude-opus-5'].output, 3);
+});
+
+test('id-less iterations[] sub-entries still all count under a deduplicated parent line', () => {
+  // The two rules meet on one line: the parent's message.usage is deduped by id,
+  // while its iterations[] sub-entries carry no id and must each be added. The
+  // existing iterations fixture cannot show this — its parent has a null id too.
+  const line = (uuid) => JSON.stringify({
+    timestamp: '2026-07-29T00:00:10.000Z',
+    uuid,
+    message: {
+      id: 'msg_it',
+      model: 'claude-opus-5',
+      usage: { input_tokens: 10, output_tokens: 5 },
+    },
+    iterations: [
+      { usage: { input_tokens: 100, output_tokens: 50 } },
+      { message: { usage: { input_tokens: 200, output_tokens: 80 } } },
+    ],
+  });
+  // The parent id repeats across two content-block lines; its 10 counts once,
+  // and each line's id-less sub-entries count on their own.
+  const r = collectFromText([line('a'), line('b')].join('\n'));
+  assert.equal(r.by_model['claude-opus-5'].input, 10 + (100 + 200) * 2);
+});
+
+test('peak_context is unchanged by deduplication — the fingerprint must not move', () => {
+  // peak_context is a MAX, so it is structurally immune to duplicate rows: this
+  // is why the #17/#18 fingerprint work passed cleanly over an inflated sum and
+  // lent it false confidence. Pinned because a dedupe that also gated the peak
+  // loop would break transcript identity matching silently.
+  const raw = readFixture(SPLIT_BLOCKS);
+  const deduped = collectFromText(firstPerMessageId(raw));
+  const r = collectFromText(raw);
+  assert.equal(r.peak_context, 72_913, 'largest single call: 2 + 113 + 70584 + 2214');
+  assert.equal(r.peak_context, deduped.peak_context);
+  // And the peak stays a peak, not a sum, after the fix.
+  const m = r.by_model['claude-opus-5'];
+  assert.ok(r.peak_context < m.input + m.output + m.cache_read + m.cache_creation);
+});
+
+test('two distinct message.ids in one file are both counted — dedupe must not over-collapse', () => {
+  const text = [
+    idLine('msg_a', '2026-07-29T00:00:10.000Z', 'claude-opus-5', { input_tokens: 100, output_tokens: 10 }),
+    idLine('msg_b', '2026-07-29T00:00:20.000Z', 'claude-opus-5', { input_tokens: 200, output_tokens: 20 }),
+  ].join('\n');
+  const r = collectFromText(text);
+  assert.equal(r.by_model['claude-opus-5'].input, 300);
+  assert.equal(r.by_model['claude-opus-5'].output, 30);
+});
+
+test('active_ms and timestamps are unchanged by deduplication', () => {
+  // The fix gates token attribution only. Split-block lines are the same call
+  // milliseconds apart, so their stamps add ~2ms of active time — dropping them
+  // would silently shorten every measured run. Timestamps stay per-line.
+  const r = collectFromText(readFixture(SPLIT_BLOCKS));
+  assert.equal(r.timestamps.min, '2026-07-29T07:03:21.138Z');
+  assert.equal(r.timestamps.max, '2026-07-29T07:03:52.002Z');
+  // gaps over the 7 sorted stamps: 2 + 22979 + 2 + 2 + 5 + 7874 ms, none capped
+  assert.equal(r.active_ms, 30_864);
+  assert.equal(r.lines_parsed, 7, 'every line is still parsed and stamped');
+});
+
 test('collectForRun in subtree mode stamps a non-empty by_model from the subtree', () => {
   const { subagentsDir } = sessionFixture(SPEC);
   const { tokens_directional, note, via } = collectForRun({

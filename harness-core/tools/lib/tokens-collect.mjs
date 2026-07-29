@@ -114,10 +114,62 @@ function contextTotal(usage) {
 // A transcript line may carry usage in message.usage (top-level) and in each
 // entry of an iterations[] array (fallback/multi-attempt sub-entries, each with
 // its own .usage or .message.usage). All of them count toward the line's model.
+//
+// Used for the PEAK only. Peak needs no deduplication: duplicate lines repeat an
+// identical usage object, and a MAX over duplicates equals a MAX over uniques.
+// Leaving this path untouched is deliberate — peak_context is the transcript
+// identity fingerprint (#17/#18), and gating it would break run matching
+// silently for no gain.
 function usagesFromLine(line) {
   const out = [];
   const top = line?.message?.usage;
   if (top) out.push(top);
+  if (Array.isArray(line?.iterations)) {
+    for (const it of line.iterations) {
+      const u = it?.usage ?? it?.message?.usage;
+      if (u) out.push(u);
+    }
+  }
+  return out;
+}
+
+// The usages a line contributes to the SUMS, deduplicated by message.id.
+//
+// ONE API CALL IS MANY TRANSCRIPT LINES. Claude Code writes one JSONL line per
+// content block of an assistant response (thinking / text / tool_use / …),
+// repeating the SAME message.usage on every one and chaining them by parentUuid
+// under a single message.id. Summing per line bills one call up to 4 times:
+// measured on the jarvis #4 implement driver, 310 usage rows carried only 162
+// distinct ids, inflating every token and dollar figure by ~2.2x.
+//
+// Two rules, and the second is what makes this safe:
+//  - a top-level usage whose message.id was already counted is DROPPED;
+//  - a usage with NO message.id is ALWAYS counted.
+// The second rule is not defensive padding. `iterations[]` sub-entries carry no
+// id of their own, so a plain `seen.add(id)` would treat every id-less row as
+// the same call and collapse them — trading a 2.2x overcount for a silent
+// undercount, which is strictly worse. (Empirically the id-less case is
+// synthetic: across 94,416 usage rows in 6,254 local transcripts every real row
+// carries an id, top-level `iterations` never appears, and
+// `message.usage.iterations` is always empty. The iterations[] branch is
+// speculative; it stays supported, and stays additive.)
+//
+// `countedIds` is threaded from the caller and mutated here so that the FIRST
+// in-window occurrence of a call is the one counted. Marking ids during the
+// unwindowed peak pass instead would let a window boundary falling between two
+// blocks of one response drop that call from the sums entirely.
+function countableUsages(line, countedIds) {
+  const out = [];
+  const top = line?.message?.usage;
+  if (top) {
+    const id = line?.message?.id;
+    if (typeof id !== 'string' || id === '') {
+      out.push(top); // no id to deduplicate on — count it
+    } else if (!countedIds.has(id)) {
+      countedIds.add(id);
+      out.push(top);
+    }
+  }
   if (Array.isArray(line?.iterations)) {
     for (const it of line.iterations) {
       const u = it?.usage ?? it?.message?.usage;
@@ -170,6 +222,10 @@ export function collectFromText(text, opts = {}) {
 
   const stamps = []; // ms timestamps of in-window, dateable lines, in file order
   const byModel = base.by_model;
+  // message.ids already counted toward the sums — see countableUsages. Scoped to
+  // one transcript: ids are globally unique, and collectFromFiles merges
+  // per-file results, so cross-file leakage is not possible.
+  const countedIds = new Set();
 
   for (const raw of rawLines) {
     let line;
@@ -206,10 +262,14 @@ export function collectFromText(text, opts = {}) {
       if (base.timestamps.max === null || ts > Date.parse(base.timestamps.max)) base.timestamps.max = tsStr;
     }
 
+    // Sums count each API call once; the peak pass above deliberately does not.
     const model = typeof line?.message?.model === 'string' ? line.message.model : null;
-    if (model && usages.length) {
-      byModel[model] ??= emptyBucket();
-      for (const u of usages) addUsage(byModel[model], u);
+    if (model) {
+      const countable = countableUsages(line, countedIds);
+      if (countable.length) {
+        byModel[model] ??= emptyBucket();
+        for (const u of countable) addUsage(byModel[model], u);
+      }
     }
   }
 
