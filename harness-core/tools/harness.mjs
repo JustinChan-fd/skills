@@ -106,7 +106,10 @@ function collectAndStamp(v, routing) {
     observedTotal: record.tokens_observed?.total ?? null,
     now,
   });
-  stampTokensDirectional({ runDir, tokensDirectional: tokens_directional });
+  // `skipped` is the clobber guard declining to overwrite good sums with empty
+  // ones. Surface it: a caller told `directional_recollected: true` when the
+  // stamp never landed believes the record was updated when it was not.
+  const stamped = stampTokensDirectional({ runDir, tokensDirectional: tokens_directional });
   if (note) {
     appendAudit(dirname(dirname(runDir)), {
       ts: now.toISOString(),
@@ -115,7 +118,7 @@ function collectAndStamp(v, routing) {
       data: { type: 'tokens', estimated: true, complete: false, reason: note.code, detail: note.detail },
     });
   }
-  return { complete: tokens_directional.complete, degraded: !!note, source, via };
+  return { complete: tokens_directional.complete, degraded: !!note, source, via, stamped: !stamped.skipped };
 }
 
 const TOKENS_COLLECT_OPTS = {
@@ -406,7 +409,10 @@ try {
         try {
           const { routing } = resolveConfig();
           const summary = collectAndStamp(v, routing);
-          recollected = true;
+          // Only true when the stamp actually landed. The clobber guard declines
+          // an empty by_model over existing sums, and reporting `true` there
+          // tells the caller the record was enriched when it was untouched.
+          recollected = summary.stamped;
           via = summary.via ?? null;
         } catch {
           /* enrichment only; tokens_observed is already written */

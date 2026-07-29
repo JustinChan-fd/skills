@@ -247,6 +247,31 @@ test('an unresolvable --agent-id leaves an existing good stamp intact', () => {
   assert.deepEqual(after.by_model, before.by_model, 'good sums must survive a bad re-collect');
 });
 
+test('directional_recollected is false when the clobber guard declines the stamp', () => {
+  // The companion to the test above: protecting the good sums means the stamp
+  // did NOT land, and the caller must be told so. Reporting `true` here says
+  // "the record was enriched" about a record that was left untouched — the
+  // reader then attributes stale sums to this invocation.
+  //
+  // This is the ONLY way to reach the declined stamp from the CLI: it needs
+  // existing good sums AND an empty incoming by_model. A fresh run dir with a
+  // bogus --project-dir degrades but still reports true, correctly — there was
+  // nothing to protect, so the empty stamp landed.
+  const { runDir, cwd, sessionId, driverId, projectDir, tsStart, tsEnd } = makeSubtreeRun();
+  const good = run(['record-observed-tokens', '--run-dir', runDir, '--total', '110', '--tier', 'HIGH',
+    '--agent-id', driverId, '--cwd', cwd, '--project-dir', projectDir,
+    '--start', tsStart, '--end', tsEnd],
+    { env: { ...process.env, CLAUDE_CODE_SESSION_ID: sessionId } });
+  assert.equal(good.out.directional_recollected, true, 'a landing stamp still reports true');
+
+  const declined = run(['record-observed-tokens', '--run-dir', runDir, '--total', '110', '--tier', 'HIGH',
+    '--agent-id', 'does-not-exist', '--cwd', cwd, '--project-dir', projectDir,
+    '--start', tsStart, '--end', tsEnd],
+    { env: { ...process.env, CLAUDE_CODE_SESSION_ID: sessionId } });
+  assert.equal(declined.code, 0, 'a declined stamp is not an error');
+  assert.equal(declined.out.directional_recollected, false);
+});
+
 test('an explicit --transcript still overrides subtree defaulting', () => {
   const { runDir, cwd, sessionId, transcriptPath, projectDir, tsStart, tsEnd } = makeSubtreeRun();
   const r = run(['tokens-collect', '--run-dir', runDir, '--cwd', cwd,
@@ -281,8 +306,10 @@ test('tokens_observed is written before re-collection: it survives a degraded re
   // What this test pins: tokens_observed reaches disk even when re-collection
   // degrades, i.e. the two writes are decoupled and a failed re-collect cannot
   // silently suppress the cost record. Passing a nonexistent --project-dir makes
-  // collectAndStamp degrade (empty by_model) without throwing, so the clobber
-  // guard skips the stamp and directional_recollected is still true.
+  // collectAndStamp degrade (empty by_model) without throwing. The clobber guard
+  // does NOT decline here — a fresh run dir has no existing sums to protect, so
+  // the empty stamp lands and directional_recollected is true (verified). The
+  // declined-stamp case needs existing good sums; see the test above.
   //
   // What this test does NOT pin: the write-BEFORE-re-collect ordering. Moving
   // recordObservedTokens after the re-collect block leaves all tests green
