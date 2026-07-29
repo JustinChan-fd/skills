@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { writeFileSync, mkdtempSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir, homedir } from 'node:os';
-import { resolveConfig, sizeBudgets, tierFor, expandHome, issueSourceFor } from '../tools/lib/config.mjs';
+import { resolveConfig, sizeBudgets, tierFor, expandHome, issueSourceFor, canonicalRepo } from '../tools/lib/config.mjs';
 import { tierForModelId } from '../tools/lib/model-tier.mjs';
 
 test('routing defaults load; sizes and tiers resolve', () => {
@@ -126,15 +126,87 @@ test('bare tier aliases in model_id_to_tier agree with tier_models', () => {
   }
 });
 
-test('price_table provenance version reflects the cache-column addition', () => {
+test('price_table provenance version reflects the per-model rate table', () => {
   const { routing } = resolveConfig({ env: {}, userFile: '/nonexistent' });
-  assert.equal(routing.price_table.version, '2026-07-28.1');
-  assert.equal(routing.price_table.retrieved, '2026-07-28');
+  assert.equal(routing.price_table.version, '2026-07-29.1');
+  assert.equal(routing.price_table.retrieved, '2026-07-29');
+  // The rates are only interpretable alongside what billing shape they assume:
+  // batch (-50%), fast mode, and US-only residency (1.1x) all stack on top and
+  // are deliberately excluded, so a re-pricer must be told that.
+  assert.match(routing.price_table.billing_assumption, /non-batch/);
+});
+
+test('every model id in model_id_to_tier has a per-model price, and it is consistent with its tier', () => {
+  const { routing } = resolveConfig({ env: {}, userFile: '/nonexistent' });
+  const prices = routing.model_prices_usd_per_mtok;
+  const COLS = ['in', 'out', 'cache_read', 'cache_write', 'cache_write_1h'];
+  for (const [id, tier] of Object.entries(routing.model_id_to_tier)) {
+    if (['opus', 'sonnet', 'haiku'].includes(id)) continue; // bare aliases price off their tier
+    assert.ok(prices[id], `${id} resolves to tier ${tier} but has no per-model price`);
+    for (const col of COLS) {
+      assert.equal(typeof prices[id][col], 'number', `${id}.${col} must be a number`);
+    }
+  }
+  // Cache columns are fixed multiples of the model's own input rate. A hand-edited
+  // rate that breaks this ratio is a transcription error, not a real price.
+  for (const [id, p] of Object.entries(prices)) {
+    if (p.in === 0) continue; // <synthetic> carries no cost meaning
+    assert.ok(Math.abs(p.cache_read - p.in * 0.1) < 1e-9, `${id} cache_read should be 0.1x input`);
+    assert.ok(Math.abs(p.cache_write - p.in * 1.25) < 1e-9, `${id} cache_write should be 1.25x input`);
+    assert.ok(Math.abs(p.cache_write_1h - p.in * 2) < 1e-9, `${id} cache_write_1h should be 2x input`);
+    assert.ok(Math.abs(p.out - p.in * 5) < 1e-9, `${id} output should be 5x input`);
+  }
+});
+
+test('claude-sonnet-5 carries its introductory-rate step-up so records stay re-priceable across it', () => {
+  const { routing } = resolveConfig({ env: {}, userFile: '/nonexistent' });
+  const s5 = routing.model_prices_usd_per_mtok['claude-sonnet-5'];
+  // Introductory $2/$10 through 2026-08-31, standard $3/$15 from 2026-09-01. A
+  // record is priced by comparing its started_at to this boundary, so both sets
+  // of rates have to live in the table, not just the current one.
+  assert.equal(s5.in, 2);
+  assert.equal(s5.out, 10);
+  assert.equal(s5.introductory_until, '2026-08-31');
+  assert.equal(s5.standard_after.in, 3);
+  assert.equal(s5.standard_after.out, 15);
 });
 
 test('expandHome expands leading tilde only', () => {
   assert.equal(expandHome('~/x'), join(homedir(), 'x'));
   assert.equal(expandHome('/abs/x'), '/abs/x');
+});
+
+// `--repo` was documented as "<slug>" on both `init-run` and `gh issue view`,
+// which mean different things: user.json's KEY ("jarvis") vs the github slug
+// ("JustinChan-fd/jarvis"). Callers passed the latter, so record.repo — the
+// telemetry directory name and the run-id stem — was wrong at birth. The repo
+// identity is user.json's key, and this resolver is the single place that
+// decides it, rather than trusting each caller to spell it right.
+test('canonicalRepo maps a github slug back to its user.json key', () => {
+  const user = {
+    repos: {
+      webtarsthree: { path: '~/x', issue_source: 'jira' },
+      jarvis: { path: '~/j', issue_source: 'github', github: 'JustinChan-fd/jarvis' },
+    },
+  };
+  // The github slug resolves to the key, case-insensitively.
+  assert.equal(canonicalRepo(user, 'JustinChan-fd/jarvis'), 'jarvis');
+  assert.equal(canonicalRepo(user, 'justinchan-fd/JARVIS'), 'jarvis');
+  // An exact key passes through, and is normalized to the registry's spelling.
+  assert.equal(canonicalRepo(user, 'jarvis'), 'jarvis');
+  assert.equal(canonicalRepo(user, 'Jarvis'), 'jarvis');
+  assert.equal(canonicalRepo(user, 'webtarsthree'), 'webtarsthree');
+});
+
+// An unregistered repo must NOT be silently rewritten or dropped: adhoc targets
+// legitimately have no user.json entry. It passes through unchanged so the
+// slugifier downstream still makes it path-safe.
+test('canonicalRepo passes through an unregistered repo unchanged', () => {
+  const user = { repos: { jarvis: { path: '~/j', github: 'JustinChan-fd/jarvis' } } };
+  assert.equal(canonicalRepo(user, 'some-adhoc-repo'), 'some-adhoc-repo');
+  assert.equal(canonicalRepo(user, 'Owner/unregistered'), 'Owner/unregistered');
+  assert.equal(canonicalRepo({}, 'anything'), 'anything'); // no repos at all
+  assert.equal(canonicalRepo(undefined, 'anything'), 'anything');
 });
 
 test('issueSourceFor reads a repo\'s explicit issue_source, defaulting to jira', () => {

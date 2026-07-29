@@ -223,7 +223,7 @@ order (intake → plan → implement), one fresh-context driver each:
 driver, open THIS tick's own pipeline run — it is the header row that ties the
 three phase runs together on the dashboard:
 
-    CLI init-run --target <target> --repo <slug> --kind pipeline --source issue-<slug-of-KEY> --issue <KEY> --repo-path <target> --correlation-id "<KEY>-<runTs>"
+    CLI init-run --target <target> --repo <local-repo-key> --kind pipeline --source issue-<slug-of-KEY> --issue <KEY> --repo-path <target> --correlation-id "<KEY>-<runTs>"
 
 Capture its `run_id` as `LOOP_RUN_ID` and its `run_dir` as `LOOP_RUN_DIR` (you
 finalize it in step 7), and reuse the SAME `CORRELATION_ID` (`<KEY>-<runTs>`,

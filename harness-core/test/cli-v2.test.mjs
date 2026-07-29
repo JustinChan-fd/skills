@@ -49,6 +49,31 @@ test('init-run stamps the v2 association + provenance flags onto the record', ()
   assert.equal(r.skills_commit, 'abc1234');
 });
 
+// `--repo` reads identically on `init-run` and on `gh issue view --repo
+// <owner/repo>`, so callers passed the github slug and record.repo was wrong at
+// BIRTH — it became the run-id stem and the telemetry directory name, splitting
+// one local repo across two identities in the sink. init-run canonicalizes
+// against user.json so the identity is decided in code, not per caller.
+// Depends on the real config/user.json registering jarvis → JustinChan-fd/jarvis.
+test('init-run canonicalizes a github slug to its user.json repo key', () => {
+  const targetDir = mkdtempSync(join(tmpdir(), 'harness-canon-'));
+  const init = run(['init-run', '--target', targetDir, '--repo', 'JustinChan-fd/jarvis',
+    '--kind', 'intake', '--source', 'adhoc']);
+  assert.equal(init.code, 0);
+  assert.equal(readRecord(init.out.run_dir).repo, 'jarvis');
+  // The run-id stem carries the canonical repo too, not the owner-qualified slug.
+  assert.match(init.out.run_id, /^\d{4}-\d{2}-\d{2}T\d{6}Z__jarvis__intake__adhoc__[0-9a-f]{6}$/);
+});
+
+// An unregistered repo must still work: adhoc targets have no user.json entry.
+test('init-run leaves an unregistered repo name alone', () => {
+  const targetDir = mkdtempSync(join(tmpdir(), 'harness-canon2-'));
+  const init = run(['init-run', '--target', targetDir, '--repo', 'myapp',
+    '--kind', 'intake', '--source', 'adhoc']);
+  assert.equal(init.code, 0);
+  assert.equal(readRecord(init.out.run_dir).repo, 'myapp');
+});
+
 test('jira-normalize reads a getJiraIssue JSON file and prints the neutral intake shape', () => {
   const dir = mkdtempSync(join(tmpdir(), 'harness-jira-'));
   const file = join(dir, 'issue.json');

@@ -53,7 +53,7 @@ and tell the user.)
 **2. Start your own run** (standalone invocability — every phase logs its own
 run; `parent_run_id` stays null until the orchestrator exists):
 
-    CLI init-run --target <path> --repo <slug> --kind plan --source <source> [--issue <n>] [--branch <b>]
+    CLI init-run --target <path> --repo <local-repo-key> --kind plan --source <source> [--issue <n>] [--branch <b>]
 
 `--source` takes the CLI's literal source form — `issue-<n>` (e.g. `issue-7`),
 `adhoc`, or `file` — matching the source segment of the manifest's run id, NOT

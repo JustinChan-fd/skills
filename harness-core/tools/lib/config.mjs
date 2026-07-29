@@ -67,6 +67,28 @@ export function issueSourceFor(user, alias) {
   return user?.repos?.[alias]?.issue_source ?? 'jira';
 }
 
+// Resolve whatever a caller called the repo to its CANONICAL identity: the key
+// in user.json's `repos`. Callers were passing the github slug
+// ("JustinChan-fd/jarvis") because `--repo <slug>` reads identically on
+// `init-run` and on `gh issue view --repo <owner/repo>` — and that string then
+// became the run-id stem and the telemetry directory name, splitting one repo
+// across two identities in the sink. The local registry key is the identity;
+// the github slug is one of its attributes.
+//
+// An unregistered repo passes through untouched: adhoc targets legitimately
+// have no entry, and rewriting or rejecting them would be worse than accepting
+// the caller's own name (the run-id slugifier still makes it path-safe).
+export function canonicalRepo(user, repo) {
+  const repos = user?.repos;
+  if (!repos || !repo) return repo;
+  const wanted = repo.toLowerCase();
+  return (
+    Object.keys(repos).find((key) => key.toLowerCase() === wanted) ??
+    Object.keys(repos).find((key) => (repos[key]?.github ?? '').toLowerCase() === wanted) ??
+    repo
+  );
+}
+
 function setPath(obj, keys, value) {
   let cur = obj;
   for (const k of keys.slice(0, -1)) cur = cur[k] ??= {};

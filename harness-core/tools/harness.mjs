@@ -19,7 +19,7 @@ import { parseArgs } from 'node:util';
 import { readFileSync, appendFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { loadSchema, validate } from './lib/validate.mjs';
-import { resolveConfig, sizeBudgets, expandHome, resolveProject, loadProjects } from './lib/config.mjs';
+import { resolveConfig, sizeBudgets, expandHome, resolveProject, loadProjects, canonicalRepo } from './lib/config.mjs';
 import { resolveTarget } from './lib/target.mjs';
 import { gateDecision } from './lib/gate.mjs';
 import { qualityScore } from './lib/quality.mjs';
@@ -141,8 +141,14 @@ try {
         'correlation-id': { type: 'string' }, 'repo-path': { type: 'string' },
         'skills-commit': { type: 'string' },
       });
+      // Canonicalize the repo to user.json's key BEFORE it is stamped: this
+      // string becomes the run-id stem and the telemetry directory name, and
+      // `--repo` reads identically here and on `gh issue view --repo
+      // <owner/repo>`, so callers passed the github slug and split one local
+      // repo across two identities in the sink. Unregistered repos pass through.
+      const { user: repoUser } = resolveConfig();
       const { runId, runDir } = initRun({
-        targetDir: v.target, repo: v.repo, kind: v.kind,
+        targetDir: v.target, repo: canonicalRepo(repoUser, v.repo), kind: v.kind,
         // Auto-lowercase the source so callers can pass 'issue-PROJ-1' and it
         // round-trips cleanly through the run-id stem regex (which is lowercase-only).
         // The real Jira key rides in --issue untouched; the source is just a slug.
@@ -476,7 +482,11 @@ try {
       if (!dir) emit({ error: 'no telemetry dir: pass --dir or configure telemetry.dir in user.json' }, 1);
       const r = scanAnomalies({
         dir,
-        repo: v.repo ?? null,
+        // Canonicalize on the READ side too: the writer stores under
+        // user.json's key, so a caller passing the github slug would otherwise
+        // match no directory and get scanned:0 / ok:true — "nothing examined"
+        // wearing the shape of "nothing wrong".
+        repo: v.repo ? canonicalRepo(user, v.repo) : null,
         limit: v.limit !== undefined ? Number(v.limit) : null,
         routing,
       });
@@ -532,7 +542,7 @@ try {
       emit({
         error: `unknown subcommand: ${subcommand ?? '(none)'}`,
         usage: {
-          'init-run': '--target <path> --repo <slug> --kind intake|plan|implement --source issue-<n>|adhoc|file [--issue <n>] [--branch <b>] [--parent-run-id <id>] [--correlation-id <id>] [--repo-path <path>] [--skills-commit <sha>]',
+          'init-run': '--target <path> --repo <local-repo-key> --kind intake|plan|implement --source issue-<n>|adhoc|file [--issue <n>] [--branch <b>] [--parent-run-id <id>] [--correlation-id <id>] [--repo-path <path>] [--skills-commit <sha>]  (--repo is the LOCAL repo key from user.json (e.g. jarvis), NOT the github owner/repo slug; a github slug is canonicalized back to its key, and an unregistered name passes through)',
           'resolve-project': '--issue <KEY-n>  (map a Jira issue key prefix to { repoPath, cloudId } from config/projects.json; exit 1 if unknown)',
           'resolve-target': '[--hint <alias|JIRA-KEY|path>] [--item <n|#n|KEY-n|issue-URL>] [--cwd <path>]  (resolve a free-form repo/work-item hint to { alias, path, issue_source, github, cloud_id, project_key, pinned_issue, resolved_from } from user.json + projects.json; a URL is parsed structurally and can route the whole tick alone; exits 1 rather than guessing — unresolvable_hint never falls back to defaultRepo, unresolvable_item never drops the pin, conflicting_target when a hint and a URL name different repos)',
           'jira-normalize': '--file <issue.json>  (normalize a saved getJiraIssue response into the neutral intake shape {key,summary,description,issue_type,change_type,parent_key,project_key,input}; exit 1 if malformed)',

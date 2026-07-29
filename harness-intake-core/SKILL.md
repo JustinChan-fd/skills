@@ -106,12 +106,18 @@ The path depends on the input's tracker:
 - An existing file path → `file`.
 - Anything else (pasted/typed text) → `adhoc`.
 
-**3. Start the run.** Capture provenance the v2 record needs first:
+**3. Start the run.** Capture provenance the v2 record needs first.
+
+`--repo` here is the **local repo key** from `user.json` (`jarvis`) — NOT the
+github `owner/repo` slug that `gh issue view --repo` above takes
+(`JustinChan-fd/jarvis`). This string becomes the run-id stem and the telemetry
+directory name, so the two spellings split one repo across two identities in the
+sink. `init-run` canonicalizes a github slug back to its key, but pass the key.
 
     SKILLS_COMMIT=$(git -C ~/.claude/skills rev-parse --short HEAD 2>/dev/null || echo unknown)
     CORRELATION_ID="<KEY>-$(date -u +%Y%m%dT%H%M%SZ)"   # shared by all 3 phases of this ticket
 
-    CLI init-run --target <path> --repo <slug> --kind intake --source <source> \
+    CLI init-run --target <path> --repo <local-repo-key> --kind intake --source <source> \
       [--issue <KEY>] [--branch <b>] --repo-path <path> \
       --correlation-id "$CORRELATION_ID" --skills-commit "$SKILLS_COMMIT" \
       [--parent-run-id <LOOP_RUN_ID>]
