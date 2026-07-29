@@ -96,7 +96,7 @@ function findPrefixByPath(projects, path) {
 // Build the envelope from a resolved path. `alias` and `projectKey` are looked
 // up in whichever config the path did NOT come from, so a target reached by
 // either route carries the other route's metadata when one exists.
-function envelope({ path, alias, projectKey, resolvedFrom, user, projects, defaultCloudId, itemSpec, fallbackKey }) {
+function envelope({ path, alias, projectKey, resolvedFrom, user, projects, defaultCloudId, itemSpec, fallbackKey, base, epic, branchExists }) {
   const resolvedAlias = alias ?? findAliasByPath(user, path);
   const resolvedPrefix = projectKey ?? findPrefixByPath(projects, path);
   // A repo with no registry entry cannot have an issue_source declared. When we
@@ -156,6 +156,15 @@ function envelope({ path, alias, projectKey, resolvedFrom, user, projects, defau
     }
   }
 
+  // Base resolution needs the project config, so it can only happen here —
+  // after the prefix has been recovered by whichever route reached this target.
+  // That placement is what makes `webtarsthree TARS-1272` (hint_alias, prefix
+  // by path) and `TARS-1272` (hint_jira_key) resolve the same base.
+  const baseResolved = resolveBase({
+    base, epic, projectCfg: resolvedPrefix ? projects?.[resolvedPrefix] : null, branchExists,
+  });
+  if (baseResolved.error) return baseResolved.error;
+
   return {
     ok: true,
     target: {
@@ -167,6 +176,8 @@ function envelope({ path, alias, projectKey, resolvedFrom, user, projects, defau
       project_key: resolvedPrefix,
       pinned_issue: pinned,
       resolved_from: resolvedFrom,
+      base_branch: baseResolved.branch,
+      base_resolved_from: baseResolved.from,
     },
   };
 }
@@ -175,10 +186,67 @@ function fail(code, detail) {
   return { ok: false, error: { code, detail } };
 }
 
-export function resolveTarget({ hint, item, cwd, user, projects, defaultCloudId = null } = {}) {
+// Which branch the work branch is cut from and the PR targets.
+//
+// harness-implement-core used to branch from the repo default unconditionally.
+// That is right for most work — on webtarsthree 42 PRs based on master — but
+// wrong for a phased epic, where the prior phases exist ONLY on the epic
+// branch: 12 of 12 sibling phase PRs of epic TARS-1135 based on
+// feat/migrate-native-fetch-from-axios. Branching a Phase 6 ticket off master
+// yields a work branch missing its own prerequisites and a PR against a base
+// that never had them.
+//
+// Precedence: explicit flag > epic map > project default. `base_resolved_from`
+// records which fired, so a wrong base is diagnosable from the run record
+// instead of being invisible.
+//
+// A declared branch that does not exist is a HARD failure, never a fallback to
+// the default — falling back is precisely the bug, and it would reintroduce it
+// silently at the one moment the config was trying to prevent it. Same
+// principle the hint resolution above already applies: refuse rather than
+// quietly retarget. When no `branchExists` predicate is supplied validation is
+// SKIPPED rather than failed: unverifiable is not the same as missing.
+function resolveBase({ base, epic, projectCfg, branchExists }) {
+  const declared = (base ?? '').trim();
+  const fromEpic = epic ? (projectCfg?.epicBranches?.[epic.toUpperCase()] ?? null) : null;
+
+  let branch = null;
+  let from = 'default';
+  if (declared) {
+    branch = declared;
+    from = 'flag';
+  } else if (fromEpic) {
+    branch = fromEpic;
+    from = 'epic';
+  } else {
+    // Null, not an invented "master": this module encodes no repo knowledge of
+    // its own (see the header), so an undeclared default means the caller
+    // resolves origin/HEAD itself.
+    branch = projectCfg?.defaultBranch ?? null;
+  }
+
+  // Only an explicitly named branch is validated. The project default is the
+  // caller's own resolution and is not ours to second-guess.
+  if (branch && from !== 'default' && typeof branchExists === 'function' && !branchExists(branch)) {
+    return {
+      error: fail('missing_base_branch',
+        `base branch "${branch}" (resolved from ${from}) does not exist — create or push it, or re-run with an explicit --base`),
+    };
+  }
+  return { branch, from };
+}
+
+export function resolveTarget({
+  hint, item, cwd, user, projects, defaultCloudId = null,
+  base = null, epic = null, branchExists = null,
+} = {}) {
   const repos = user?.repos ?? {};
   const explicitItem = normalizeItem(item);
-  const common = { user, projects, defaultCloudId };
+  // base/epic/branchExists ride `common` so every resolution route gets base
+  // resolution automatically. A route that forgot to pass them would silently
+  // return an undefined base_branch, which is the failure mode this whole
+  // change exists to remove.
+  const common = { user, projects, defaultCloudId, base, epic, branchExists };
   const trimmedHint = (hint ?? '').trim();
 
   if (trimmedHint) {

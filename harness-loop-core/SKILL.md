@@ -83,7 +83,7 @@ comment id, and a `PIZZA-9` link came to pin `TARS-9`.
 
 Then hand both to the resolver and obey what it says:
 
-    CLI resolve-target [--hint "<hint>"] [--item "<item>"] --cwd "$(pwd)"
+    CLI resolve-target [--hint "<hint>"] [--item "<item>"] [--base "<branch>"] --cwd "$(pwd)"
 
 Omit a flag entirely when the text carried no such hint. **You do not resolve
 aliases, apply defaults, decide Jira-vs-GitHub, or look up a cloud id
@@ -101,6 +101,23 @@ your routing table for the whole tick:
 | `cloud_id`, `project_key` | Jira routing when `issue_source` is `jira` |
 | `pinned_issue` | the pinned work item, or `null` — see step 4. Already normalized: a bare number on a Jira repo comes back qualified (`1272` → `TARS-1272`), on a GitHub repo it stays a number, and a URL is reduced to whichever of those it named |
 | `resolved_from` | provenance: how the target was decided — including `item_url` when a pasted URL routed the whole tick |
+| `base_branch` | the branch implement cuts its work branch from and the PR targets. `null` means the repo has no declared default — the implement phase resolves `origin/HEAD` itself |
+| `base_resolved_from` | `flag` (explicit `--base`), `epic` (the item's parent epic has a declared branch), or `default` |
+
+**`base_branch` here is PROVISIONAL.** Most work bases on the repo default; a
+phased-epic ticket does not — its prior phases exist ONLY on the epic branch, so
+branching from the default gives a work branch missing its own prerequisites and
+a PR against a base that never had them. That case turns on the item's parent
+epic, and step 0 runs before the item is known (the pin may be absent and the
+scan has not happened), so the epic cannot be passed here. Resolve normally now
+and use the answer to route the tick; **step 5 finalizes it** with `--epic` once
+the item id is settled. Do not pass the step-0 value to any driver.
+
+A fourth refusal joins the three below: `missing_base_branch` — a base branch
+was named (by flag or by the epic map) that exists on neither `origin/` nor
+locally. It will NOT fall back to the default, because falling back is the bug.
+Report it verbatim; the fix is to push or create the branch, or re-run with an
+explicit `--base`.
 
 **Exit 1 means STOP and report the error verbatim.** Do not retry with a
 different guess, do not substitute a default repo, and do not proceed with the
@@ -193,19 +210,44 @@ take the FIRST whose `next` is not `done`. Issues at `done` have a delivered PR
 No candidate → no-op tick: append the loop log line (step 7), remove the lock,
 report, stop.
 
-**5. Repo hygiene — resolve the base branch, then sync to it.** The base is
-NOT always `main`: a ticket that is one phase of an epic targets the EPIC
-FEATURE BRANCH, and diffing against `main` would falsely read the epic's
-not-yet-merged work as missing (a measured run flagged TARS-1271's clientFetch
-wrapper as a blocking prerequisite when it existed on the feature branch). So:
-- Determine the base: if the ticket's description or parent epic names a
-  feature/integration branch (or `git -C <target> branch -a` shows an obvious
-  epic branch the ticket's work belongs to), that is the base; else `main`.
-- `git -C <target> fetch origin`, then checkout + fast-forward the base branch
-  (`git -C <target> checkout <base> && git -C <target> pull --ff-only`).
-- Pass the resolved base into every driver prompt so implement branches from it
-  (implement creates its work branch from the current branch — leave the base
-  checked out).
+**5. Repo hygiene — sync to the resolved base branch.** The base is NOT always
+`main`: a ticket that is one phase of an epic targets the EPIC FEATURE BRANCH,
+and diffing against `main` would falsely read the epic's not-yet-merged work as
+missing (a measured run flagged TARS-1271's clientFetch wrapper as a blocking
+prerequisite when it existed on the feature branch).
+
+You do NOT decide the base by reading the ticket prose for a branch name, or by
+eyeballing `git branch -a` for an "obvious" epic branch. That is exactly the
+guesswork `base_branch` replaced. The resolver decides; you finalize which
+question you asked it.
+
+**Finalize the base — the one place step 0's resolver runs twice.** Step 0's
+answer was provisional because the work item was not known yet. Now it is (from
+the pin or the scan), so ask the epic question:
+- **`ISSUE_SOURCE == jira`:** fetch just the parent —
+  `mcp__atlassian__getJiraIssue({ cloudId, issueIdOrKey: '<ID>',
+  fields: ['parent'] })`. One field, one call; do not fetch the description
+  here (intake owns the issue content, and re-reading it is how a phase starts
+  trusting ticket prose it was supposed to get from the manifest).
+- **`ISSUE_SOURCE == github`:** no epics — skip; step 0's answer stands.
+- If a parent key came back **and** you were not given an explicit `--base`,
+  re-run step 0's resolver with it appended:
+  `CLI resolve-target --hint … --item … --epic "<parent key>"`. An epic with no
+  entry in `epicBranches` returns the same base unchanged — the common case, not
+  an error. A changed `base_branch` is the whole point: that epic's prior phases
+  live only on that branch.
+- Echo the final `base_branch` and `base_resolved_from` in your report, so a
+  wrong base is visible in the tick record rather than only in the PR.
+
+Then sync:
+- If `base_branch` is `null` the repo declares no default. Resolve it yourself
+  once: `git -C <target> symbolic-ref refs/remotes/origin/HEAD` (basename), and
+  say in the echo line that you did.
+- `git -C <target> fetch origin`, then checkout + fast-forward the base
+  (`git -C <target> checkout <base_branch> && git -C <target> pull --ff-only`).
+  A `--ff-only` failure is a STOP, not something to force past.
+- Pass `base_branch` into every driver prompt so implement branches from it and
+  targets its PR at it (leave the base checked out).
 Run `git -C <target> status --short` and note any pre-existing uncommitted
 local changes: they must be left untouched and NEVER committed by any driver
 (pass this warning into every driver prompt).
@@ -425,8 +467,10 @@ the table):
 >    <CORRELATION_ID>` (values below) so this phase joins the tick's pipeline
 >    run.
 > 3. The target repo is <target path> (alias <alias> in
->    ~/.claude/skills/harness-core/config/user.json); the base branch is
->    <resolved base from step 5>. LOOP_RUN_ID=<...>, CORRELATION_ID=<...>.
+>    ~/.claude/skills/harness-core/config/user.json); BASE_BRANCH=<base_branch
+>    from step 0/5, resolved from <base_resolved_from>> — implement cuts its work
+>    branch from this and targets its PR at it; do not re-derive it.
+>    LOOP_RUN_ID=<...>, CORRELATION_ID=<...>.
 >    ISSUE_SOURCE=<jira|github>; for github, GITHUB_SLUG=<owner/repo>. The
 >    skill branches its fetch/normalize and status-comment sink on ISSUE_SOURCE
 >    — pass these through.

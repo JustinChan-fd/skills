@@ -17,6 +17,7 @@
 // (why the Jira MCP, gh, and git all work from a shelled-out Node process).
 import { parseArgs } from 'node:util';
 import { readFileSync, appendFileSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
 import { join, dirname } from 'node:path';
 import { loadSchema, validate } from './lib/validate.mjs';
 import { resolveConfig, sizeBudgets, expandHome, resolveProject, loadProjects, canonicalRepo } from './lib/config.mjs';
@@ -175,17 +176,45 @@ try {
       // source of truth. A named-but-unresolvable hint exits 1 rather than
       // falling back to defaultRepo: silently ticking a repo the user did not
       // name is the worst available outcome.
-      const v = opts({ hint: { type: 'string' }, item: { type: 'string' }, cwd: { type: 'string' } });
+      const v = opts({
+        hint: { type: 'string' }, item: { type: 'string' }, cwd: { type: 'string' },
+        base: { type: 'string' }, epic: { type: 'string' },
+      });
       const { user } = resolveConfig();
       const { projects, defaultCloudId } = loadProjects();
-      const r = resolveTarget({
+      // Two passes, because validating a branch needs the repo path and the
+      // repo path is what resolution produces. Pass 1 resolves the target with
+      // no branch validation (branchExists omitted ⇒ skipped, by design); pass 2
+      // re-resolves with a git-backed predicate now that we know where to look.
+      // Resolution is pure and cheap, so running it twice is free — and keeping
+      // the git call OUT of target.mjs is what lets that module stay unit
+      // testable without a real remote.
+      const common = {
         hint: v.hint,
         item: v.item,
         cwd: v.cwd ?? process.cwd(),
         user,
         projects,
         defaultCloudId,
-      });
+        base: v.base ?? null,
+        epic: v.epic ?? null,
+      };
+      const probe = resolveTarget(common);
+      const dir = probe.ok ? probe.target.path : null;
+      // Checks remote-tracking refs AND local heads: the epic branch may be
+      // fetched only, checked out locally, or both.
+      const branchExists = (branch) => {
+        if (!dir) return true; // cannot check ⇒ do not block; unverifiable ≠ missing
+        for (const ref of [`refs/remotes/origin/${branch}`, `refs/heads/${branch}`]) {
+          try {
+            execFileSync('git', ['-C', dir, 'show-ref', '--verify', '--quiet', ref],
+              { stdio: ['ignore', 'ignore', 'ignore'] });
+            return true;
+          } catch { /* try the next ref */ }
+        }
+        return false;
+      };
+      const r = resolveTarget({ ...common, branchExists });
       if (!r.ok) emit({ error: `${r.error.code}: ${r.error.detail ?? ''}`.trim() }, 1);
       emit(r.target);
     }

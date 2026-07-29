@@ -364,3 +364,143 @@ test('a path hint that does not exist is unresolvable', () => {
   assert.equal(r.ok, false);
   assert.equal(r.error.code, 'unresolvable_hint');
 });
+
+// ---------------------------------------------------------------------------
+// base_branch resolution.
+//
+// The bug this closes: harness-implement-core branched from the repo DEFAULT
+// branch unconditionally. For a phased-epic ticket (TARS-1272 is "Phase 6" of
+// epic TARS-1135) the prior phases exist only on the epic branch, so branching
+// from master produces a work branch missing its own prerequisites and a PR
+// against the wrong base. Measured on webtarsthree: 12 of 12 sibling phase PRs
+// based on feat/migrate-native-fetch-from-axios, while 42 other PRs based on
+// master — so master is the correct DEFAULT and the epic is the exception.
+//
+// Precedence is flag > epic map > repo default, and every envelope says which
+// one fired via base_resolved_from, so a wrong base is diagnosable after the
+// fact instead of invisible.
+//
+// `branchExists` is INJECTED rather than shelled out to git: this module is
+// pure decision logic and its tests must not need a real remote. The CLI passes
+// a real git-backed predicate.
+const EPIC_PROJECTS = {
+  TARS: {
+    repoPath: '/abs/webtarsthree',
+    cloudId: 'x.atlassian.net',
+    defaultBranch: 'master',
+    epicBranches: { 'TARS-1135': 'feat/migrate-native-fetch-from-axios' },
+  },
+  PIZZA: { repoPath: '/abs/pizza-pie', cloudId: 'x.atlassian.net' },
+};
+const EPIC_BASE = { user: USER, projects: EPIC_PROJECTS, defaultCloudId: 'x.atlassian.net' };
+const always = () => true;
+
+test('an epic with a declared branch resolves base_branch to it', () => {
+  const r = resolveTarget({
+    hint: 'TARS-1272', epic: 'TARS-1135', branchExists: always, ...EPIC_BASE,
+  });
+  assert.equal(r.ok, true);
+  assert.equal(r.target.base_branch, 'feat/migrate-native-fetch-from-axios');
+  assert.equal(r.target.base_resolved_from, 'epic');
+});
+
+test('an explicit base flag outranks the epic map', () => {
+  // The manual override has to win, or a mis-declared epic map becomes
+  // unworkable-around in exactly the moment you need to work around it.
+  const r = resolveTarget({
+    hint: 'TARS-1272', epic: 'TARS-1135', base: 'release/2026-08',
+    branchExists: always, ...EPIC_BASE,
+  });
+  assert.equal(r.target.base_branch, 'release/2026-08');
+  assert.equal(r.target.base_resolved_from, 'flag');
+});
+
+test('an unmapped epic falls back to the project default branch', () => {
+  // Not every epic gets its own branch; most work bases on master. An epic we
+  // have no mapping for is the COMMON case, not an error.
+  const r = resolveTarget({
+    hint: 'TARS-1272', epic: 'TARS-9999', branchExists: always, ...EPIC_BASE,
+  });
+  assert.equal(r.ok, true);
+  assert.equal(r.target.base_branch, 'master');
+  assert.equal(r.target.base_resolved_from, 'default');
+});
+
+test('no epic at all falls back to the project default branch', () => {
+  const r = resolveTarget({ hint: 'TARS-1272', branchExists: always, ...EPIC_BASE });
+  assert.equal(r.target.base_branch, 'master');
+  assert.equal(r.target.base_resolved_from, 'default');
+});
+
+test('a declared epic branch that does not exist is a hard failure', () => {
+  // The whole point. Falling back to master here would silently reintroduce
+  // the exact bug: a phased ticket branching off a base missing its
+  // prerequisites. Refuse loudly instead — same principle as an unresolvable
+  // repo hint.
+  const r = resolveTarget({
+    hint: 'TARS-1272', epic: 'TARS-1135', branchExists: () => false, ...EPIC_BASE,
+  });
+  assert.equal(r.ok, false);
+  assert.equal(r.error.code, 'missing_base_branch');
+  assert.match(r.error.detail, /feat\/migrate-native-fetch-from-axios/);
+});
+
+test('an explicit base flag that does not exist is also a hard failure', () => {
+  const r = resolveTarget({
+    hint: 'TARS-1272', base: 'no/such/branch', branchExists: () => false, ...EPIC_BASE,
+  });
+  assert.equal(r.ok, false);
+  assert.equal(r.error.code, 'missing_base_branch');
+});
+
+test('a project with no declared defaultBranch leaves base_branch null', () => {
+  // PIZZA has no defaultBranch. Null means "caller resolves origin/HEAD
+  // itself" — inventing "master" here would be this module encoding repo
+  // knowledge, which its header forbids.
+  const r = resolveTarget({ hint: 'PIZZA-9', branchExists: always, ...EPIC_BASE });
+  assert.equal(r.ok, true);
+  assert.equal(r.target.base_branch, null);
+  assert.equal(r.target.base_resolved_from, 'default');
+});
+
+test('base resolution survives the alias route, not just the Jira-key route', () => {
+  // A tick invoked as `webtarsthree TARS-1272` arrives via hint_alias, and the
+  // project_key is recovered by path. Base must resolve the same way or the
+  // fix only works on one of two equivalent invocations.
+  const dir = mkdtempSync(join(tmpdir(), 'tgt-'));
+  const repo = join(dir, 'wt3');
+  mkdirSync(repo);
+  const user = { repos: { wt3: { path: repo, issue_source: 'jira' } }, defaultRepo: 'wt3' };
+  const projects = {
+    TARS: {
+      repoPath: repo, cloudId: 'x.atlassian.net', defaultBranch: 'master',
+      epicBranches: { 'TARS-1135': 'feat/migrate-native-fetch-from-axios' },
+    },
+  };
+  const r = resolveTarget({
+    hint: 'wt3', item: 'TARS-1272', epic: 'TARS-1135',
+    branchExists: always, user, projects, defaultCloudId: null,
+  });
+  assert.equal(r.target.base_branch, 'feat/migrate-native-fetch-from-axios');
+  assert.equal(r.target.base_resolved_from, 'epic');
+});
+
+test('branchExists is consulted with the branch being validated', () => {
+  // Pins that the predicate actually receives the resolved branch — a
+  // predicate called with the wrong argument would pass every test above
+  // that uses `always`.
+  const seen = [];
+  resolveTarget({
+    hint: 'TARS-1272', epic: 'TARS-1135',
+    branchExists: (b) => { seen.push(b); return true; }, ...EPIC_BASE,
+  });
+  assert.deepEqual(seen, ['feat/migrate-native-fetch-from-axios']);
+});
+
+test('an absent branchExists predicate skips validation rather than failing', () => {
+  // Callers that cannot check (no git, or a deliberate offline path) must still
+  // get a resolved base. Unverifiable is not the same as missing.
+  const r = resolveTarget({ hint: 'TARS-1272', epic: 'TARS-1135', ...EPIC_BASE });
+  assert.equal(r.ok, true);
+  assert.equal(r.target.base_branch, 'feat/migrate-native-fetch-from-axios');
+});

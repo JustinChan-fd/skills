@@ -155,3 +155,37 @@ test('run-end persists active-ms, agent-count, and skill-metrics', () => {
   assert.deepEqual(r.agent_count.by_model, { 'claude-haiku-4-5-20251001': 20 });
   assert.equal(r.skill_metrics.size_from_intake, 'S');
 });
+
+// resolve-target base_branch: the CLI half of the epic-base fix. target.mjs is
+// unit tested against injected fixtures; these pin the wiring — real
+// projects.json, real git-backed branchExists, real exit codes — because the
+// bug being closed lived in the seam between resolution and the caller, not in
+// either one alone.
+test('resolve-target derives base_branch from a mapped epic', () => {
+  const r = run(['resolve-target', '--hint', 'TARS-1272', '--epic', 'TARS-1135']);
+  assert.equal(r.code, 0);
+  assert.equal(r.out.base_branch, 'feat/migrate-native-fetch-from-axios');
+  assert.equal(r.out.base_resolved_from, 'epic');
+});
+
+test('resolve-target falls back to the project default branch with no epic', () => {
+  const r = run(['resolve-target', '--hint', 'TARS-1272']);
+  assert.equal(r.code, 0);
+  assert.equal(r.out.base_branch, 'master');
+  assert.equal(r.out.base_resolved_from, 'default');
+});
+
+test('resolve-target exits 1 on a base branch that does not exist', () => {
+  // The guard that stops a silent retarget to master. Exit code matters as much
+  // as the payload: the calling skill branches on it.
+  const r = run(['resolve-target', '--hint', 'TARS-1272', '--base', 'no/such/branch']);
+  assert.equal(r.code, 1);
+  assert.match(r.out.error, /missing_base_branch/);
+});
+
+test('resolve-target lets an explicit base outrank a mapped epic', () => {
+  const r = run(['resolve-target', '--hint', 'TARS-1272', '--epic', 'TARS-1135', '--base', 'master']);
+  assert.equal(r.code, 0);
+  assert.equal(r.out.base_branch, 'master');
+  assert.equal(r.out.base_resolved_from, 'flag');
+});

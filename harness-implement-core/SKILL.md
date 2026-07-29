@@ -22,7 +22,7 @@ Same five as every phase — logging first and fatal on exit 2; single writer
 for all `.harness/` artifacts; tiers assigned from `CLI config`; every
 artifact validated; and reached via `Skill({skill: "harness-implement-core"})`,
 never a raw prompt or a `Workflow`-tool script standing in for a proper Skill
-invocation. Plus two of your own: **never commit to the default branch** — all
+invocation. Plus two of your own: **never commit to the base branch** — all
 work happens on a run branch; and **open the PR, never merge it** — delivery
 ends at an open PR for human review (an autonomous loop must not self-merge).
 
@@ -39,10 +39,18 @@ reconstruct the plan by guessing; that's the producer's defect).
 
 **2. Start your own run** (`--kind implement`; `--source` takes the CLI's
 literal form — `issue-<n>`, `adhoc`, or `file` — matching the source segment
-of the upstream run ids), then create the work branch from the default
-branch:
+of the upstream run ids), then create the work branch from `BASE_BRANCH`:
 
-    git checkout -b harness/<run-id-shortid>-<slug-of-requirement>
+    git -C <target> checkout <BASE_BRANCH>
+    git -C <target> checkout -b harness/<run-id-shortid>-<slug-of-requirement>
+
+`BASE_BRANCH` comes from your invocation (the loop resolves it deterministically
+from config and passes it in). It is NOT always the repo default: a ticket that
+is one phase of an epic bases on the EPIC FEATURE BRANCH, whose prior phases are
+not on the default branch — branch off the default there and your work branch is
+missing its own prerequisites and your PR targets a base that never had them. If
+your invocation named no `BASE_BRANCH`, use the repo default and SAY SO in your
+report; do not infer an epic branch from the plan prose or the branch list.
 
 **3. Execute units in plan order.** The manifest + plan are your truth — do
 not re-read the original issue (it may contain claims intake corrected) and
@@ -136,7 +144,7 @@ result, evidence}`), the post-merge landing checklist as `--landing`, and
 `--notes` as the JSON array of THIS run's own recorded residue/defect notes:
 
     git push -u origin <branch>
-    gh pr create --title "<change_type>: <ID> <requirement summary>" --body "$(CLI render-pr-body --change-type <change_type> --issue <ID> --summary "<your prose summary>" --run-id <run_id> --result-rows '<json>' --landing '<json>' --notes '<json-array of residue notes, or []>')"
+    gh pr create --base <BASE_BRANCH> --title "<change_type>: <ID> <requirement summary>" --body "$(CLI render-pr-body --change-type <change_type> --issue <ID> --summary "<your prose summary>" --run-id <run_id> --result-rows '<json>' --landing '<json>' --notes '<json-array of residue notes, or []>')"
 
 `<ID>` is the work-item id — the Jira KEY (`TARS-1271`) or the GitHub issue
 NUMBER (`2`) — and goes in BOTH the PR title and the `--summary` prose (e.g.
