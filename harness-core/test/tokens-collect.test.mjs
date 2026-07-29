@@ -603,8 +603,18 @@ test('subtree mode prefers the fingerprint when observedTotal identifies a drive
   assert.deepEqual(r.paths.map((p) => basename(p)), ['agent-d1.jsonl', 'agent-k1.jsonl']);
 });
 
-test('subtree mode refuses rather than falling back to standalone newest-mtime', () => {
-  const r = resolveTranscripts({ mode: 'subtree', subagentsDir: join(tmpdir(), 'nope-4a2f') });
+test('subtree mode refuses even when a standalone transcript exists', () => {
+  // The distinguishing fixture: a valid projectDir with a real standalone transcript,
+  // so the standalone resolver would SUCCEED if the no-fallback guard were removed.
+  // Without projectDir the standalone path independently returns not_found, making
+  // it impossible to observe whether a fallback exists (the original weak vector).
+  const { projectDir } = sessionFixture(SPEC);
+  writeFileSync(join(projectDir, 'standalone.jsonl'), mkUsageLine({ ts: TS, model: 'claude-opus-5', input: 5, output: 1 }) + '\n');
+  const r = resolveTranscripts({
+    mode: 'subtree',
+    subagentsDir: join(tmpdir(), 'nope-4a2f'),
+    projectDir, // standalone would SUCCEED from here if a fallback existed
+  });
   assert.equal(r.ok, false);
   assert.equal(r.error.code, 'not_found');
   assert.deepEqual(r.paths, []);
