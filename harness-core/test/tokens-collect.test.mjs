@@ -603,6 +603,23 @@ test('subtree mode prefers the fingerprint when observedTotal identifies a drive
   assert.deepEqual(r.paths.map((p) => basename(p)), ['agent-d1.jsonl', 'agent-k1.jsonl']);
 });
 
+test('an unmatched fingerprint widens to every driver rather than resolving nothing', () => {
+  // The deliberate degradation at the end of resolveTranscripts' subtree branch.
+  // Distinct from the no-observedTotal case above: here the fingerprint WAS
+  // attempted and missed, and the widened result must be the same superset
+  // rather than an empty path list. Resolving nothing would leave by_model
+  // empty, which is exactly how TARS-1271 shipped with no directional capture.
+  const { subagentsDir } = sessionFixture(SPEC);
+  // No transcript in SPEC has a peak_context of 999999.
+  const r = resolveTranscripts({ mode: 'subtree', subagentsDir, observedTotal: 999999 });
+  assert.equal(r.ok, true);
+  assert.equal(r.via, 'all_drivers');
+  assert.deepEqual(
+    r.paths.map((p) => basename(p)).sort(),
+    ['agent-d1.jsonl', 'agent-d2.jsonl', 'agent-k1.jsonl'],
+  );
+});
+
 test('subtree mode refuses even when a standalone transcript exists', () => {
   // The distinguishing fixture: a valid projectDir with a real standalone transcript,
   // so the standalone resolver would SUCCEED if the no-fallback guard were removed.
