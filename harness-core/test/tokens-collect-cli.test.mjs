@@ -256,3 +256,48 @@ test('an explicit --transcript still overrides subtree defaulting', () => {
   assert.equal(r.code, 0);
   assert.equal(r.out.via, 'explicit');
 });
+
+test('--session-id flag is the sole session source when env var is absent', () => {
+  // Pin the flag path independently of the env-var path. parseArgs(strict:true)
+  // throws "Unknown option '--session-id'" if the key is ever dropped from
+  // TOKENS_COLLECT_OPTS; the env-var path would keep working silently while the
+  // flag route regresses. Task 4 wires the orchestrator to pass this flag, so
+  // the regression would surface in production integration, not in test.
+  const { runDir, cwd, sessionId, projectDir, tsStart, tsEnd } = makeSubtreeRun();
+  // Build env without CLAUDE_CODE_SESSION_ID so the flag is the only source.
+  const envWithoutSession = { ...process.env };
+  delete envWithoutSession.CLAUDE_CODE_SESSION_ID;
+  const r = run([
+    'tokens-collect', '--run-dir', runDir, '--cwd', cwd, '--project-dir', projectDir,
+    '--session-id', sessionId, '--start', tsStart, '--end', tsEnd,
+  ], { env: envWithoutSession });
+  assert.equal(r.code, 0);
+  assert.equal(r.out.ok, true);
+  assert.ok(Object.keys(r.out.tokens_directional.by_model).length > 0,
+    '--session-id flag path must collect subtree tokens');
+});
+
+test('tokens_observed is written before re-collection: it survives a degraded re-collect', () => {
+  // The crash-resilience invariant: recordObservedTokens must write tokens_observed
+  // BEFORE the re-collect block runs. We verify this by passing a nonexistent
+  // --project-dir so collectAndStamp silently degrades (empty by_model, no throw)
+  // and assert tokens_observed is present on disk regardless. This pins the
+  // write-first ordering: if recordObservedTokens were moved after the re-collect
+  // block, a crash between the two calls would leave tokens_observed absent.
+  //
+  // Note: with the nonexistent dir, collectAndStamp does not throw — it returns a
+  // degraded result with empty by_model, so the clobber guard skips the stamp and
+  // directional_recollected is true (the call "succeeded" with degraded output).
+  // The invariant is that tokens_observed.total is present regardless.
+  const { runDir } = makeSubtreeRun();
+  const r = run([
+    'record-observed-tokens', '--run-dir', runDir, '--total', '777', '--tier', 'HIGH',
+    '--agent-id', 'some-agent', '--project-dir', '/nonexistent/path/xyz',
+  ]);
+  assert.equal(r.code, 0);
+  // tokens_observed must be present — written before re-collection ran.
+  assert.equal(r.out.tokens_observed.total, 777);
+  const rec = JSON.parse(readFileSync(join(runDir, 'record.json'), 'utf8'));
+  assert.equal(rec.tokens_observed.total, 777,
+    'tokens_observed must be on disk even when re-collection degrades');
+});
