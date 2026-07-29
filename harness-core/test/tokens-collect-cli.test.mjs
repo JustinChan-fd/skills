@@ -278,17 +278,21 @@ test('--session-id flag is the sole session source when env var is absent', () =
 });
 
 test('tokens_observed is written before re-collection: it survives a degraded re-collect', () => {
-  // The crash-resilience invariant: recordObservedTokens must write tokens_observed
-  // BEFORE the re-collect block runs. We verify this by passing a nonexistent
-  // --project-dir so collectAndStamp silently degrades (empty by_model, no throw)
-  // and assert tokens_observed is present on disk regardless. This pins the
-  // write-first ordering: if recordObservedTokens were moved after the re-collect
-  // block, a crash between the two calls would leave tokens_observed absent.
+  // What this test pins: tokens_observed reaches disk even when re-collection
+  // degrades, i.e. the two writes are decoupled and a failed re-collect cannot
+  // silently suppress the cost record. Passing a nonexistent --project-dir makes
+  // collectAndStamp degrade (empty by_model) without throwing, so the clobber
+  // guard skips the stamp and directional_recollected is still true.
   //
-  // Note: with the nonexistent dir, collectAndStamp does not throw — it returns a
-  // degraded result with empty by_model, so the clobber guard skips the stamp and
-  // directional_recollected is true (the call "succeeded" with degraded output).
-  // The invariant is that tokens_observed.total is present regardless.
+  // What this test does NOT pin: the write-BEFORE-re-collect ordering. Moving
+  // recordObservedTokens after the re-collect block leaves all tests green
+  // (verified). The ordering has no in-process observable effect on the
+  // --agent-id path at all: resolveTranscripts' `if (agentId)` branch returns
+  // before the `observedTotal` fingerprint branch is ever consulted, and the
+  // re-collect block only runs when --agent-id is present. The ordering protects
+  // a LATER, SEPARATE tokens-collect invocation on the fingerprint path against a
+  // crash between the two disk writes — cross-process, so unreachable from a
+  // black-box CLI test without SIGKILL instrumentation. Enforced by review.
   const { runDir } = makeSubtreeRun();
   const r = run([
     'record-observed-tokens', '--run-dir', runDir, '--total', '777', '--tier', 'HIGH',
