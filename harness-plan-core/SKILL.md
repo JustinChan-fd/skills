@@ -143,13 +143,17 @@ Two more, learned from measured runs:
   before merge and can never satisfy them.
 
 **5. Verifier loop.** FIRST run the deterministic preflight and fix every
-finding before spending any verifier tokens:
+**blocking** finding before spending any verifier tokens. `ok: true` is the
+gate — not an empty findings list:
 
     CLI preflight --phase plan --run-dir <run_dir>
 
-Exit 1 → fix plan.json per the findings, re-run until clean (location
-existence, dependency order, and criteria non-emptiness are script problems,
-not LLM problems). Then: fresh-context verifier, task type `verifier_plan`
+Exit 1 → fix plan.json per the blocking findings, re-run until `ok: true`
+(location existence, dependency order, and criteria non-emptiness are script
+problems, not LLM problems). Advisory findings (severity: 'advisory') are for
+you to confirm deliberately — a symbol you are introducing in this unit is
+expected to be flagged and is not a defect. Then: fresh-context verifier, task
+type `verifier_plan`
 (MID/sonnet, FULL reasoning). Ground-truth checks:
 - Every non-NEW location exists; every NEW location's parent dir exists.
 - Every manifest acceptance criterion is covered by ≥1 unit's done-criteria;

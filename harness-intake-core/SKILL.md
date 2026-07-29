@@ -197,13 +197,16 @@ Then the manifest fields:
   on failure, see **Failure handling** below for the retry rule.
 
 **6. Verifier loop.** FIRST run the deterministic preflight and fix every
-finding before spending any verifier tokens (mechanical defects — dangling
-paths, empty criteria, unresolvable evidence — are cheaper to catch with a
-script than with a fresh LLM round):
+**blocking** finding before spending any verifier tokens (mechanical defects —
+dangling paths, empty criteria, unresolvable evidence — are cheaper to catch
+with a script than with a fresh LLM round). `ok: true` is the gate:
 
     CLI preflight --phase intake --run-dir <run_dir>
 
-Exit 1 → fix the manifest per the findings, re-run until clean. Then spawn a
+Exit 1 → fix the manifest per the blocking findings, re-run until `ok: true`.
+Advisory findings (severity: 'advisory') are for you to confirm deliberately —
+a symbol you are introducing in this unit is expected to be flagged and is not
+a defect. Then spawn a
 FRESH-context verifier (task type
 `verifier_intake`: MID tier / sonnet, FULL reasoning — never cap verifier
 reasoning). Give it ONLY: the manifest, the raw input, and the repo path. Its

@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { preflight } from '../tools/lib/preflight.mjs';
+import { preflight, symbolChecks } from '../tools/lib/preflight.mjs';
 
 // Layout: <target>/.harness/runs/<id>/{manifest.json,plan.json}
 function scaffold() {
@@ -204,4 +204,133 @@ test('implement preflight allows a NEW: location whose parent dir exists', () =>
   })));
   const r = preflight({ phase: 'implement', runDir });
   assert.equal(r.ok, true);
+});
+
+// ── symbol_resolves (advisory) ────────────────────────────────────────────────
+// Preflight already catches the mechanical lie about files. It caught nothing
+// about symbols: a manifest claiming `handleClearFilters` already debounces, or
+// a plan unit whose done_criteria names `useFetchClient`, passed clean and the
+// first thing to notice was a verifier round — 50-75k tokens for a name a
+// substring search finds for free. Advisory, never blocking: a unit that
+// INTRODUCES a symbol legitimately names one that does not exist yet, the same
+// case the "NEW: <path>" convention already encodes for files.
+
+const advisory = (r) => r.findings.filter((f) => f.severity === 'advisory');
+
+test('intake preflight flags a symbol named in evidence that appears in no named file', () => {
+  const { target, runDir } = scaffold();
+  writeFileSync(join(target, 'src', 'app.ts'), 'export function handleClear() {}\n');
+  writeFileSync(join(runDir, 'manifest.json'), JSON.stringify(MANIFEST({
+    claims_audit: [
+      { claim: 'clearing', verdict: 'verified', evidence: 'src/app.ts defines `handleClear` and `handleClearFilters`' },
+    ],
+  })));
+  const r = preflight({ phase: 'intake', runDir });
+  const found = advisory(r);
+  assert.equal(found.length, 1, `expected exactly one advisory, got ${JSON.stringify(found)}`);
+  assert.equal(found[0].check, 'symbol_resolves');
+  assert.ok(found[0].detail.includes('handleClearFilters'));
+  assert.ok(!found[0].detail.includes('`handleClear`'), 'handleClear is present and must not be flagged');
+  assert.ok(found[0].detail.includes('src/app.ts'), 'the detail must name what was searched');
+});
+
+test('a symbol finding is advisory: preflight stays ok and does not block', () => {
+  const { runDir } = scaffold();
+  writeFileSync(join(runDir, 'manifest.json'), JSON.stringify(MANIFEST({
+    claims_audit: [
+      { claim: 'ghost', verdict: 'verified', evidence: 'src/app.ts exports `totallyMissingSymbol`' },
+    ],
+  })));
+  const r = preflight({ phase: 'intake', runDir });
+  assert.equal(r.ok, true, 'an advisory-only run must remain ok — a NEW symbol is legitimate');
+  assert.equal(r.findings.length, 1);
+  assert.equal(r.findings[0].severity, 'advisory');
+});
+
+test('a blocking finding still makes preflight not-ok even beside advisories', () => {
+  const { runDir } = scaffold();
+  writeFileSync(join(runDir, 'manifest.json'), JSON.stringify(MANIFEST({
+    repo_scan: { stack: 'ts', key_paths: ['src/ghost.ts'], notes: null },
+    claims_audit: [
+      { claim: 'ghost', verdict: 'verified', evidence: 'src/app.ts exports `alsoMissing`' },
+    ],
+  })));
+  const r = preflight({ phase: 'intake', runDir });
+  assert.equal(r.ok, false);
+  assert.ok(r.findings.some((f) => f.check === 'key_path_exists' && f.severity === undefined));
+  assert.ok(r.findings.some((f) => f.check === 'symbol_resolves' && f.severity === 'advisory'));
+});
+
+test('prose words, paths, and short tokens are not treated as symbols', () => {
+  // Every one of these appeared in a real manifest. Flagging any of them trains
+  // the author to ignore the check, which costs more than the check saves.
+  const { runDir } = scaffold();
+  writeFileSync(join(runDir, 'manifest.json'), JSON.stringify(MANIFEST({
+    claims_audit: [
+      { claim: 'prose', verdict: 'verified', evidence: 'we should debounce the input here; it is ok as is' },
+      { claim: 'paths', verdict: 'verified', evidence: 'uses shadcn/ui conventions across src/components' },
+    ],
+  })));
+  const r = preflight({ phase: 'intake', runDir });
+  assert.deepEqual(advisory(r), []);
+  assert.equal(r.ok, true);
+});
+
+test('plan preflight mines symbols from unit done_criteria against that unit locations', () => {
+  const { target, runDir } = scaffold();
+  writeFileSync(join(target, 'src', 'app.ts'), 'export const useFetchClient = () => {};\n');
+  writeFileSync(join(runDir, 'plan.json'), JSON.stringify(PLAN({
+    units: [
+      { id: 'u1', title: 'a', locations: ['src/app.ts'], depends_on: [], done_criteria: ['`useFetchClient` returns an AbortSignal'] },
+      { id: 'u2', title: 'b', locations: ['src/app.ts'], depends_on: [], done_criteria: ['`useLegacyFetch` is deleted'] },
+    ],
+    order: ['u1', 'u2'],
+  })));
+  const r = preflight({ phase: 'plan', runDir });
+  const found = advisory(r);
+  assert.equal(found.length, 1, `expected one advisory, got ${JSON.stringify(found)}`);
+  assert.ok(found[0].detail.includes('useLegacyFetch'));
+  assert.ok(found[0].detail.startsWith('u2'), 'the detail must name the unit');
+});
+
+test('a NEW: location is skipped by the symbol check, not reported as missing', () => {
+  // The whole false-negative case: a unit that creates a file names symbols that
+  // cannot exist yet. Nothing to search, so nothing to say.
+  const { runDir } = scaffold();
+  writeFileSync(join(runDir, 'plan.json'), JSON.stringify(PLAN({
+    units: [
+      { id: 'u1', title: 'a', locations: ['NEW: src/components/dialog.ts'], depends_on: [], done_criteria: ['`DialogRoot` renders'] },
+    ],
+    order: ['u1'],
+  })));
+  const r = preflight({ phase: 'plan', runDir });
+  assert.deepEqual(advisory(r), []);
+});
+
+test('a unit with no readable locations produces no symbol findings', () => {
+  // Guard against the check reporting "not found in any named file" when the
+  // list of files to search is empty — that is a vacuous finding, not a defect.
+  const { runDir } = scaffold();
+  writeFileSync(join(runDir, 'plan.json'), JSON.stringify(PLAN({
+    units: [
+      { id: 'u1', title: 'a', locations: [], depends_on: [], done_criteria: ['`mysterySymbol` works'] },
+    ],
+    order: ['u1'],
+  })));
+  const r = preflight({ phase: 'plan', runDir });
+  assert.deepEqual(advisory(r), []);
+});
+
+test('symbolChecks is exported and appends nothing when every symbol resolves', () => {
+  const { target } = scaffold();
+  writeFileSync(join(target, 'src', 'app.ts'), 'export function handleClear() { return doWork(); }\n');
+  const findings = [];
+  symbolChecks({
+    text: 'calls `handleClear` and then `doWork`',
+    paths: ['src/app.ts'],
+    target,
+    label: 'unit-test',
+    findings,
+  });
+  assert.deepEqual(findings, []);
 });
