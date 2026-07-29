@@ -334,3 +334,121 @@ test('symbolChecks is exported and appends nothing when every symbol resolves', 
   });
   assert.deepEqual(findings, []);
 });
+
+// ── I1: camelCase filename segments must not be mined as symbols ──────────────
+// A path like src/hooks/useFetchClient.ts would otherwise mine useFetchClient
+// from its own filename — producing a symbol_resolves advisory alongside the
+// evidence_path_resolves blocking finding. The brief's slash exclusion rule
+// ("anything containing / is not a symbol") exists precisely to prevent this
+// double-report on a single defect.
+test('a camelCase segment inside a path token is not mined as a symbol', () => {
+  const { target, runDir } = scaffold();
+  // Create src/hooks/ so evidencePaths resolves the path (making this a real
+  // path-resolves case, not a vacuous no-paths case).
+  mkdirSync(join(target, 'src', 'hooks'), { recursive: true });
+  writeFileSync(join(target, 'src', 'hooks', 'useFetchClient.ts'), 'export {}\n');
+  writeFileSync(join(runDir, 'manifest.json'), JSON.stringify(MANIFEST({
+    claims_audit: [
+      { claim: 'fetch', verdict: 'verified', evidence: 'src/hooks/useFetchClient.ts handles it' },
+    ],
+  })));
+  const r = preflight({ phase: 'intake', runDir });
+  // The file exists so no evidence_path_resolves firing here — what matters is
+  // that useFetchClient is NOT mined as a symbol because it appears only inside
+  // a slash-joined token in the evidence text.
+  assert.deepEqual(advisory(r), [], `expected no advisory, got ${JSON.stringify(advisory(r))}`);
+});
+
+test('a camelCase symbol after an em-dash in a path annotation IS still mined', () => {
+  // "src/App.tsx — handleClear resets it": the em-dash separates the path from
+  // free text; handleClear appears in a whitespace-delimited run that has no
+  // slash, so it must still be found. This is the load-bearing case that
+  // ensures the slash guard does not suppress legitimate symbol mining.
+  const { target, runDir } = scaffold();
+  // src/app.ts exists but does not define handleClearFilters.
+  writeFileSync(join(runDir, 'manifest.json'), JSON.stringify(MANIFEST({
+    repo_scan: {
+      stack: 'ts',
+      key_paths: ['src/app.ts — handleClearFilters resets the form'],
+      notes: null,
+    },
+  })));
+  const r = preflight({ phase: 'intake', runDir });
+  // handleClearFilters is mined from the annotation text and not found in
+  // src/app.ts → one advisory.
+  assert.equal(advisory(r).length, 1,
+    `expected 1 advisory for handleClearFilters, got ${JSON.stringify(advisory(r))}`);
+  assert.ok(advisory(r)[0].detail.includes('handleClearFilters'));
+});
+
+// ── I2: key_paths symbol pass and keyPaths union are tested ──────────────────
+// Deleting either wire leaves the suite green without these tests.
+
+test('key_paths symbol pass: a missing symbol in an annotated key_path is flagged', () => {
+  // The annotation "src/app.ts — handleClearFilters (the main handler)" names
+  // handleClearFilters. src/app.ts exists but does not define it.
+  const { runDir } = scaffold();
+  // scaffold() writes src/app.ts as 'export {}\n' — no identifiers.
+  writeFileSync(join(runDir, 'manifest.json'), JSON.stringify(MANIFEST({
+    repo_scan: {
+      stack: 'ts',
+      key_paths: ['src/app.ts — handleClearFilters (main handler)'],
+      notes: null,
+    },
+  })));
+  const r = preflight({ phase: 'intake', runDir });
+  const found = advisory(r);
+  assert.equal(found.length, 1,
+    `expected 1 advisory from key_paths symbol pass, got ${JSON.stringify(found)}`);
+  assert.ok(found[0].detail.startsWith('key_paths('), 'label should start with key_paths(');
+  assert.ok(found[0].detail.includes('handleClearFilters'));
+});
+
+test('claims_audit keyPaths union: a symbol absent from evidence path but present in key_path file resolves cleanly', () => {
+  // Scenario: the evidence string names src/app.ts (which defines nothing useful)
+  // BUT handleClearFilters is actually in the key_paths file (src/components/button.ts).
+  // The keyPaths union expands the search set so the symbol resolves without a finding.
+  const { target, runDir } = scaffold();
+  // Write handleClearFilters into the key_paths file (button.ts).
+  writeFileSync(join(target, 'src', 'components', 'button.ts'),
+    'export function handleClearFilters() {}\n');
+  writeFileSync(join(runDir, 'manifest.json'), JSON.stringify(MANIFEST({
+    repo_scan: {
+      stack: 'ts',
+      key_paths: ['src/app.ts', 'src/components/button.ts'],
+      notes: null,
+    },
+    claims_audit: [
+      {
+        claim: 'clearing',
+        verdict: 'verified',
+        // evidence names src/app.ts (empty) but handleClearFilters lives in
+        // button.ts which is in keyPaths → union should find it, no advisory
+        evidence: 'src/app.ts is the entry; handleClearFilters is called there',
+      },
+    ],
+  })));
+  const r = preflight({ phase: 'intake', runDir });
+  assert.deepEqual(advisory(r), [],
+    `expected no advisory because symbol is in a keyPaths file, got ${JSON.stringify(advisory(r))}`);
+});
+
+// ── I3: the >= 4 length floor is exercised by a real short match ─────────────
+// Without the floor, CALLED_RE matches e.g. go() (2 chars) or add() (3 chars),
+// producing noise advisories on symbols too short to be meaningful.
+test('prose words, paths, short-call tokens, and explicit paths are not treated as symbols', () => {
+  // go() has 2 chars — CALLED_RE matches it but the >= 4 floor drops it.
+  // Without the floor go() would be mined, found absent in src/app.ts, and
+  // produce a spurious advisory. This test fails if the floor is removed.
+  const { runDir } = scaffold();
+  writeFileSync(join(runDir, 'manifest.json'), JSON.stringify(MANIFEST({
+    claims_audit: [
+      { claim: 'prose', verdict: 'verified', evidence: 'we should debounce the input here; it is ok as is' },
+      { claim: 'paths', verdict: 'verified', evidence: 'uses shadcn/ui conventions across src/components' },
+      { claim: 'short call', verdict: 'verified', evidence: 'src/app.ts calls go() and add() internally' },
+    ],
+  })));
+  const r = preflight({ phase: 'intake', runDir });
+  assert.deepEqual(advisory(r), []);
+  assert.equal(r.ok, true);
+});

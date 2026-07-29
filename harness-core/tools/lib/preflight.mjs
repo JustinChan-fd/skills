@@ -37,27 +37,42 @@ function evidencePaths(text, target) {
 // author explicitly marking a code name), or a bare camelCase token starting
 // with lowercase (useFetchClient, debounce()), or a trailing-() call name.
 // Deliberately NOT matched: lone lowercase prose words ("we should debounce the
-// input" is a sentence, not a claim about a symbol), anything with a slash
-// (that's a path — evidencePaths already owns it, and matching both would
-// double-report one defect), and tokens under 4 chars (ok/id/URL are noise).
-// NOTE: Unquoted PascalCase is NOT matched by CASED_RE — a PascalCase name is
-// only caught when the author backtick-quotes it, which BACKTICKED_RE handles.
-// That is deliberate. Broadening CASED_RE to uppercase-initial would fire on
-// multi-hump platform globals an artifact mentions in passing (AbortSignal,
-// AbortController, EventTarget, MutationObserver) and on every imported
-// component name, producing advisories on nearly every run. Do not add a
-// denylist to suppress them — it is unbounded and drifts per project. Leave the
-// regex narrow: the signal loss is acceptable, the noise is not.
+// input" is a sentence, not a claim about a symbol), anything whose surrounding
+// whitespace-delimited run contains a slash (that's a path segment — evidencePaths
+// already owns it, and matching both would double-report one defect; e.g.
+// "src/hooks/useFetchClient.ts" must not mine useFetchClient), and tokens under
+// 4 chars (ok/id/URL are noise). The slash guard is NOT applied to BACKTICKED_RE:
+// an author who writes `useFetchClient` has explicitly marked a code name, and a
+// backtick run cannot be a bare path.
+// NOTE: Unquoted PascalCase is NOT matched by CASED_RE — only CALLED_RE catches
+// unquoted PascalCase when suffixed with () (e.g. Dialog()). That is deliberate:
+// bare PascalCase names match multi-hump platform globals (AbortSignal,
+// AbortController, EventTarget, MutationObserver) producing advisories on
+// nearly every run. Do not add a denylist — it is unbounded and drifts per
+// project. Leave the regex narrow: the signal loss is acceptable, the noise is not.
 const BACKTICKED_RE = /`([A-Za-z_$][A-Za-z0-9_$]*)`/g;
 const CASED_RE = /\b([a-z][a-z0-9_$]*[A-Z][A-Za-z0-9_$]*)\b/g;
 const CALLED_RE = /\b([A-Za-z_$][A-Za-z0-9_$]*)\(\)/g;
 
+// Return true if the match at position `index` in `text` sits inside a
+// whitespace-delimited token that contains a slash — meaning the match is a
+// path segment, not a stand-alone symbol.
+function inPathToken(text, index) {
+  const start = text.lastIndexOf(' ', index - 1) + 1;
+  const end = text.indexOf(' ', index);
+  const token = text.slice(start, end === -1 ? undefined : end);
+  return token.includes('/');
+}
+
 function symbolsIn(text) {
   if (typeof text !== 'string') return [];
   const out = new Set();
-  for (const re of [BACKTICKED_RE, CASED_RE, CALLED_RE]) {
+  for (const m of text.matchAll(BACKTICKED_RE)) {
+    if (m[1].length >= 4) out.add(m[1]);
+  }
+  for (const re of [CASED_RE, CALLED_RE]) {
     for (const m of text.matchAll(re)) {
-      if (m[1].length >= 4) out.add(m[1]);
+      if (m[1].length >= 4 && !inPathToken(text, m.index)) out.add(m[1]);
     }
   }
   return [...out];
@@ -141,14 +156,10 @@ function intakeChecks(runDir, findings) {
       findings.push({ check: 'key_path_exists', detail: `repo_scan.key_paths entry does not exist: ${p}` });
     } else if (p) {
       keyPaths.push(p);
+      // An annotated key_path ("src/App.tsx — handleClear (…)") names its own
+      // symbols; check them against the file the same entry points at.
+      symbolChecks({ text: String(entry), paths: [p], target, label: `key_paths(${p})`, findings });
     }
-  }
-  // An annotated key_path ("src/App.tsx — handleClear (…)") names its own
-  // symbols; check them against the file the same entry points at.
-  for (const entry of manifest.repo_scan?.key_paths ?? []) {
-    const p = keyPathOf(entry);
-    if (!p || !keyPaths.includes(p)) continue;
-    symbolChecks({ text: String(entry), paths: [p], target, label: `key_paths(${p})`, findings });
   }
   for (const entry of manifest.claims_audit ?? []) {
     const paths = evidencePaths(entry.evidence, target);

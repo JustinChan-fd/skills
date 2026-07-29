@@ -205,7 +205,7 @@ with a script than with a fresh LLM round). `ok: true` is the gate:
 
 Exit 1 → fix the manifest per the blocking findings, re-run until `ok: true`.
 Advisory findings (severity: 'advisory') are for you to confirm deliberately —
-a symbol you are introducing in this unit is expected to be flagged and is not
+a symbol you are introducing in this requirement is expected to be flagged and is not
 a defect. Then spawn a
 FRESH-context verifier (task type
 `verifier_intake`: MID tier / sonnet, FULL reasoning — never cap verifier
