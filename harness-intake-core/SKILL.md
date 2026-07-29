@@ -287,13 +287,15 @@ the post differs (skip entirely for adhoc/file):
 Then close the record. Pass the per-skill perf fields the v2 record tracks —
 `--active-ms` (gap-capped active time, from `CLI tokens-collect`'s
 `active_ms`), `--agent-count` (agents by model/phase you spawned), and
-`--skill-metrics` (intake slice: manifest path, size, split flag):
+`--skill-metrics` (intake slice: manifest path and size — both read off the
+manifest you just wrote; do NOT add a split flag here, intake cannot know
+whether the plan will need splitting):
 
     CLI phase-end --run-dir <run_dir> --phase intake --status succeeded --rounds <n> --score <verifier score> --size <size>
     CLI run-end --target <path> --run-dir <run_dir> --status succeeded --tokens-by-tier '{"LOW":<n>,"MID":<n>,"HIGH":<n>}' \
       --active-ms <n> \
       --agent-count '{"by_model":{"<model-id>":<n>},"by_phase":{"Intake":<n>,"Discovery":<n>}}' \
-      --skill-metrics '{"intakeManifestPath":"<run_dir>/manifest.json","size_from_intake":"<size>","splitRequired":false}'
+      --skill-metrics '{"intakeManifestPath":"<run_dir>/manifest.json","size_from_intake":"<size>"}'
 
 (`run-end` finalizes, pushes telemetry, and sweeps orphaned records — it runs
 even when telemetry is unconfigured. Wall-clock durations are stamped

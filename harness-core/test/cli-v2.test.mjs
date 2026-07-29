@@ -122,7 +122,7 @@ test('run-end persists active-ms, agent-count, and skill-metrics', () => {
   const end = run(['run-end', '--target', targetDir, '--run-dir', init.out.run_dir, '--status', 'succeeded',
     '--active-ms', '41000',
     '--agent-count', JSON.stringify({ by_model: { 'claude-haiku-4-5-20251001': 20 }, by_phase: { Intake: 3 } }),
-    '--skill-metrics', JSON.stringify({ intakeManifestPath: 'docs/x.json', size_from_intake: 'S', splitRequired: false })],
+    '--skill-metrics', JSON.stringify({ intakeManifestPath: 'docs/x.json', size_from_intake: 'S' })],
     { env: offlineEnv });
   assert.equal(end.code, 0);
   const r = readRecord(init.out.run_dir);

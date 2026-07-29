@@ -51,11 +51,11 @@ test('finalizeRun persists active_ms, agent_count, and skill_metrics', () => {
     runDir, status: 'succeeded', now: NOW,
     activeMs: 41000,
     agentCount: { by_model: { 'claude-haiku-4-5-20251001': 20 }, by_phase: { Intake: 3 } },
-    skillMetrics: { intakeManifestPath: 'docs/x.json', size_from_intake: 'XS', splitRequired: false },
+    skillMetrics: { intakeManifestPath: 'docs/x.json', size_from_intake: 'XS' },
   });
   assert.equal(r.active_ms, 41000);
   assert.deepEqual(r.agent_count.by_model, { 'claude-haiku-4-5-20251001': 20 });
-  assert.deepEqual(r.skill_metrics, { intakeManifestPath: 'docs/x.json', size_from_intake: 'XS', splitRequired: false });
+  assert.deepEqual(r.skill_metrics, { intakeManifestPath: 'docs/x.json', size_from_intake: 'XS' });
 });
 
 test('a v2-stamped record written by the full lifecycle is schema-valid', async () => {

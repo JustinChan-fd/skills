@@ -31,7 +31,7 @@ const v2Record = {
   wall_ms: 60000,
   active_ms: 41000,
   agent_count: { by_model: { 'claude-haiku-4-5-20251001': 20 }, by_phase: { Intake: 3 } },
-  skill_metrics: { intakeManifestPath: 'docs/x.json', size_from_intake: 'XS', splitRequired: false },
+  skill_metrics: { intakeManifestPath: 'docs/x.json', size_from_intake: 'XS' },
   started_at: '2026-07-24T18:30:12Z',
   ended_at: '2026-07-24T18:31:12Z',
   synced_at: null,
