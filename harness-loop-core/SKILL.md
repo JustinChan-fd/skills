@@ -164,8 +164,16 @@ Finalize the pipeline run in step 7 (`CLI run-end` with the tick's outcome).
   for anyone debugging that run in isolation, with no dependency on this
   orchestrator ever having run. Add your observation ALONGSIDE it instead:
 
-      CLI record-observed-tokens --run-dir <run_dir from the driver's own report> --total <N> --tier <TIER> --source agent_tool_usage_tag
+      CLI record-observed-tokens --run-dir <run_dir from the driver's own report> --total <N> --tier <TIER> --source agent_tool_usage_tag --agent-id <agentId>
 
+  `<agentId>` comes off that SAME dispatch result you read `subagent_tokens`
+  from. You are the only party who has it: a driver cannot see its own agent
+  id from inside its own context, so its `run-end` could only stamp
+  directional tokens best-effort. Passing it here re-collects that phase's
+  cost over the driver's whole subagent subtree and overwrites the
+  best-effort stamp with an exact one. If you don't have an id — a hand-run
+  tick, or a driver that crashed before returning — omit the flag; collection
+  degrades to the fingerprint or all-drivers path rather than failing.
   `<TIER>` is `MID` for intake/plan (sonnet) and `HIGH` for implement (opus),
   per `tier_models` in `~/.claude/skills/harness-core/config/routing.json`.
   Keep each phase's N — step 7's `tokens` field needs the sum for this tick.
