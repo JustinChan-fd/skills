@@ -246,6 +246,16 @@ Then sync:
 - `git -C <target> fetch origin`, then checkout + fast-forward the base
   (`git -C <target> checkout <base_branch> && git -C <target> pull --ff-only`).
   A `--ff-only` failure is a STOP, not something to force past.
+- **Then check the base is not AHEAD of its remote** — `pull --ff-only` says
+  "Already up to date" in that case and reports nothing wrong:
+
+      git -C <target> rev-list --count origin/<base_branch>..<base_branch>
+
+  Non-zero means the base carries commits the remote does not have. The PR's
+  diff is computed against the REMOTE base, so every one of those commits would
+  appear in this run's PR as if the harness wrote it. STOP and tell the user to
+  push or reset the base. Do not push it yourself: those commits are the user's,
+  and pushing another author's work is not a hygiene step.
 - Pass `base_branch` into every driver prompt so implement branches from it and
   targets its PR at it (leave the base checked out).
 Run `git -C <target> status --short` and note any pre-existing uncommitted
