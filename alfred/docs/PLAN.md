@@ -1244,8 +1244,28 @@ keeping and the price paid to find it.
 | **The loop is `while`, not a prompt** | `harness-loop-core`'s 3,000-word SKILL.md | model tokens spent simulating a `while` loop |
 
 Two things `harness-core` got right that this plan simply keeps: **determinism
-over LLM** wherever a command can decide, and **size-based routing** rather than
-one model for everything.
+over LLM** wherever a command can decide, and **not one model for everything**.
+
+**Corrected 2026-07-30 (#48).** This paragraph said *"size-based routing"*, and Alfred
+has no size axis: `LC_ALL=C grep -rn "size" lib/ config/` returns three hits, all prose,
+none a mechanism. The S/M/L axis is `harness-core`'s (`config/routing.json`: `sizes` →
+per-size budgets, `tiers` → `model_id_to_tier`), and even there it is **not a threshold**
+— `size` is a judgment an LLM writes at intake from stated heuristics (*"S = single
+concern, few files"*), then passed to `sizeBudgets(routing, size)`. Nothing computes it.
+
+Alfred routes by **seat** — the kind of job — which is a deliberate divergence and a
+better fit for the pillar next to it. Size is a *guess about* the work; seat is a *fact
+about* the call. A scan is a scan whether the ticket is S or L, and `haiku` reading a
+file listing is correct in both. Sizing first also means the routing table inherits the
+LLM's estimate, which is the determinism-over-LLM rule broken at the one point where
+breaking it costs money.
+
+What this cost to find is worth recording: the phantom mechanism was propagated *by the
+protocol meant to prevent it.* #43 wrote step 4's Alfred note as *"the size→tier
+thresholds have not been reviewed against sonnet-5; that review is unclaimed work"* —
+naming a review of a table that does not exist, which reads as coverage. `ROUTING_SURFACE`
+in `lib/model-changes.mjs` replaces it with the real surface, and a test now fails if a
+knob names a field no seat carries.
 
 ---
 

@@ -81,13 +81,50 @@ to do when a fixture is not merely saturated but **wrong**, is `SANDBOX.md` §9.
 **Forbidden:** moving a threshold and an eval case together, which makes the recalibration
 unmeasurable. Also: raising a `token_budget` because the context grew.
 
-What moved on this release: `OUTPUT_CEILINGS` 64k → 128k for the reasoning seats.
-`token_budget` was deliberately left alone — a model with more context is a reason to
-watch spend *more* closely, not less, and raising the cap alongside the context would
-quietly undo the $11.98 lesson while looking like an upgrade (`lib/models.mjs`).
+**Alfred has no size axis, so the recalibration surface is the seat table itself.**
+`ROUTING_SURFACE` in `lib/model-changes.mjs` enumerates it, one entry per tunable, each
+carrying the decision the last move made:
 
-**Still unclaimed:** the size → tier thresholds themselves have not been reviewed against
-sonnet-5. Named here so it is a known gap rather than an assumed completion.
+| knob | decision | at release | why |
+|---|---|---|---|
+| `model` | **moved** | sonnet-5 / opus-5, #38 | worker/fallback/reason → sonnet-5; `scan` deliberately **not** moved (a file listing on a frontier model pays 3x for the same lines) |
+| `max_tokens` | **moved** | sonnet-5 / opus-5, #38 | 64k → 128k where the model allows; tracks `OUTPUT_CEILINGS`, which is transcribed from the gateway rather than inferred |
+| `token_budget` | **held** | sonnet-5 / opus-5, #38 | a spend cap, not a context allowance — see below |
+
+**Why `held` is written down rather than left as a silence.** A knob nobody thought about
+and a knob deliberately left alone produce byte-identical diffs. The only way to tell them
+apart later is to have recorded the second one, which is why `decision: 'held'` is a value
+rather than an absence, and why `at_release` is required — a "held" with no release
+attached could never go stale.
+
+`token_budget` is the one this structure exists for. sonnet-5 has 5x the context of
+sonnet-4-6, so raising the cap alongside it is the move that *looks* like an upgrade in the
+diff and is in fact this step's named prohibition: it would undo the $11.98 lesson (an
+unbounded subagent burning 3.9M tokens). Held at 2M worker/fallback, 500k
+reason/adjudicator, 200k scan. A test now asserts both the `held` and that its stated
+reason rests on **spend** — because *"the context grew"* is the argument that will sound
+most reasonable at the time.
+
+**Corrected 2026-07-30 (#48): this section previously named a mechanism that does not
+exist.** It read *"Still unclaimed: the size → tier thresholds themselves have not been
+reviewed against sonnet-5."* Measured: `LC_ALL=C grep -rn "size" lib/ config/` returns
+three hits, all prose, none a mechanism. The S/M/L axis belongs to `harness-core`
+(`config/routing.json`), and even there it is not a threshold — `size` is a judgment an LLM
+writes at intake from stated heuristics, then passed to `sizeBudgets(routing, size)`.
+Alfred routes by **seat**, the kind of job, which is a deliberate divergence: size is a
+guess *about* the work, seat is a fact *about* the call.
+
+That is the failure mode this protocol was written to prevent, committed by the protocol
+itself. A named gap reads as coverage — someone reading step 4 would believe the routing
+surface had been identified and one review was outstanding, when the surface named was
+imaginary. **A phantom gap is worse than no gap**, and it survived because prose was doing
+a job only a test can do: `ROUTING_SURFACE` now fails if a knob names a field no seat
+carries, and fails if a seat gains a tunable nobody recorded a decision for.
+
+**What this step still does not establish:** that the recalibration was *correct*. Whether
+2M is the right worker budget on sonnet-5 is answerable only by running (#46). The
+enforceable claim is that every knob's decision is recorded and attributed — the same
+epistemic limit the ledger has.
 
 ### 5. Re-ablate the layers suspected of compensating for model weakness.
 

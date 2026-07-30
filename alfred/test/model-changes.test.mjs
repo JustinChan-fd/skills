@@ -37,6 +37,7 @@ import assert from 'node:assert/strict';
 import {
   PROTOCOL_STEPS,
   MEASUREMENTS,
+  ROUTING_SURFACE,
   seatModelFor,
   measurementStatus,
   provisionalMeasurements,
@@ -173,5 +174,138 @@ test('the steps are frozen, so a step cannot be edited out at the point of use',
   assert.ok(Object.isFrozen(PROTOCOL_STEPS));
   assert.throws(() => {
     PROTOCOL_STEPS.push({ step: 7, title: 'skip it' });
+  });
+});
+
+// --- 4. step 4's recalibration surface: HELD is a decision, not a silence ---
+//
+// ADDED 2026-07-30 (#48), correcting #43. Step 4's own `alfred` text claimed *"the
+// size->tier thresholds have not been reviewed against sonnet-5; that review is unclaimed
+// work."* That named a mechanism which does not exist. Measured:
+//
+//   LC_ALL=C grep -rn "size" alfred/lib/ alfred/config/   ->  3 hits, all prose, none a
+//                                                             mechanism
+//
+// The S/M/L axis is `harness-core`'s (`config/routing.json`: `sizes` -> per-size budgets,
+// plus `tiers` -> `model_id_to_tier`), and even there it is not a threshold: `size` is a
+// judgment an LLM writes at intake from stated heuristics, then passed into
+// `sizeBudgets(routing, size)`. Alfred routes by SEAT — the kind of job — with no size
+// input at all, which is a divergence rather than an omission.
+//
+// That mattered more than a wording fix. Step 4 is the one step whose compliance was
+// UNCHECKABLE: `token_budget` being "deliberately unchanged" across the sonnet-5 move is
+// the single most load-bearing recalibration decision in the repo, and it lived only in a
+// comment. Step 4 forbids *"raising a `token_budget` because the context grew"* — so the
+// prohibition and the evidence it was honored were in the same unenforced prose.
+//
+// ROUTING_SURFACE fixes that by making HELD an explicit, recorded decision. The property
+// these tests hold is NOT that the recalibration was correct — no test can hold that, the
+// same limit MEASUREMENTS has. It is that every knob a model change could require moving
+// has a recorded decision naming which way it went and why, so a silent move is a test
+// failure rather than a diff nobody reads.
+
+test('every routing knob records whether the model move MOVED or HELD it', () => {
+  assert.ok(ROUTING_SURFACE.length > 0, 'the surface is empty — step 4 has nothing to check');
+
+  for (const k of ROUTING_SURFACE) {
+    assert.ok(
+      k.decision === 'moved' || k.decision === 'held',
+      `knob '${k.id}' records decision '${k.decision}'; a knob with no decision is the ` +
+        'unenforced-comment state #48 exists to end',
+    );
+    assert.ok(
+      typeof k.why === 'string' && k.why.trim() !== '',
+      `knob '${k.id}' is '${k.decision}' for no stated reason. "Held" without a reason is ` +
+        'indistinguishable from "forgotten", which is the whole failure mode.',
+    );
+  }
+});
+
+test('holding a knob is recorded against the release that could have moved it', () => {
+  // A decision with no release attached cannot expire. This is the same property
+  // `measurementStatus` derives for numbers, applied to tunables: "held" is a statement
+  // about a specific model move, not a permanent posture.
+  //
+  // The non-emptiness guard is not decoration. A `for` loop over an empty array passes,
+  // so without it this test would have been GREEN against the stub `ROUTING_SURFACE = []`
+  // — reporting "every knob names a release" about zero knobs. That is the
+  // green-and-blind shape this repo has already been bitten by.
+  assert.ok(ROUTING_SURFACE.length > 0, 'the surface is empty — this test would pass blind');
+
+  for (const k of ROUTING_SURFACE) {
+    assert.ok(
+      typeof k.at_release === 'string' && k.at_release.trim() !== '',
+      `knob '${k.id}' names no release, so nothing can ever make its decision stale`,
+    );
+  }
+});
+
+test('every threshold-bearing seat field is covered by the surface', () => {
+  // The test that makes this enforcement rather than documentation: add a tunable to a
+  // seat without recording its recalibration decision and THIS fails. Without it,
+  // ROUTING_SURFACE is one more list that goes stale — which is `PLAN.md` §6's exact
+  // history (silently stale for a day at `99bdac3`).
+  const TUNABLE = ['model', 'max_tokens', 'token_budget'];
+  const covered = new Set(ROUTING_SURFACE.map((k) => k.field));
+
+  for (const field of TUNABLE) {
+    assert.ok(
+      covered.has(field),
+      `no knob covers the seat field '${field}'. Every quantity a model change can ` +
+        'require recalibrating needs a recorded decision, or step 4 is unfollowable.',
+    );
+  }
+
+  // And the reverse direction: a knob naming a field no seat has is a leftover.
+  const seatFields = new Set(Object.values(SEATS).flatMap((s) => Object.keys(s)));
+  for (const k of ROUTING_SURFACE) {
+    assert.ok(
+      seatFields.has(k.field),
+      `knob '${k.id}' names field '${k.field}', which no seat in SEATS carries. This is ` +
+        'the phantom-mechanism defect #48 corrects — a knob for something that is not there.',
+    );
+  }
+});
+
+test('token_budget is recorded as HELD, and the reason names spend rather than context', () => {
+  // The one decision most likely to be quietly undone, because undoing it looks like an
+  // upgrade. sonnet-5 has 5x the context of sonnet-4-6; the tempting move is to raise the
+  // cap alongside it, which is step 4's named prohibition and re-creates the $11.98 run.
+  const knob = ROUTING_SURFACE.find((k) => k.field === 'token_budget');
+  assert.ok(knob, 'token_budget has no recorded decision');
+  assert.equal(knob.decision, 'held');
+  assert.match(
+    knob.why,
+    /spend|cap|\$11\.98/i,
+    'the reason for holding token_budget must rest on spend. "The context grew" is the ' +
+      'argument step 4 forbids, and it is the argument that sounds most reasonable.',
+  );
+});
+
+test('the surface does not claim a size axis Alfred does not have', () => {
+  // Guards the specific error #48 corrects, in the file that made it. #43's step 4 text
+  // named "size->tier thresholds"; grep proves Alfred has no size mechanism in lib/ or
+  // config/. A protocol that points at a mechanism which does not exist is worse than one
+  // that says nothing: it reads as covered.
+  const step4 = PROTOCOL_STEPS.find((s) => s.step === 4);
+  assert.doesNotMatch(
+    step4.alfred,
+    /size->tier|size-to-tier|size→tier/i,
+    'step 4 still cites size->tier thresholds. Alfred routes by seat; the S/M/L axis is ' +
+      'harness-core\'s, and is an LLM judgment there rather than a threshold.',
+  );
+});
+
+test('routing decisions are frozen, so a knob cannot be re-decided at the point of use', () => {
+  // Same reason as the release test above: `Object.freeze([])` is frozen, so the per-knob
+  // half of this assertion is unreachable on an empty surface. Two propositions ("the
+  // array is frozen" and "each knob is frozen") must not hide behind one pass.
+  assert.ok(ROUTING_SURFACE.length > 0, 'the surface is empty — the per-knob check is unreachable');
+  assert.ok(Object.isFrozen(ROUTING_SURFACE));
+  for (const k of ROUTING_SURFACE) {
+    assert.ok(Object.isFrozen(k), `knob '${k.id}' is not frozen`);
+  }
+  assert.throws(() => {
+    ROUTING_SURFACE.push({ id: 'smuggled', field: 'model', decision: 'moved' });
   });
 });

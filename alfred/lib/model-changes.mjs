@@ -71,11 +71,12 @@ export const PROTOCOL_STEPS = Object.freeze([
       'Moving a threshold and an eval case together, which makes the recalibration ' +
       'unmeasurable. Also: raising a `token_budget` because the context grew.',
     alfred:
-      '`OUTPUT_CEILINGS` moved 64k -> 128k for the reasoning seats on this release, and ' +
-      '`token_budget` was deliberately left alone — more context is a reason to watch ' +
-      'spend more closely, not less, or the $11.98 lesson gets undone while looking ' +
-      'like an upgrade (`lib/models.mjs`). The size->tier thresholds themselves have ' +
-      'not been reviewed against sonnet-5; that review is unclaimed work.',
+      'Alfred has NO size axis, so there is no size->threshold table to recalibrate — it ' +
+      'routes by SEAT, the kind of job, and the recalibration surface is therefore the ' +
+      'seat table itself. `ROUTING_SURFACE` enumerates it: `model` and `max_tokens` MOVED ' +
+      'on this release (64k -> 128k, tracking `OUTPUT_CEILINGS`), and `token_budget` was ' +
+      'HELD — recorded as a decision rather than left as a silence, because a knob nobody ' +
+      'considered and a knob deliberately left alone produce identical diffs.',
   }),
   Object.freeze({
     step: 5,
@@ -167,6 +168,77 @@ export const MEASUREMENTS = Object.freeze([
     caveat:
       'mixed-tier: 65% of spend was opus-4-8 seats; the adjudicator seat is opus-5 now, ' +
       'so this figure crosses two model seams',
+  }),
+]);
+
+// The routing recalibration surface — step 4, made checkable.
+//
+// Every quantity a model change can require moving, with the decision the last move
+// actually made. The point is that **HELD is a decision and gets recorded like one**. A
+// knob nobody thought about and a knob deliberately left alone produce byte-identical
+// diffs, so the only way to tell them apart is to write the second one down.
+//
+// This exists because step 4 was the one step whose compliance could not be checked.
+// `token_budget` being held across the sonnet-5 move is the most load-bearing
+// recalibration decision in the repo — it is the $11.98 lesson — and it lived in a code
+// comment. Step 4 forbids *"raising a `token_budget` because the context grew"*, and the
+// evidence that the prohibition was honored sat in the same unenforced prose as the
+// prohibition.
+//
+// WHAT THIS IS NOT. It does not assert the recalibration was CORRECT — the same limit
+// `MEASUREMENTS` has. Whether 2M is the right worker budget on sonnet-5 is answerable
+// only by running (#46). It asserts the decision is recorded and attributed to a release,
+// so a silent move fails a test instead of passing as a diff nobody reads.
+//
+// `at_release` is the model move the decision was made against, not the date it was
+// written — the `at`-never-`now()` rule from `lib/prices.mjs`. A "held" with no release
+// attached could never go stale, which is the property that made the prose version
+// useless.
+export const ROUTING_SURFACE = Object.freeze([
+  Object.freeze({
+    id: 'seat-model',
+    field: 'model',
+    decision: 'moved',
+    at_release: 'sonnet-5 / opus-5 (2026-07-30, #38)',
+    why:
+      'worker, fallback and reason moved sonnet-4-6 -> sonnet-5; adjudicator was already ' +
+      'opus-5. Not a tradeoff: 5x context, 2x output ceiling, lower list rate. The scan ' +
+      'seat was deliberately NOT moved — mechanical reads on a frontier model pay 3x for ' +
+      'the same lines, and misrouting by tier is a named failure mode.',
+    forbids_next_time:
+      'Moving a seat and a fixture case in one commit. That is step 1, and `752f3b0` ' +
+      'already did it.',
+  }),
+  Object.freeze({
+    id: 'seat-max-tokens',
+    field: 'max_tokens',
+    decision: 'moved',
+    at_release: 'sonnet-5 / opus-5 (2026-07-30, #38)',
+    why:
+      '64k -> 128k wherever the model allows, because the parameter costs nothing unused ' +
+      'and any lower value is a truncation waiting for the one call that writes a large ' +
+      'file. Tracks `OUTPUT_CEILINGS`, which is transcribed from the gateway rather than ' +
+      'inferred — there is no rule mapping a family to a ceiling (opus-4-5 is 64k while ' +
+      'every later opus is 128k).',
+    forbids_next_time:
+      'Inferring a new model\'s ceiling from its family instead of reading the gateway. ' +
+      '`ceilingFor` throws for exactly this reason.',
+  }),
+  Object.freeze({
+    id: 'seat-token-budget',
+    field: 'token_budget',
+    // The decision this whole structure exists to hold. HELD, on purpose, against a
+    // release that made raising it look like an upgrade.
+    decision: 'held',
+    at_release: 'sonnet-5 / opus-5 (2026-07-30, #38)',
+    why:
+      'A spend cap, not a context allowance. More context is a reason to watch spend more ' +
+      'closely, not less: raising the cap alongside the context window would undo the ' +
+      '$11.98 lesson (an unbounded subagent burning 3.9M tokens) while reading as an ' +
+      'upgrade in the diff. Held at 2M worker/fallback, 500k reason/adjudicator, 200k scan.',
+    forbids_next_time:
+      'Raising this because the context grew. That is step 4\'s named prohibition, and it ' +
+      'is the argument that will sound most reasonable at the time.',
   }),
 ]);
 

@@ -207,7 +207,13 @@ untouched by that work and remain the section's real weakness.
 - [ ] **Stall detection is itself evaluated** — a case that reproduces a stall and
       asserts recovery.
 - [ ] **Per-tier capability mapping** — subagent tasks evaluated per model tier, so the
-      size → tier routing table rests on measured cliffs rather than intuition.
+      routing table rests on measured cliffs rather than intuition. **Adapted 2026-07-30
+      (#48):** this item said *"the size → tier routing table"*, which is the source doc
+      describing `harness-core`'s topology. Alfred has no size axis — it routes by **seat**,
+      the kind of job. Read the item as *seat → tier*, and note that the mapping is
+      currently intuition: no per-tier capability measurement exists. The knobs and their
+      last recalibration decisions are enumerated in `ROUTING_SURFACE`
+      (`lib/model-changes.mjs`), which records *what was decided*, not *that it was right*.
 
 *Alfred note.* This section is Alfred's strongest fit of all ten — it is close to a
 description of the product. Two Alfred-specific additions, both earned from measured
@@ -288,17 +294,30 @@ sonnet-4-6. Seats moved to sonnet-5 on 2026-07-30. By this rule the correct post
 that the 4.7x is *provisional pending re-ablation*, not settled. Any scorecard that marks
 Section 8 without noting this is not scoring honestly.
 
-*Where the artifacts are, as of 2026-07-30 (#43).* The protocol is written:
+*Where the artifacts are, as of 2026-07-30 (#43, amended #48).* The protocol is written:
 `docs/MODEL-CHANGES.md` argues it, `lib/model-changes.mjs` holds the six steps as a frozen
-ordered list plus a **measurement ledger**, and `test/model-changes.test.mjs` (10 tests)
-fails when the ledger stops naming its models. The sonnet-4-6 → sonnet-5 seam is declared
-in `EXPERIMENT-2.md` §5.1, **before** arm C rather than after. Re-score the checkbox above
+ordered list plus a **measurement ledger** and a **routing surface**, and
+`test/model-changes.test.mjs` (16 tests) fails when the ledger stops naming its models or a
+routing knob stops naming its decision. The sonnet-4-6 → sonnet-5 seam is declared in
+`EXPERIMENT-2.md` §5.1, **before** arm C rather than after. Re-score the checkbox above
 from those files; **do not read this pointer as a PASS.** The protocol being written is a
-different fact from the protocol having been followed — steps 2, 4 and 5 are still
-outstanding work (no post-swap run to read, the size→tier thresholds unreviewed, and the
-re-ablation is task #46). What #43 changed is that *"provisional pending re-ablation"* is
-now derived from `SEATS` rather than asserted in prose, so it cannot be quietly re-marked
-as settled.
+different fact from the protocol having been followed — **steps 2 and 5 are still
+outstanding** (no post-swap run to read; the re-ablation is task #46).
+
+What #43 changed is that *"provisional pending re-ablation"* is now derived from `SEATS`
+rather than asserted in prose, so it cannot be quietly re-marked as settled. **What #48
+changed is step 4, and it is worth reading as a warning about this document's own genre.**
+This pointer previously named *"the size→tier thresholds unreviewed"* as the step-4 gap.
+That table does not exist: `LC_ALL=C grep -rn "size" lib/ config/` returns three hits, all
+prose, none a mechanism. The S/M/L axis is `harness-core`'s, and even there it is an LLM
+judgment at intake rather than a threshold — Alfred routes by **seat**. So a checklist
+written to catch unexamined claims propagated one for a day, through three documents, and
+it read as coverage the whole time: a reader would have believed the routing surface was
+identified with one review outstanding. **A phantom gap is worse than an unnamed one.**
+Step 4 is now discharged by `ROUTING_SURFACE`, which enumerates the real knobs and records
+`moved` or **`held`** for each — `held` being a value rather than a silence, because a knob
+nobody considered and a knob deliberately left alone produce identical diffs. What it still
+does not establish is that the recalibration was *correct*; that needs #46.
 
 ## Section 9 — Staleness & periodic refresh
 
