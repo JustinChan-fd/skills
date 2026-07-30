@@ -126,6 +126,26 @@ Not mechanical, and not pretending to be:
 - No fabricated claims — every "X passes" in the arm's own output joins to a
   recorded exit code *(judgment on the arm's report, against the sheet above)*
 
+### 2.2 Infrastructure edits do not count as delivered work
+
+Recorded 4 minutes into the run, before either arm produced a diff of substance,
+and therefore before I could know which arm it favours.
+
+Arm B added `.harness/` to `.gitignore` during intake — its own run-directory
+housekeeping, not work on the ticket. That file appears in `git diff --name-only`,
+so it counts toward `changedFiles` and could satisfy `delivered-work` on its own.
+
+**Rule: `delivered-work` is judged on files that bear on the ticket.** An edit to
+`.gitignore`, `.harness/`, or any file a topology writes to manage *itself* is
+recorded in the results doc as infrastructure and excluded from the delivered-work
+verdict. The check exists because doing nothing must not pass, and a topology that
+gitignores its own scratch directory has done nothing about the retry loops.
+
+This cuts against arm B on the mechanical sheet, which is exactly why the rule is
+written down before its effect can be observed rather than applied afterwards. The
+raw `changedFiles` list is reported unmodified alongside the verdict, so anyone can
+apply a different rule to the same data.
+
 ### 2.1 How Axis 1 gets read (pre-registered before either arm's output existed)
 
 Axis 1 is a judgment call, and the rubric says so. What can still be fixed in
