@@ -712,15 +712,19 @@ right: it replaces what a phase used to re-derive every run, at zero tokens.
   "off_limits": ["node_modules/**", ".husky/**", "**/*.snap"],
 
   "models": {
-    "worker": "claude-sonnet-4-6",
-    "fallback": "claude-sonnet-4-6",
+    // Amended 2026-07-30 (#38): these were sonnet-4-6 at 64k. `lib/models.mjs`
+    // SEATS is the frozen source of truth and now reads sonnet-5 at 128k; this
+    // block is the doc mirroring it, not a second definition. If the two ever
+    // disagree again, the code is right.
+    "worker": "claude-sonnet-5",
+    "fallback": "claude-sonnet-5",
     "agents": {
       // max_tokens   = per-RESPONSE output ceiling (the API parameter).
       // token_budget = per-SEAT spend cap across the subagent's whole life.
       // Two different quantities. See §6.1 — an earlier draft of this block used
       // one name for both and shipped values the gateway would reject.
-      "scan":  { "model": "claude-haiku-4-5",  "max_tokens": 64000, "token_budget": 200000 },
-      "reason":{ "model": "claude-sonnet-4-6", "max_tokens": 64000, "token_budget": 500000 }
+      "scan":  { "model": "claude-haiku-4-5",  "max_tokens": 64000,  "token_budget": 200000 },
+      "reason":{ "model": "claude-sonnet-5",   "max_tokens": 128000, "token_budget": 500000 }
     }
   },
 
@@ -929,11 +933,18 @@ described here — the numbers below are transcribed from the code, not the reve
 
 | seat | model | `max_tokens` | `token_budget` | why |
 |---|---|---|---|---|
-| worker | `config.models.worker`, default sonnet-4-6 | 64k | 2M | arm 0 did 1339 on sonnet for $1.12 |
-| fallback | `config.models.fallback` | 64k | 2M | capacity error at 3am must not kill the tick |
+| worker | `config.models.worker`, default sonnet-5 | 128k | 2M | arm 0 did 1339 on sonnet for $1.12 |
+| fallback | `config.models.fallback` | 128k | 2M | capacity error at 3am must not kill the tick |
 | `scan` subagent | haiku-4-5 | 64k | 200k | mechanical reads. A scan needing 500k has stopped being a scan |
-| `reason` subagent | sonnet-4-6 | 64k | 500k | needs judgment |
+| `reason` subagent | sonnet-5 | 128k | 500k | needs judgment |
 | adjudicator | opus-5, **explicit only** | 128k | 500k | one logged escalation event, with a reason |
+
+Three of those rows were stale until 2026-07-30: worker, fallback and `reason` read
+sonnet-4-6 at 64k after #38 moved `SEATS` to sonnet-5 at 128k. The prose two lines
+up already said the table is transcribed from the code, which is exactly the claim
+that stopped being true — a doc asserting its own freshness is the kind that rots
+unnoticed. `lib/models.mjs` validates `SEATS` at import; nothing validates this
+table, so read it as a convenience and the code as the answer.
 
 Consistent with the standing position: **sonnet in every seat, Opus as
 adjudicator rather than fallback**, and the metric is *tokens per delivered
