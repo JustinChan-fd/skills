@@ -8,7 +8,7 @@ import { readdirSync, statSync, existsSync, readFileSync, writeFileSync } from '
 import { execFileSync } from 'node:child_process';
 import { join } from 'node:path';
 
-const { priceByModel, decideKill, THRESHOLDS } = await import(
+const { priceByModel, decideKill, THRESHOLDS, parseEtimeMs } = await import(
   '/Users/206618626@bwt3.com/Desktop/Repos/skills/alfred/eval/armcost.mjs'
 );
 const { collectFromFiles } = await import(
@@ -64,6 +64,18 @@ function cpuTimeMs(pid) {
 const alive = (pid) => {
   try { process.kill(pid, 0); return true; } catch { return false; }
 };
+
+// The ARM's age, not the watchdog's. Falls back to the watcher's own start only when
+// `ps` gives nothing (the process is gone, so no cap is pending anyway) — never to 0,
+// which would read as "just started" and reset the cap on every poll.
+function armWallMs(pid) {
+  if (!pid) return null;
+  try {
+    return parseEtimeMs(execFileSync('ps', ['-o', 'etime=', '-p', String(pid)], { encoding: 'utf8' }));
+  } catch {
+    return null;
+  }
+}
 
 const pidOf = (name) => {
   const f = `${DIR}/logs/${name}.pid`;
@@ -125,9 +137,11 @@ async function poll() {
     if (up) running.push(arm.name);
     const sinceProgressMs = Date.now() - prev.lastChangeAt;
 
+    const wallMs = armWallMs(pid) ?? Date.now() - started;
+
     log(
       `${arm.name} ${up ? 'RUNNING' : 'EXITED '} $${usd.toFixed(3)}/${arm.caps.spendCapUsd} ` +
-        `wall=${Math.round((Date.now() - started) / 60000)}m quiet=${Math.round(sinceProgressMs / 1000)}s cpu=${cpuMs === null ? '-' : Math.round(cpuMs / 1000) + 's'} ` +
+        `wall=${Math.round(wallMs / 60000)}m quiet=${Math.round(sinceProgressMs / 1000)}s cpu=${cpuMs === null ? '-' : Math.round(cpuMs / 1000) + 's'} ` +
         `txn=${files.length} bytes=${bytes}${unpriced.length ? ` UNPRICED=${unpriced}` : ''}`,
     );
 
@@ -141,7 +155,13 @@ async function poll() {
     });
     // Wall-clock cap is the third pre-registered bound: an arm making steady slow
     // progress trips neither spend nor stall, and is still not worth waiting on.
-    const overWall = Date.now() - started > arm.caps.wallCapMs;
+    //
+    // Measured from the ARM's process age (§2.7), not from this watcher's start. The
+    // first version used `Date.now() - started`, so when the watchdog died with a
+    // session and restarted mid-run, arm B's wall clock reset to 0m and the 90-minute
+    // cap became unreachable. With the CPU-based stall fix already near-inert, that
+    // left the run with no working bound at all.
+    const overWall = wallMs > arm.caps.wallCapMs;
 
     if (d.kill || overWall) {
       prev.killed = true;

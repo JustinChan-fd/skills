@@ -185,12 +185,21 @@ that a single context captures most of what four phases buy. It does not settle 
 
 ### 2.6 A control I violated: my own commits rewrote arm B's provenance stamp
 
-Arm B's two run records disagree about which harness produced them:
+Arm B's run records disagree about which harness produced them:
 
 | record | `harness_sha` | what that sha actually is |
 |---|---|---|
 | `pipeline` (15:15:43) | `3894455` | *my* commit "record the three controls added at launch time" |
 | `intake` (15:16:58) | `5271905` | *my* commit "pre-register how Axis 1 gets read" |
+| `plan` (15:40:51) | `2e9593d` | *my* commit "a control I violated" — i.e. **this section** |
+| `implement` (15:56:40) | `2e9593d` | same; I stopped committing after `2e9593d` |
+
+**Correction to this section's own first draft.** It said "two run records" and listed
+two shas, written when only intake had finished. The pipeline emitted two more phases
+afterwards and the count is **three distinct shas across four records**, not two. The
+third is the commit that added this table — the section documenting the contamination
+is itself the contaminating write, which is the sharpest available statement of the
+problem. Corrected rather than left standing, per §2.1.
 
 Neither is a harness-core version. `harnessSha()` runs `git rev-parse --short HEAD`
 against the harness directory — and **`harness-core` is not its own git repository**,
@@ -213,6 +222,53 @@ hash of the harness tree rather than from `HEAD`.
 
 For Alfred: **provenance must not be read from a repository pointer that unrelated work
 can move.** Hash what ran, or record both the pointer and a tree hash.
+
+### 2.7 The kill switch died with a session, and its clock restarted from zero
+
+Third guard failure this session, and the worst of the three: for **~13 minutes
+(15:41 → 15:54) arm B ran with no cap enforced at all.**
+
+The watchdog was a foreground child of the session that launched it. When that session
+ended, the watchdog went with it. Nothing noticed, because **the absence of a watchdog
+produces exactly the same output as a watchdog seeing nothing wrong** — no log lines
+either way. I found it by comparing `watch.log`'s mtime against the clock, not because
+anything alerted.
+
+Restarting it exposed a second, worse defect. The wall cap was:
+
+```js
+const overWall = Date.now() - started > arm.caps.wallCapMs;   // `started` = WATCHDOG start
+```
+
+`started` is when *the watcher* booted. The restarted watchdog printed `wall=0m` for a
+process that was already 42 minutes old. The pre-registered bound is 90 minutes of
+**arm** wall clock; anchored this way, each restart pushes the cap 90 minutes further
+out, and a watchdog that restarts often enough can never fire. Combined with §2.5's
+near-inert stall detector, arm B briefly had **no working bound of any kind** — spend
+was the only live cap, and §2.5 already showed spend reads as a lower bound.
+
+Fixed by anchoring on the arm's own process age via `ps -o etime=`, which survives any
+number of watcher restarts. `parseEtimeMs` was written test-first (5 tests: `mm:ss`,
+`hh:mm:ss`, `dd-hh:mm:ss`, unparseable-is-null-never-zero, and the 90-minute boundary
+in arm B's own terms), watched fail on the missing export, then falsified four ways —
+returning 0 instead of null, ignoring the days field, transposing mm/ss, and returning
+seconds instead of ms — each caught by a named test, with a byte-identical restore
+after each. `wall=42m` then matched `ps` exactly.
+
+**Why this was fixed mid-run when §2.5's spend gap was not.** §2.5 declined to change
+the kill *rules* after seeing an arm's numbers, because that is what pre-registration
+forbids. This changes no threshold: 90 minutes stays 90 minutes, $18 stays $18. It
+repairs a clock that was not measuring the quantity the pre-registered rule names.
+Leaving it would have meant the caps silently did not exist — which is not
+conservative, it is unbounded.
+
+**Three failures, one shape.** The `in`/`out` pricing bug (both directions at $0), the
+byte-based stall detector (healthy arm reads as hung), the spend figure that omits
+in-flight subagents, and now a cap whose clock resets — every one was **green and
+blind**, and in every case the silence was indistinguishable from success. For Alfred:
+**a guard must be able to report that it is working, and a supervisor must be
+separately supervised.** A monitor that only speaks when something is wrong cannot be
+distinguished from a dead one. Heartbeat, or it is not a guard.
 
 ### 2.3 The stall signal was wrong, and nearly decided the experiment
 

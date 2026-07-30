@@ -16,7 +16,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { priceByModel, decideKill, THRESHOLDS } from '../eval/armcost.mjs';
+import { priceByModel, decideKill, THRESHOLDS, parseEtimeMs } from '../eval/armcost.mjs';
 
 // Rates from harness-core/config/routing.json v2026-07-29.1, sonnet-4-6:
 // in 3, out 15, cache_read 0.3, cache_write 3.75 (per Mtok).
@@ -159,6 +159,44 @@ test('the boundary is exclusive: exactly at the cap is not a kill', () => {
     decideKill({ usd: 0, spendCapUsd: 6, sinceProgressMs: 900_000, stallMs: 900_000 }).kill,
     false,
   );
+});
+
+// --- 4. elapsed time is the ARM's, not the watcher's ---
+//
+// The watchdog died with a session while arm B was still running, and restarting it
+// reset `wall=` to 0m. The pre-registered bound is 90 minutes of ARM wall clock; a
+// clock that restarts with the watcher can never reach it, so the cap silently stops
+// being a cap. Third instance this session of a guard that is green and blind.
+//
+// `ps -o etime=` is the arm's own age and survives any number of watcher restarts.
+
+test('etime is parsed as mm:ss', () => {
+  assert.equal(parseEtimeMs('39:39'), (39 * 60 + 39) * 1000);
+});
+
+test('etime is parsed as hh:mm:ss', () => {
+  assert.equal(parseEtimeMs('1:30:00'), 90 * 60 * 1000);
+});
+
+test('etime is parsed as dd-hh:mm:ss', () => {
+  // Real reading from this machine's long-lived processes. A parser that misreads the
+  // day field understates a multi-day age by orders of magnitude.
+  assert.equal(parseEtimeMs('05-09:17:58'), ((5 * 24 + 9) * 3600 + 17 * 60 + 58) * 1000);
+});
+
+test('an unreadable etime is null, never zero', () => {
+  // Zero would read as "just started" and reset the wall cap on every poll — exactly
+  // the failure being fixed. Null is the caller's signal to fall back.
+  assert.equal(parseEtimeMs(''), null);
+  assert.equal(parseEtimeMs('   '), null);
+  assert.equal(parseEtimeMs(undefined), null);
+  assert.equal(parseEtimeMs('garbage'), null);
+});
+
+test('a 91-minute-old arm is over its 90-minute wall cap', () => {
+  // The proposition the fix exists for, stated in arm B's own terms.
+  assert.equal(parseEtimeMs('1:31:00') > THRESHOLDS.armB.wallCapMs, true);
+  assert.equal(parseEtimeMs('1:29:00') > THRESHOLDS.armB.wallCapMs, false);
 });
 
 test('the pre-registered thresholds are recorded as constants, not passed ad hoc', () => {

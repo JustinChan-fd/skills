@@ -48,6 +48,28 @@ export const THRESHOLDS = Object.freeze({
   armB: Object.freeze({ spendCapUsd: 18, expectedUsd: 6, wallCapMs: 90 * 60 * 1000 }),
 });
 
+// Parses `ps -o etime=` ([[dd-]hh:]mm:ss) into ms — the ARM's own age.
+//
+// The wall cap was anchored on the WATCHDOG's start time, so when the watchdog died
+// with a session and was restarted, `wall=` reset to 0m and a 90-minute cap could
+// never fire on a 40-minute-old arm. The pre-registered bound is the arm's wall clock,
+// and `etime` is the only reading that survives an arbitrary number of watcher
+// restarts. Null on anything unparseable, never 0: a 0 reads as "just started" and
+// would reset the cap on every poll, which is the exact bug being removed.
+export function parseEtimeMs(raw) {
+  const s = String(raw ?? '').trim();
+  if (!s) return null;
+  const [days, hms] = s.includes('-') ? s.split('-') : [null, s];
+  const parts = hms.split(':');
+  if (parts.length < 2 || parts.length > 3) return null;
+  const nums = parts.map(Number);
+  if (nums.some((n) => !Number.isFinite(n))) return null;
+  if (days !== null && !Number.isFinite(Number(days))) return null;
+  const [ss, mm, hh = 0] = nums.reverse();
+  const secs = ss + mm * 60 + hh * 3600 + (days === null ? 0 : Number(days) * 86400);
+  return secs * 1000;
+}
+
 function normalize(model) {
   return String(model ?? '').replace(/-\d{8}$/, '');
 }
