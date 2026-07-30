@@ -230,6 +230,31 @@ time:
    Their absence produces plausible-looking wrong numbers.
 6. Order counterbalanced if a second ticket is added; with n=1 note arm A ran
    first and that it cannot be ruled out as an effect.
+7. **`origin/HEAD` set in both clones.** Provision leaves it unset, and the
+   implement phase's documented fallback is to resolve `origin/HEAD` itself when
+   `base_branch` is null. Unset, that fallback fails — and a failure at branch-cut
+   time would be scored as the topology's fault rather than the fixture's.
+8. **Both arms run behind an identical `gh` shim** that passes every read through
+   and refuses `pr create`/`pr merge`/`issue create` and their siblings. The
+   fixture's code remote is a local bare repo, so no arm could legitimately open a
+   PR; but arm B's drivers receive `GITHUB_SLUG=JustinChan-fd/skills` (the issue
+   lives there), which makes a `gh pr create -R <real repo>` reachable. Sandbox
+   code on a real repository is an outward-facing action nobody asked for. The
+   shim is identical for both arms, so it cannot favour either, and **an arm that
+   tries a refused write has that attempt recorded rather than hidden** — reaching
+   for a PR is itself a finding about the topology. Scoring reads the working-tree
+   diff (`lib/score.mjs` runs `git diff --name-only` against the provisioned
+   commit), so no verdict depends on a PR existing.
+9. **Arms run CONCURRENTLY, which removes control 6's confound rather than adding
+   one.** Every piece of per-run state is per-target: run dirs are
+   `<target>/.harness/runs`, the loop lock is `<target>/.harness/loop.lock`, and
+   the two clones are separate directories with separate bare origins. The
+   telemetry sink serializes writers with an atomic-mkdir advisory lock. Arm A is
+   a bare `claude -p` that never resolves through harness-core's intake, so the
+   single `repos['alfred-sandbox']` alias is read by arm B alone and is not
+   contended. harness-loop-core's invariant 4 ("one driver at a time... never two
+   phases or two issues concurrently") is *internal to a tick* and says nothing
+   about two independent processes.
 
 ### Cost
 
