@@ -424,6 +424,15 @@ test('worker model comes from config; sonnet is the default when config is silen
 test('--fallback-model is always present for loop-launched runs')
 test('subagent tiers become an --agents JSON payload with per-tier ceilings')
 test('no tier defaults to opus — the expensive tier must be named explicitly')
+// §6.1/§6.2, already implemented in lib/models.mjs and test/models.test.mjs ahead of
+// this milestone, because the defect they fix was live in this document.
+test('every seat declares max_tokens within its model ceiling')          // done
+test('token_budget may exceed the ceiling — it is a different quantity')  // done
+test('an unknown model id throws rather than taking a default ceiling')   // done
+test('a max_tokens stop_reason is a failure, not a completed turn')       // done
+// Still M5's to write: the wiring, which is what carries the above into a real call.
+test('the worker records stop_reason per call, and a truncated call fails the run')
+test('a truncated response is never written to disk as a completed artifact')
 test('escalation to opus emits exactly one logged event with a reason')
 test('flag construction is pure: config in, argv array out, no spawn')
 ```
@@ -516,8 +525,12 @@ right: it replaces what a phase used to re-derive every run, at zero tokens.
     "worker": "claude-sonnet-4-6",
     "fallback": "claude-sonnet-4-6",
     "agents": {
-      "scan":  { "model": "claude-haiku-4-5", "max_tokens": 200000 },
-      "reason":{ "model": "claude-sonnet-4-6", "max_tokens": 500000 }
+      // max_tokens   = per-RESPONSE output ceiling (the API parameter).
+      // token_budget = per-SEAT spend cap across the subagent's whole life.
+      // Two different quantities. See §6.1 — an earlier draft of this block used
+      // one name for both and shipped values the gateway would reject.
+      "scan":  { "model": "claude-haiku-4-5",  "max_tokens": 64000, "token_budget": 200000 },
+      "reason":{ "model": "claude-sonnet-4-6", "max_tokens": 64000, "token_budget": 500000 }
     }
   },
 
@@ -585,20 +598,80 @@ declared unverifiable. The distinction is the entire design.
 
 A table and two flags. Not a service, not a phase, not a model call.
 
-| seat | model | why |
-|---|---|---|
-| worker | `config.models.worker`, default sonnet-4-6 | arm 0 did 1339 on sonnet for $1.12 |
-| fallback | `config.models.fallback` | capacity error at 3am must not kill the tick |
-| `scan` subagent | haiku-4-5, ceiling | mechanical reads |
-| `reason` subagent | sonnet-4-6, ceiling | needs judgment |
-| adjudicator | opus-5, **explicit only** | one logged escalation event, with a reason |
+The table is `lib/models.mjs`'s `SEATS`, and it is validated at import rather than
+described here — the numbers below are transcribed from the code, not the reverse.
+
+| seat | model | `max_tokens` | `token_budget` | why |
+|---|---|---|---|---|
+| worker | `config.models.worker`, default sonnet-4-6 | 64k | 2M | arm 0 did 1339 on sonnet for $1.12 |
+| fallback | `config.models.fallback` | 64k | 2M | capacity error at 3am must not kill the tick |
+| `scan` subagent | haiku-4-5 | 64k | 200k | mechanical reads. A scan needing 500k has stopped being a scan |
+| `reason` subagent | sonnet-4-6 | 64k | 500k | needs judgment |
+| adjudicator | opus-5, **explicit only** | 128k | 500k | one logged escalation event, with a reason |
 
 Consistent with the standing position: **sonnet in every seat, Opus as
 adjudicator rather than fallback**, and the metric is *tokens per delivered
 issue* — not tokens per run, which rewards not shipping.
 
-Every tier carries `max_tokens`. The $11.98 counter-lesson is that an unbounded
-subagent is the most expensive object in the system.
+### 6.1 The two token limits, which are not the same limit
+
+An earlier draft of §4 set `"max_tokens": 200000` on the scan seat and `500000` on
+reason. Both are impossible as the API parameter, and finding out why is worth more
+than the correction:
+
+| | `max_tokens` | `token_budget` |
+|---|---|---|
+| scope | one response | one subagent's whole life, summed over every call |
+| enforced by | the gateway, which **rejects** the request | Alfred, by stopping the subagent |
+| ceiling | **64,000** (sonnet-4-5/4-6, haiku-4-5) or **128,000** (opus-4-6+, opus-5, sonnet-5) | none — bounded by what the work is worth |
+| exceeding it costs | nothing; the call never runs | real money |
+
+The original numbers were not wrong about anything real. They were the **$11.98
+counter-lesson** — a subagent with no cap burning 3.2–3.9M tokens — which is a spend
+cap, the larger of the two quantities, wearing the smaller one's name. The tempting
+fix is to clamp both to 64k, and it is the wrong one: it silences the rejected request
+while deleting the only bound that was ever protecting the wallet. So the two are
+separate fields, and `validateSeat` refuses a seat missing either. Omission has to be
+an error rather than an infinity, because absence is exactly how the $11.98 run
+happened.
+
+A note on the ceilings: there is **no rule** mapping a model family to its ceiling.
+sonnet-4-6 is 64k and sonnet-5 is 128k. `OUTPUT_CEILINGS` is therefore transcribed
+from the gateway's model list, and an unrecognised id **throws** rather than receiving
+a default — a guessed 64k on a 128k model silently halves the headroom, and a guessed
+128k on a 64k model produces a rejected call in the middle of an unattended tick.
+Both are invisible; the throw is not.
+
+`max_tokens` sits at each model's ceiling for every seat. The parameter costs nothing
+unused, and any lower value is a truncation waiting for the one call that writes a
+large file. **Sonnet 5 doubles the ceiling at the same 1M context** — free headroom on
+the approved list, and the reason a future worker-seat move from sonnet-4-6 is
+attractive on grounds other than capability. That move is not made here: the worker
+model is the arm-A baseline's model, and changing it would confound Experiment 2.
+
+### 6.2 Truncation is a failure, not a completed turn
+
+`max_tokens` is a per-response ceiling, so a long run never hits it as a run — an
+agent loop makes hundreds of calls and each gets its own 64k. The hazard is narrower
+and worse: **one call that tries to emit an enormous file.**
+
+What makes it worth its own component is that **truncation looks like success.** A
+`stop_reason: "max_tokens"` response is well-formed — valid envelope, valid content
+block — containing half a function or an unterminated JSON object. Nothing downstream
+can distinguish it from a finished answer except that one field. A worker that reads
+only `content` will commit the corruption and a green suite will not notice, because
+the truncated half is what the suite now describes.
+
+So `classifyStop` is a gate, not a log line:
+
+- `end_turn` / `stop_sequence` / `tool_use` → completed.
+- `max_tokens` → **failed, `truncated: true`.** Discard the content. The remedy is to
+  split the work across calls, never to raise `max_tokens`, which is already at the
+  ceiling.
+- `refusal` / `pause_turn` → failed, but **not** truncated. Reporting these as
+  truncation sends a reader to the wrong fix.
+- `null`, or anything unrecognised → **failed.** An unread `stop_reason` and a clean
+  finish must not look the same, which is the whole defect in miniature.
 
 ---
 
