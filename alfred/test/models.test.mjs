@@ -60,6 +60,62 @@ test('an unknown model id throws rather than receiving a default ceiling', () =>
   assert.throws(() => ceilingFor('claude-something-7'), /unknown model/i);
 });
 
+// --- 1b. ADDED: the ids this gateway actually serves ---
+//
+// Every id below was read from this gateway's own /v1/models response on 2026-07-30,
+// and both opus-5 and sonnet-5 were confirmed with a real 200 before these were
+// written. The reason this section exists: `normalize()` here stripped only a trailing
+// date, while the ids the gateway serves carry an `anthropic.` prefix and often a
+// `-v1` or `-v1:0` suffix — so `ceilingFor('anthropic.claude-opus-5')` threw on the
+// exact spelling every request to this gateway uses.
+//
+// Two copies of one normalization is the shape that produced the `in`/`out` price
+// defect: the copies agreed until one was extended. So there is one normalizer, and
+// the last test in this section asserts both modules share it rather than merely
+// happening to agree today.
+
+test('ADDED: a Bedrock-prefixed id resolves to its ceiling', () => {
+  assert.equal(ceilingFor('anthropic.claude-opus-5'), 128_000);
+  assert.equal(ceilingFor('anthropic.claude-sonnet-5'), 128_000);
+  assert.equal(ceilingFor('anthropic.claude-sonnet-4-6'), 64_000);
+});
+
+test('ADDED: a prefixed id with a -v1 or -v1:0 suffix resolves too', () => {
+  // Both real: `anthropic.claude-opus-4-6-v1` and
+  // `anthropic.claude-haiku-4-5-20251001-v1:0` appear in this machine's transcripts.
+  assert.equal(ceilingFor('anthropic.claude-opus-4-6-v1'), 128_000);
+  assert.equal(ceilingFor('anthropic.claude-haiku-4-5-20251001-v1:0'), 64_000);
+});
+
+test('ADDED: opus-4-5 is in the table, because the gateway offers it', () => {
+  // Listed at 64k, which is the interesting part: it is an opus model that does NOT
+  // get opus's 128k. A ceiling inferred from the family name would be 2x wrong here,
+  // which is why the table is transcribed and not derived.
+  assert.equal(ceilingFor('claude-opus-4-5'), 64_000);
+  assert.equal(ceilingFor('anthropic.claude-opus-4-5-20251101-v1:0'), 64_000);
+});
+
+test('ADDED: models.mjs and prices.mjs share one normalizer, not two that agree', async () => {
+  // The anti-drift assertion. Identical behaviour today is not the property worth
+  // testing — a single implementation is, because that is what makes them still agree
+  // after the next id shape appears.
+  const prices = await import('../lib/prices.mjs');
+  const models = await import('../lib/models.mjs');
+  assert.equal(
+    models.normalizeModelId,
+    prices.normalizeModelId,
+    'models.mjs must re-export prices.mjs\'s normalizer rather than define its own',
+  );
+});
+
+test('ADDED: the [1m] long-context marker is not silently stripped for ceilings either', () => {
+  // Same reasoning as pricing: `claude-opus-4-8[1m]` is a distinct variant, and
+  // quietly treating it as the standard model produces a plausible wrong answer. The
+  // ceiling happens to match, but the id must be handled deliberately rather than by
+  // accident of a regex.
+  assert.throws(() => ceilingFor('claude-opus-4-8[1m]'), /unknown model/i);
+});
+
 // --- 2. every configured seat fits, and the numbers that shipped do not ---
 
 test('every seat in the router table declares max_tokens within its ceiling', () => {
@@ -120,6 +176,50 @@ test('a seat with no token_budget is refused', () => {
     () => validateSeat({ model: 'claude-opus-5', max_tokens: 128_000 }),
     /token_budget/,
   );
+});
+
+// --- 3b. ADDED: the seats run on the best models available ---
+//
+// Confirmed live before these were written, not inferred from a model list: both
+// `anthropic.claude-opus-5` and `anthropic.claude-sonnet-5` returned http 200,
+// `stop_reason: end_turn`, `service_tier: standard`, with 1M context and a 128k output
+// ceiling. Sonnet 5 is strictly better than 4-6 on every axis measured — 5x the
+// context, 2x the output ceiling, and a lower list rate — so there is no tradeoff being
+// made here, only a default that had gone stale.
+//
+// The seats are asserted by NAME rather than by a property like "is the newest sonnet",
+// because a property-shaped assertion passes on an empty table and on a table someone
+// downgraded. The point of the test is to fail when a seat regresses.
+
+test('ADDED: the reasoning seats run sonnet-5, not the older sonnet line', () => {
+  for (const name of ['worker', 'fallback', 'reason']) {
+    assert.equal(SEATS[name].model, 'claude-sonnet-5', `seat '${name}' should be on sonnet-5`);
+  }
+});
+
+test('ADDED: the adjudicator runs opus-5', () => {
+  assert.equal(SEATS.adjudicator.model, 'claude-opus-5');
+});
+
+test('ADDED: the scan seat stays on haiku, because tier is a seat decision', () => {
+  // Deliberately NOT upgraded. "Use the best models" is about the seats that reason;
+  // a mechanical scan on a frontier model is the misrouting failure this project has
+  // a whole memory about. There is no haiku 5, and sonnet-5 for a file listing would
+  // be paying 3x for the same lines.
+  assert.equal(SEATS.scan.model, 'claude-haiku-4-5');
+});
+
+test('ADDED: every seat asks for its model\'s full output ceiling', () => {
+  // max_tokens costs nothing unused, and a value below the ceiling is a truncation
+  // waiting for the one call that writes a large file — which classifyStop would then
+  // correctly refuse, turning free headroom into a failed run.
+  for (const [name, seat] of Object.entries(SEATS)) {
+    assert.equal(
+      seat.max_tokens,
+      ceilingFor(seat.model),
+      `seat '${name}' leaves output headroom unused`,
+    );
+  }
 });
 
 // --- 4. truncation is a failure ---

@@ -67,15 +67,28 @@ export function normalizeModelId(model) {
 // opposite risk: a transcript carrying both spellings must cost the same as one
 // carrying either, or the flexibility becomes double-billing.
 //
-// Note `cache_creation` maps to `cache_write` (the 5-minute column) and nothing maps to
-// `cache_write_1h`. A 1-hour breakpoint is rejected by this gateway, so charging that
-// column would bill for something that cannot occur.
+// Cache writes are NOT in this list. They need the split below, because they are the one
+// direction where two recorded numbers can describe the same tokens.
 const COLUMNS = [
   [['in', 'input'], 'in'],
   [['out', 'output'], 'out'],
   [['cache_read', 'cache_read_input_tokens'], 'cache_read'],
-  [['cache_creation', 'cache_write', 'cache_creation_input_tokens'], 'cache_write'],
 ];
+
+// Cache-write count keys, in the three shapes a record can carry them.
+//
+// FLAT IS THE TOTAL ACROSS TTL BUCKETS, NOT THE 5-MINUTE PORTION. Measured against this
+// gateway on 2026-07-30, a write with an explicit 1h breakpoint returned:
+//
+//   "cache_creation_input_tokens": 25204,
+//   "cache_creation": { "ephemeral_5m_input_tokens": 0, "ephemeral_1h_input_tokens": 25204 }
+//
+// So charging the flat field at the 5m rate and then adding the 1h column bills the same
+// tokens twice. The 5-minute portion is a DERIVED quantity whenever the record does not
+// state it outright.
+const CACHE_WRITE_TOTAL = ['cache_creation', 'cache_write', 'cache_creation_input_tokens'];
+const CACHE_WRITE_5M = ['cache_creation_5m', 'ephemeral_5m_input_tokens'];
+const CACHE_WRITE_1H = ['cache_creation_1h', 'ephemeral_1h_input_tokens'];
 
 // The first key actually PRESENT, not the first truthy one. `??` would be a bug here:
 // `{ in: 0, input: 1000000 }` is a contradiction, and resolving it by skipping the
@@ -88,18 +101,79 @@ function tokensFor(counts, keys) {
   return 0;
 }
 
-// Which rate row applies, accounting for a scheduled step-up.
+// True when none of `keys` is present, as distinct from present-and-zero. The 5m split
+// below has to tell "the record says 0" from "the record says nothing," because those
+// two lead to different arithmetic.
+function hasAny(counts, keys) {
+  return keys.some((key) => counts?.[key] !== undefined && counts?.[key] !== null);
+}
+
+// Splits a cache-write count into its two TTL buckets and returns dollars.
 //
-// `at` is an optional ISO date — the record's own `started_at`, not `now()`. Reading
-// the wall clock here would make cost an impure function of its inputs: the same
-// historical record would re-price differently tomorrow, and the version stamp exists
-// precisely so that cannot happen.
-function ratesFor(table, id, at) {
-  const base = table.models[id];
-  if (!base) return null;
-  const change = table.rate_changes?.[id];
-  if (!change || !at) return base;
-  return at >= change.standard_from ? change.standard : base;
+// The three cases, and why each is what it is:
+//
+//   only a flat total          all 5m. The overwhelmingly common record, and the one
+//                              arm 0's $1.12 anchor is built from — adding this split
+//                              must not move it.
+//   explicit 5m and 1h         both authoritative. Nothing is derived when the record
+//                              already states the split.
+//   flat total plus 1h         5m = total - 1h. The measured payload shape. Deriving is
+//                              what prevents the double charge.
+//
+// `usable: false` rather than a clamp when the 1h portion exceeds its total: a negative
+// 5m portion would subtract real money, and clamping to zero reports a confident figure
+// derived from a contradiction. The unambiguous half is still charged.
+function cacheWriteUsd(counts, rates) {
+  const oneHour = Number(tokensFor(counts, CACHE_WRITE_1H));
+  const rate5m = Number(rates.cache_write ?? 0);
+  const rate1h = Number(rates.cache_write_1h ?? 0);
+
+  if (!Number.isFinite(oneHour) || !Number.isFinite(rate5m) || !Number.isFinite(rate1h)) {
+    return { usd: 0, usable: false };
+  }
+
+  let fiveMinute;
+  let usable = true;
+  if (hasAny(counts, CACHE_WRITE_5M)) {
+    fiveMinute = Number(tokensFor(counts, CACHE_WRITE_5M));
+  } else {
+    const total = Number(tokensFor(counts, CACHE_WRITE_TOTAL));
+    if (!Number.isFinite(total)) return { usd: (oneHour / 1e6) * rate1h, usable: false };
+    // A flat total is only ever the whole story when there is no 1h portion to remove
+    // from it; otherwise it is the sum and the 1h half has already been accounted for.
+    fiveMinute = total - oneHour;
+    if (fiveMinute < 0) {
+      // The record contradicts itself. Charge the 1h portion, which is unambiguous, and
+      // let the caller mark the total incomplete.
+      return { usd: (oneHour / 1e6) * rate1h, usable: false };
+    }
+  }
+
+  if (!Number.isFinite(fiveMinute)) return { usd: (oneHour / 1e6) * rate1h, usable: false };
+  return { usd: (fiveMinute / 1e6) * rate5m + (oneHour / 1e6) * rate1h, usable };
+}
+
+// Which rate row applies.
+//
+// `at` is accepted and deliberately unused for now. The USER'S DECISION 2026-07-30: price
+// sonnet-5 at its post-step-up $3/$15 always, including inside the introductory window,
+// so every figure stays directly comparable to arm B's recorded $18.483 (measured on
+// sonnet-4-6 at $3/$15) and no figure changes meaning on 2026-09-01. The consequence,
+// stated in the table too so nobody "corrects" it back: until September every reported
+// dollar runs 1.5x ABOVE what was billed — a deliberate conservative bias.
+//
+// The parameter stays in the signature because it is the hook for the NEXT scheduled
+// change, and because the alternative is worse: `at` is the record's own `started_at`,
+// never `now()`. A cost function that consults the wall clock is not a pure function of
+// its inputs, so the same historical record would re-price differently tomorrow — which
+// is exactly what the version stamp exists to prevent.
+//
+// Table rows therefore carry the STANDARD rate directly; `rate_changes` records the
+// introductory rate that is not being applied, because a rate we decline to charge is
+// still a fact, and dropping it would make the decision indistinguishable from never
+// having noticed the step-up.
+function ratesFor(table, id, _at) {
+  return table.models[id] ?? null;
 }
 
 // Prices a `by_model` map. Returns per-model dollars, a total, the table version, the
@@ -127,13 +201,14 @@ export function priceTokens(byModel, { at = null } = {}) {
       continue;
     }
 
-    // An undated call cannot know which side of a step-up it is on, so it uses the
-    // rates as recorded and names the model. The caveat is what makes a stale figure
-    // self-identifying rather than merely plausible.
-    if (table.rate_changes?.[id] && !at) rateChangePending.push(model);
-
     let usd = 0;
     let usable = true;
+
+    // Cache writes first, because they are the only direction needing the TTL split.
+    const cacheWrite = cacheWriteUsd(counts, rates);
+    usd += cacheWrite.usd;
+    if (!cacheWrite.usable) usable = false;
+
     for (const [countKeys, rateKey] of COLUMNS) {
       const tokens = Number(tokensFor(counts, countKeys));
       const rate = Number(rates[rateKey] ?? 0);

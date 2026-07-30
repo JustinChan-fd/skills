@@ -21,28 +21,36 @@
 // (an unbounded subagent burning 3.9M tokens) while appearing to address it.
 
 // The gateway's published ceilings, transcribed rather than derived. There is no rule
-// mapping a family to a ceiling: sonnet-4-6 and sonnet-5 differ by 2x. Any code that
-// tried to infer this would be inventing a pattern the vendor does not guarantee.
+// mapping a family to a ceiling: sonnet-4-6 and sonnet-5 differ by 2x, and opus-4-5 is
+// an opus model at 64k while every later opus is at 128k. Any code that tried to infer
+// this would be inventing a pattern the vendor does not guarantee.
 export const OUTPUT_CEILINGS = Object.freeze({
   'claude-haiku-4-5': 64_000,
   'claude-sonnet-4-5': 64_000,
   'claude-sonnet-4-6': 64_000,
   'claude-sonnet-5': 128_000,
+  'claude-opus-4-5': 64_000,
   'claude-opus-4-6': 128_000,
   'claude-opus-4-7': 128_000,
   'claude-opus-4-8': 128_000,
   'claude-opus-5': 128_000,
 });
 
-// Transcripts carry dated ids (`claude-haiku-4-5-20251001`). Same normalization the
-// price table uses, and for the same reason: the id in the log is not the id in the
-// table.
-function normalize(model) {
-  return String(model ?? '').replace(/-\d{8}$/, '');
-}
+// ONE normalizer, re-exported rather than reimplemented.
+//
+// This file previously carried its own copy that stripped only a trailing date, while
+// every request to this gateway spells the model with an `anthropic.` prefix and often a
+// `-v1` or `-v1:0` suffix — so `ceilingFor('anthropic.claude-opus-5')` threw on the exact
+// id production uses. Two copies of one normalization is also the precise shape that
+// produced the `in`/`out` price defect: the copies agreed until one was extended.
+//
+// Importing sideways within lib/ is fine under test/isolation.test.mjs, which forbids
+// reaching outside alfred/ — not sibling modules.
+export { normalizeModelId } from './prices.mjs';
+import { normalizeModelId } from './prices.mjs';
 
 export function ceilingFor(model) {
-  const ceiling = OUTPUT_CEILINGS[normalize(model)];
+  const ceiling = OUTPUT_CEILINGS[normalizeModelId(model)];
   if (ceiling === undefined) {
     // Deliberately not a default. A guessed 64k on a 128k model silently halves the
     // available output; a guessed 128k on a 64k model produces a rejected request in
@@ -86,13 +94,25 @@ export function validateSeat(seat) {
 // max_tokens sits at each model's ceiling: the parameter costs nothing unused, and a
 // lower value is a truncation waiting to happen on the one call that writes a large
 // file. token_budget is what actually bounds spend, and it is sized to the seat's job.
+//
+// The reasoning seats moved from sonnet-4-6 to sonnet-5 on 2026-07-30, after confirming
+// live (http 200, end_turn, service_tier standard) rather than reading a model list. It
+// is not a tradeoff: sonnet-5 has 5x the context, 2x the output ceiling, and a lower list
+// rate. The old default was simply stale.
+//
+// token_budget is deliberately UNCHANGED by that move. It bounds spend, and a model with
+// more context is a reason to watch spend more closely, not less — raising the cap
+// alongside the context would quietly undo the $11.98 lesson while looking like an
+// upgrade.
 export const SEATS = Object.freeze({
-  worker: { model: 'claude-sonnet-4-6', max_tokens: 64_000, token_budget: 2_000_000 },
-  fallback: { model: 'claude-sonnet-4-6', max_tokens: 64_000, token_budget: 2_000_000 },
-  // Mechanical reads. The tight budget is the point — a scan that needs 500k has
-  // stopped being a scan.
+  worker: { model: 'claude-sonnet-5', max_tokens: 128_000, token_budget: 2_000_000 },
+  fallback: { model: 'claude-sonnet-5', max_tokens: 128_000, token_budget: 2_000_000 },
+  // Mechanical reads, and deliberately NOT upgraded — "use the best models" is about the
+  // seats that reason. A file listing on a frontier model pays 3x for the same lines, and
+  // misrouting by tier is a named failure mode for this project. The tight budget is the
+  // point too: a scan that needs 500k has stopped being a scan.
   scan: { model: 'claude-haiku-4-5', max_tokens: 64_000, token_budget: 200_000 },
-  reason: { model: 'claude-sonnet-4-6', max_tokens: 64_000, token_budget: 500_000 },
+  reason: { model: 'claude-sonnet-5', max_tokens: 128_000, token_budget: 500_000 },
   // Explicit escalation only, one logged event with a reason. 128k here is free
   // headroom, not an invitation.
   adjudicator: { model: 'claude-opus-5', max_tokens: 128_000, token_budget: 500_000 },
