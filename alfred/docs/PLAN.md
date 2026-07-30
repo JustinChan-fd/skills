@@ -418,6 +418,86 @@ test('arm 0 fixture transcript reports 2,207,405 tokens and $1.12 (+/- rounding)
 That single assertion is worth the whole suite. It fails loudly if any change to
 dedupe, normalization, or the price table moves the headline number.
 
+**Amendment, 2026-07-30 — three names appended, none of the 11 changed.** Added
+after reviewing a separate research pass on whether sidecar/metrics collection
+would work (`~/Downloads/harness-audit-log-schema.md` + bundle). Implemented in
+`lib/gaps.mjs`, tested in `test/gaps.test.mjs` (9 tests).
+
+```
+test('ADDED: a structural hole is named in gaps[] and does not set ok: false')
+test('ADDED: a transcript with parsed lines but zero usable usage records is a named refusal, not $0')
+test('ADDED: a model id that disagrees between sources is named in gaps[], not silently picked')
+```
+
+The 11 frozen names and the arm 0 anchor are byte-identical, so arm C's control
+holds — additions carry `ADDED:` and name their measurement, per M1's rule.
+
+*Why `gaps` was worth taking.* The doc's §7 step 7 states this project's own M0
+principle in other words: "Never zero-fill missing usage. An unmeasured unit and a
+free unit must not look the same." Alfred already honoured that for **cost** holes
+(`usd: null`, `unpriced: []`, `complete: false`) and had nothing for **structural**
+ones — an unreadable subagents dir, an absent session id, a guessed window. Those
+either blunted the record to `ok: false` or vanished. That was the one place the
+research found Alfred genuinely weaker, so it is the one place amended.
+
+*Why the tripwire keys on parsed-but-unusable.* The doc is right that the
+transcript format is internal and moves between versions. Alfred cannot abandon it
+— §2.3's by-subagent requirement forces it, and OTel cannot deliver by-subagent
+without `CLAUDE_CODE_ENHANCED_TELEMETRY_BETA=1` and a corporate sign-off. So the
+answer is to fail loudly on a shape change rather than parse it into a clean,
+plottable, false `$0.00`. The trigger is `lines_parsed > 0 && usable === 0`, **not**
+"totals are zero": a tripwire that fires on every trivial session gets muted within
+a week, and a muted tripwire reads as coverage.
+
+*What the model-disagreement name is for.* Measured 2026-07-30 with a local
+OTLP/HTTP listener (~30 lines of `node:http`, no new dependency) against one
+`claude -p` through the Bedrock gateway, session `14171034-…`:
+
+| source | model reported |
+|---|---|
+| `api_request` log record | `claude-haiku-4-5-20251001` |
+| `cost.usage` metric | `sonney` |
+| `token.usage` metric | `sonney` |
+| `--output-format json` `modelUsage` | `sonney` |
+
+One session, identical 4642/264/0/41812 tokens, identical `$0.291135` — a figure
+that reconciles to **opus-5 $5/$25 to seven decimals while naming haiku**. Grouping
+spend by `model` therefore attributes it to whichever field the reader opened. A
+cost that is precise, integer, and wrong is this project's recurring failure shape,
+so `cost_usd_micros` is kept as a **disagreement detector and never as the cost
+source** — the rate table stays. One confounder is not yet separated and is not
+claimed as settled: the `"model": "sonney"` typo in `~/.claude/settings.json` may be
+the whole story, or Bedrock-style ids may miss Claude Code's internal price table.
+
+*Also settled by that test, for the record.* Telemetry capture works through the
+Bedrock gateway (the instrumentation is client-side); `harness.*` resource
+attributes land on **both** logs and metrics; `active_time.total` is available
+(5.528s, `type: cli`); and `query_source` can be `sdk` — a fourth value the doc's
+`main|subagent|auxiliary` enum omits, which is why it was taken as a concept and not
+a field. No `OTEL_*` variable is set anywhere on this machine, so capture only
+happens when a caller opts in per-process. Nothing in `gaps.mjs` reads telemetry:
+`reconcileModel` takes whatever sources a caller *has*, so these tests pass whether
+OTel is ever enabled or not. The pure-sidecar rule is unchanged.
+
+*What was deliberately not taken*, so a later reader does not "restore" it:
+
+- **`attempt`.** §2.4 above — the gate "never re-runs the worker. It reports." The
+  doc's `attempt` is load-bearing because its harness re-runs phases on verifier
+  rejection; Alfred does not, so the field would sit at 1 forever, implying a retry
+  loop that does not exist. Absent beats green-and-blind.
+- **The doc's `outcome` enum** (`ok|stalled|needs_decision|verifier_rejected|error|aborted`).
+  `BLOCKED.md`'s `REASONS` is already a closed set over the same ground
+  (`verifier_rejected` ≈ `verification-failed`, `needs_decision` ≈
+  `ambiguous-requirement`). Two vocabularies for one concept is the defect the doc's
+  own §8 warns about.
+- **Markers as the primary source**, and `cost_usd_micros` as the cost source.
+- The bundle's `aggregate.py` as a starting point: its backend queries are
+  `TODO(backend)` stubs (`query_events` raises, `query_active_time_seconds` returns
+  `None`), so adopting it is design adoption, not a working pipeline. It also
+  initializes `cost_usd_micros: 0` on units whose `usage` stays `null` and sums those
+  into `estimated_total_micros` with no `complete` flag — breaking, in §4, the rule it
+  states in §7.
+
 ### M3 — config
 
 ```
