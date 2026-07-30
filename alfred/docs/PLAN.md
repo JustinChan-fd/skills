@@ -116,6 +116,14 @@ The only genuinely absent capability (HANDOFF §5 table). Same script, plus:
 - A **lock file** with a pid + timestamp; a stale lock (pid dead) is reclaimed,
   a live one exits 0 quietly. Two ticks must never work the same item.
 - Poll the configured source, filter by config predicate, pick **one** item.
+  Cadence is `loop.poll_interval_minutes` in config (§4), **default 30** — the one
+  operational number the persona brief fixed ("he patrols the horizon every 30
+  minutes"). It lives in config rather than in code or in `docs/PERSONA.md` because
+  an operator will want it different per repo, and a prose doc is a poor place to
+  keep a value people change.
+- Blocked items are skipped; when nothing workable remains the loop **terminates**
+  rather than waking to re-skip forever. `lib/blocked.mjs` `planTick` decides this
+  (see §8.5 and `docs/BLOCKED.md`).
 - Nothing picked → exit 0 silently. A no-op tick must be indistinguishable from
   a healthy tick to the scheduler.
 - Delegate to the `work` path. `loop` adds selection; it does not add behavior.
@@ -366,7 +374,14 @@ test('base-branch resolution returns the configured epic branch, not master')
 test('base-branch resolution falls back only when config says it may')
 test('off-limits paths are globs and are resolved relative to repo root')
 test('a config declaring no verification commands is invalid — the gate needs at least one')
+test('loop.poll_interval_minutes defaults to 30 when the loop block is absent')
+test('an explicit poll interval overrides the default')
+test('a zero or negative poll interval is a validation error, not a hot loop')
 ```
+
+The interval tests are three propositions, not one: that the default exists, that
+config beats the default, and that a nonsense value is refused. A single
+"interval is 30" test would pass a build in which config was ignored entirely.
 
 The epic-branch test exists because TARS-1271 got this wrong: the base was
 `feat/migrate-native-fetch-from-axios`, not `master`, and a phased epic ticket
@@ -461,6 +476,14 @@ right: it replaces what a phase used to re-derive every run, at zero tokens.
     "jira": { "cloud": "...", "project": "TARS", "epic": "TARS-1271",
               "jql": "..." },
     "github": { "owner": "...", "repo": "...", "labels": ["ready"] }
+  },
+
+  "loop": {
+    // cadence for `alfred loop`. 30 is the persona brief's number (§2 of
+    // docs/PERSONA.md); it is config because operators change it per repo.
+    "poll_interval_minutes": 30,
+    // the marker a blocked item carries. lib/blocked.mjs BLOCKED_LABEL.
+    "blocked_label": "alfred:blocked"
   },
 
   "base": {

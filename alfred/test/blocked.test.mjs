@@ -17,6 +17,7 @@ import assert from 'node:assert/strict';
 
 import {
   BLOCKED_LABEL,
+  REASONS,
   planBlock,
   blockComment,
   isBlocked,
@@ -78,6 +79,35 @@ test('the comment states the run stopped and that a human reply unblocks it', ()
 test('the comment carries the blocked marker so it is findable', () => {
   const comment = blockComment({ reason: 'missing-access', detail: 'No push rights.' });
   assert.match(comment, new RegExp(BLOCKED_LABEL));
+});
+
+// --- 1b. the persona boundary, on the one surface that ships as code ---
+//
+// PERSONA.md §5 permits the voice here but restricts "Master Wayne" to the operator's
+// own console: this comment lands in a shared ticket queue where a teammate reads it,
+// and the harness cannot know who is watching. The rule is prose in a doc, which rots
+// silently; asserting it is what makes it hold.
+
+test('the blocked comment does not address the reader as Master Wayne', () => {
+  for (const reason of Object.keys(REASONS)) {
+    const comment = blockComment({ reason, detail: 'Specifics of the obstacle.' });
+    assert.doesNotMatch(comment, /master wayne/i, `${reason} must not use the nickname`);
+  }
+});
+
+test('the blocked comment says what is unverified rather than dressing it up', () => {
+  // PERSONA.md §6's corollary: never let good manners read as a pass. A comment
+  // claiming order while the run is halted is the specific failure to prevent.
+  const comment = blockComment({
+    reason: 'verification-failed',
+    detail: 'The build could not be run: the toolchain is absent.',
+  });
+  assert.doesNotMatch(comment, /impeccable order|all is well|everything is fine/i);
+  // Two separate assertions, not one alternation. `/merged|reported as met/` would
+  // stay green after either clause was deleted — the same trap as the AC1 conjunct,
+  // in mirror: an OR makes each branch individually unfalsifiable.
+  assert.match(comment, /nothing has been merged/i, 'must say nothing was merged');
+  assert.match(comment, /reported as met/i, 'must say no AC was claimed');
 });
 
 // --- 2. marking is idempotent and preserves labels ---
