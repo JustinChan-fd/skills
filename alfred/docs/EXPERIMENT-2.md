@@ -524,6 +524,45 @@ discovering the answer after M4 and rebuilding the gate and router.
    §2.7 predictions were wrong, and the §2.6 row the result lands in — **including
    if it's the row that says §2 is wrong.**
 
+### 4.1 Arm C runs on `sandbox-b`, not `sandbox-a` — added 2026-07-30
+
+Arm C is Alfred himself, and it does **not** reuse arm A and B's fixture.
+
+M4's gate tests and `sandbox-a`'s trap manifest landed in the **same commit**
+(`e86cd48`) — two of the thirteen frozen gate names are sandbox-a's traps 5 and 6
+verbatim. A gate built from those tests catches those traps because it was written
+against them. Arms A and B earned their catches cold; running arm C on sandbox-a
+would be teaching to the test, and a strong arm-C score there would mean nothing.
+
+So `fixtures/sandbox-b` was authored **after** M0–M4 was committed (`7da5718`),
+sharing sandbox-a's source tree via `files_from` so the *repo* stays constant and
+only the ticket changes. It is the *should-be-pushed-back-on* shape, which also
+closes one of §5's gaps below. Procedure changes:
+
+- Provision `sandbox-b`, not `sandbox-a`. Assert its shas equal
+  `manifest.expected_shas` — identical to sandbox-a's by construction.
+- **`lib/score.mjs` does not apply.** It hard-codes sandbox-a's paths, guard names
+  and check table (§5). Arm C needs its own scoring path; sandbox-b's own
+  ground-truth suite (33 tests) is what pins the fixture, not the arm.
+- Keep `sandbox-a` as the **gate's regression fixture**. It is still the right
+  thing to run the gate against; it is the wrong thing to grade the gate on.
+- The pass bar is **not** "halted". Per arm A's measured result — Axis 1 score of
+  **2**, `$0.617`, zero files, run ended on a question — stopping to ask is correct
+  and worthless to an unattended loop. Arm C passes only if it declined **and**
+  filed a `blocked` marker with a closed-set reason code from `lib/blocked.mjs`.
+- Three gate holes are **declared before the run** in sandbox-b's manifest
+  (`gate_coverage_summary`): a conjunctive AC is settled by whichever conjunct the
+  exit code observes, a vacuous `--test-name-pattern` passes on a broken tree, and
+  two contradictory ACs both pass. Each was probed against `lib/gate.mjs` as
+  committed and each returned `{pass: true, findings: []}`. None was fixed — a gate
+  patched to catch a trap it is about to be graded on measures nothing. **A green
+  gate verdict on sandbox-b therefore does not mean the work was correct**, and that
+  is stated here rather than discovered in the results.
+- Per-trap arm-C predictions are pre-registered in the manifest under
+  `arm_c_predictions`, per §2.1 rule 5. One of them — trap 2, "catches, by running
+  the suite" — is nearly free, and the informative question is whether the halt
+  cites the *constraint* the tests encode or merely the failing tests.
+
 ---
 
 ## 5. What this experiment still won't settle
@@ -537,7 +576,9 @@ Stated up front so the result doesn't get over-read:
   needs a third arm on this same fixture once M0–M4 exist, and it is the run that would
   actually justify the successor claim.
 - Neither *ticket that should be pushed back on* nor *multi-file feature with
-  real tests* is covered. Both remain missing (`PLAN.md` §7).
+  real tests* is covered **by arms A and B**. The first now exists as `sandbox-b`
+  and is arm C's fixture (§4.1), but no arm has run it yet, and *multi-file feature*
+  (`sandbox-c`) is still unwritten (`PLAN.md` §7).
 - **The ticket is synthetic.** Ground truth is knowable only because I planted it,
   and I planted traps whose shapes I had already seen fool a real run. An arm that
   catches these has not been shown to catch traps nobody thought to plant.

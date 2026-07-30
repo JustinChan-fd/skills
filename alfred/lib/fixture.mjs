@@ -101,6 +101,64 @@ export async function readManifest(slug) {
   }
 }
 
+// Which `files/` tree a fixture provisions from.
+//
+// A manifest may declare `files_from: "<slug>"` instead of carrying its own
+// `files/`, and then provisions the donor's tree byte-for-byte. SANDBOX.md §7
+// wants one repo across all three sandbox shapes so the repo stops being a
+// variable — which is only literally true with one tree. A copy per slug makes
+// "same repo" a claim maintained by hand, and it fails silently: edit
+// sandbox-a's sms.js, sandbox-b's copy does not move, both suites stay green.
+// Sharing makes the coupling loud instead — one tree, one set of expected shas,
+// and an edit fails every sharing fixture's ground-truth suite at once.
+//
+// One hop only. A chain would turn "which tree did this provision" into a graph
+// traversal, and being obvious is the entire point.
+export async function filesRoot(slug, manifest) {
+  const own = join(FIXTURES, slug, 'files');
+  const from = manifest?.files_from;
+
+  if (!from) {
+    if (!existsSync(own)) {
+      throw new Error(
+        `fixture '${slug}' has no files/ directory and declares no files_from. ` +
+          'A fixture must either carry its own source tree or name the one it shares.',
+      );
+    }
+    return own;
+  }
+
+  if (existsSync(own)) {
+    throw new Error(
+      `fixture '${slug}' declares both its own files/ and files_from: '${from}'. ` +
+        'Only one can be the source tree — delete files/ or drop files_from.',
+    );
+  }
+
+  const donorDir = join(FIXTURES, from);
+  const donorFiles = join(donorDir, 'files');
+  if (!existsSync(donorFiles)) {
+    // Distinguish "no such fixture" from "that fixture shares too", because the
+    // fix differs and the error is the only place the reader learns which.
+    if (existsSync(donorDir)) {
+      const donor = await readManifest(from).catch(() => null);
+      if (donor?.files_from) {
+        throw new Error(
+          `fixture '${slug}' names files_from: '${from}', but '${from}' itself uses ` +
+            `files_from: '${donor.files_from}'. Indirect sharing is not supported — ` +
+            'point at the fixture that actually owns the tree. One hop only.',
+        );
+      }
+    }
+    throw new Error(
+      `fixture '${slug}' names files_from: '${from}', but there is no files/ tree at ` +
+        `${donorFiles}.`,
+    );
+  }
+
+  return donorFiles;
+}
+
 // Written at the root of every provisioned tree. `replace` deletes a directory
 // the caller named, and `--into` is user-supplied — so it only ever deletes a
 // tree carrying this marker. A typo pointing at real work is refused instead.
@@ -168,7 +226,10 @@ export async function provision(slug, { into, replace = false } = {}) {
   await git(repo, ['config', 'user.email', plan.committer_email], baseEnv);
   await git(repo, ['remote', 'add', 'origin', origin], baseEnv);
 
-  const src = join(FIXTURES, slug, 'files');
+  // May be another fixture's tree — see filesRoot. The provisioned clone is still
+  // named for the requested slug, because an arm's repo path is recorded in run
+  // output and read by the scorer.
+  const src = await filesRoot(slug, manifest);
   for (const commit of plan.commits) {
     // `includes: "all files"` is the only form the single-commit plans need so
     // far. A per-commit file list would slot in here.

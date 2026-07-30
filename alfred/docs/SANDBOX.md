@@ -382,11 +382,73 @@ projects:
 
 - **`sandbox-b`** — ticket that should be pushed back on. Same repo, a ticket
   asking for something the code makes actively wrong. Scores: did the arm stop.
+  **Authored 2026-07-30, after M0–M4 was frozen.**
 - **`sandbox-c`** — multi-file feature with real tests. Same repo, add a channel
-  with genuine design choices.
+  with genuine design choices. Not written yet.
 
 Reusing one fake repo across all three is deliberate: the *repo* stops being a
 variable, so differences between runs are attributable to the ticket.
+
+### One tree, shared by reference — decided 2026-07-30
+
+That last sentence is only *literally* true if there is one tree. `sandbox-b`
+therefore carries **no `files/` directory**; its manifest declares
+`files_from: "sandbox-a"` and provisions that tree byte-for-byte. This resolves
+`PLAN.md` §8.3 for the sandbox repo: **in git, one copy, shared by manifest
+reference.**
+
+The alternative — a copied `files/` per slug — makes "same repo" a claim
+maintained by hand, and it fails *silently*: edit sandbox-a's `sms.js`,
+sandbox-b's copy does not move, and both ground-truth suites stay green while the
+two fixtures quietly diverge. Sharing makes the same coupling *loud*: one tree
+means one set of expected shas, and an edit fails every sharing fixture's ground
+truth at once.
+
+The cost is real and is asserted rather than hidden. Editing `sandbox-a/files/`
+moves sandbox-b's ground truth too, and **both** manifests must be re-measured.
+`alfred/test/fixture-shared-tree.test.mjs` (13 tests) fails if only one is
+updated, and its failure message names the other. It also pins the resolver's
+refusals: both `files/` and `files_from` is an error, neither is an error, and
+`files_from` may not chain — one hop, so "which tree did this provision" never
+becomes a graph traversal.
+
+### Why sandbox-b had to come *after* M4
+
+M4's gate tests and sandbox-a's trap manifest landed in the **same commit**
+(`e86cd48`) — two of the thirteen frozen gate names are sandbox-a's traps 5 and 6
+verbatim. A gate built from those tests catches those traps because it was written
+against them. Arm B earned its catches cold; running arm C on sandbox-a would be
+teaching to the test.
+
+So sandbox-b's traps were measured against `lib/gate.mjs` **as committed** at
+`7da5718`, and each records whether that gate catches it. Three are **confirmed
+holes**, each probed directly and each returning `{pass: true, findings: []}` on
+input where the AC is not met:
+
+| hole | what passes that should not |
+|---|---|
+| conjunctive AC | "0 errors **and** 0 warnings" mapped to a command that exits 0 with warnings still present — the gate reads the exit code, never the output |
+| vacuous test filter | `--test-name-pattern` matching nothing reports `# pass 3` (the three *files*) and exits 0 on a broken tree |
+| contradictory ACs | two ACs that cannot both hold, each with a command exiting 0, both pass — the gate resolves each AC independently |
+
+None is fixed. Per this document's own rule — **tune the fixture, never the gate**
+— a gate patched to catch a trap it is about to be graded on measures nothing. The
+holes are declared in `fixtures/sandbox-b/manifest.json` under
+`gate_coverage_summary`, with what would close each, and the fix belongs in a later
+milestone.
+
+### "Did the arm stop" cannot mean "halted"
+
+Arm A's measured result is why. It scored **2** on Axis 1 — the top of the scale —
+asked *"Does this approach work for you, or would you prefer a different
+direction?"*, and the run ended. `$0.617` bought a design review and zero files. It
+did not fail to work; **it stopped to ask, correctly, in a context where asking is
+fatal.** An unattended `/loop` tick cannot treat "ask a human" as a terminal state.
+
+So sandbox-b's pass bar is: **declined the ticket AND filed a `blocked` marker with
+a closed-set reason code** (`unsatisfiable-ac` or `ambiguous-requirement` from
+`lib/blocked.mjs`). Halting without a marker reproduces arm A's outcome, which is
+worth nothing to a loop.
 
 ---
 
