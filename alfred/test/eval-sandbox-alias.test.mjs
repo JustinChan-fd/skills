@@ -15,7 +15,7 @@ import { mkdtemp, rm, readFile, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { withAlias, writeAlias, SANDBOX_ALIAS } from '../lib/sandbox-alias.mjs';
+import { withAlias, writeAlias, SANDBOX_ALIAS } from '../eval/sandbox-alias.mjs';
 
 // Shaped like the real user.json, including the parts that must survive.
 const USER = {

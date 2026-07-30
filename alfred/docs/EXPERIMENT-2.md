@@ -195,9 +195,22 @@ prompt tweak.
 
 Both arms get the **byte-identical** ticket text and the same repo state.
 
+**Neither arm is Alfred.** This is a bake-off between two *context topologies* — one
+context versus four phases — and Alfred is the bet that the first one wins. Arm A is a
+bare `claude -p`, matching experiment 1's arm 0 so the numbers stay comparable; it is
+not Alfred's worker, which does not exist yet (no `bin/alfred`, no gate, no config
+loader). Arm B is `harness-core`, the paradigm being replaced, run unmodified and given
+its best shot on the one ticket shape where phase separation could genuinely pay.
+
+The distinction matters for what the result can be used for. A win for arm A vindicates
+**the shape**, not the implementation — it says single-context is the right foundation,
+not that Alfred is good. Whether *Alfred specifically* beats either arm needs a third
+arm once M0–M4 exist, on this same fixture. Until then, conflating "one context won"
+with "Alfred won" would be claiming a measurement nobody took.
+
 | | arm A | arm B |
 |---|---|---|
-| what | one `claude -p` context | `harness-core` four-phase pipeline |
+| what | one `claude -p` context (**not Alfred**) | `harness-core` four-phase pipeline |
 | model | `claude-sonnet-4-6` | its configured tiers, unchanged |
 | flags | `--permission-mode bypassPermissions` | as its drivers set them |
 | may delegate | yes, uncapped (matches how arm 0 ran) | as configured |
@@ -239,7 +252,7 @@ discovering the answer after M4 and rebuilding the gate and router.
 3. ~~Enumerate the reasonable options~~ — **done**: `manifest.reasonable_options`.
 4. Freeze the rubric (§2) and the prediction (§2.7). Commit them **before** step 5.
 5. Point the sandbox alias at arm A's clone:
-   `node lib/sandbox-alias.mjs <provision.json> --github <slug>`. Run arm A. Collect.
+   `node eval/sandbox-alias.mjs <provision.json> --github <slug>`. Run arm A. Collect.
 6. Provision arm B into its **own** directory and re-point the alias. Never reuse
    arm A's clone — `--replace` exists for a fixed path and it deletes, so each arm
    gets a fresh root.
@@ -257,6 +270,11 @@ discovering the answer after M4 and rebuilding the gate and router.
 Stated up front so the result doesn't get over-read:
 
 - **n becomes 2.** Two shapes, one ticket each. Not a distribution.
+- **Alfred is not measured.** Both arms predate him: arm A is a bare `claude -p`, arm
+  B is the pipeline being replaced. The result grades the *topology bet*, and a win for
+  arm A does not license "Alfred beat harness-core" — nothing here ran Alfred. That
+  needs a third arm on this same fixture once M0–M4 exist, and it is the run that would
+  actually justify the successor claim.
 - Neither *ticket that should be pushed back on* nor *multi-file feature with
   real tests* is covered. Both remain missing (`PLAN.md` §7).
 - **The ticket is synthetic.** Ground truth is knowable only because I planted it,

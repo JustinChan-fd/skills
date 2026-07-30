@@ -335,12 +335,12 @@ entry is configuration, not a code change**, so the comparison stands.
 the live pointers to three real repos plus the telemetry sink. It also cannot
 carry a static sandbox `path`, because each arm provisions a **fresh** start
 state, so the alias has to be re-pointed per run or an arm silently inherits the
-previous arm's repo. Hence `lib/sandbox-alias.mjs`, composing with the provision
+previous arm's repo. Hence `eval/sandbox-alias.mjs`, composing with the provision
 CLI:
 
 ```
 node lib/fixture.mjs provision sandbox-a --into "$DIR" --replace > p.json
-node lib/sandbox-alias.mjs p.json --github JustinChan-fd/skills
+node eval/sandbox-alias.mjs p.json --github JustinChan-fd/skills
 ```
 
 Because that helper edits a file holding real configuration, the guards are the

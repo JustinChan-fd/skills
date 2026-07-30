@@ -2,6 +2,17 @@
 // harness-core's `config/user.json`, so arm B can resolve the eval issue through
 // the real intake path.
 //
+// THIS FILE LIVES IN `eval/`, NOT `lib/`, AND THAT IS THE POINT.
+//
+// `lib/` is Alfred's runtime and imports nothing outside `alfred/` — enforced by
+// test/isolation.test.mjs, not merely documented. `eval/` is experiment scaffolding,
+// and it is the one place allowed to reach harness-core, because Experiment 2's arm B
+// *is* the four-phase pipeline: the control group Alfred's design bet is measured
+// against. Measuring the thing you are replacing requires reaching it.
+//
+// Nothing an Alfred run does touches this file. When Experiment 2 is scored, arm B has
+// served its purpose and this can be deleted outright.
+//
 // SANDBOX.md §6 resolved the open risk here: the four-phase drivers can run
 // against a LOCAL repo path while sourcing a GitHub issue from a DIFFERENT repo,
 // because `resolveTarget` treats `path` and `github` as independent fields. This

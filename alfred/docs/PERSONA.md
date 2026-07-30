@@ -138,3 +138,16 @@ default 30. Prose here follows the config, not the reverse.
 Alfred is standalone. He takes inspiration from `harness-core` and **must not import
 from it or be imported by it** — `harness-core` is untouched evidence for the
 experiments. See `docs/SANDBOX.md` §6.
+
+This is now **enforced, not merely asserted** — `test/isolation.test.mjs`. The layout
+is what carries the rule:
+
+| directory | may reach harness-core? | why |
+|---|---|---|
+| `lib/` | **No** | Alfred's runtime. Node built-ins and relative imports only; the telemetry sidecar is reached by writing files, never by importing a package. |
+| `eval/` | **Yes** | Experiment scaffolding. Arm B of Experiment 2 *is* the four-phase pipeline — the control group Alfred's design bet is measured against, and measuring the thing you replace requires reaching it. Nothing an Alfred run touches. |
+
+Six guards, each individually falsified: a `../../` import, a harness-* module
+specifier, a harness-core **filesystem path** (the shape the real coupling actually
+took — both import checks passed while it sat in `lib/`), a bare third-party import,
+the eval scaffolding going missing, and `harness-core` gaining a reference to Alfred.
