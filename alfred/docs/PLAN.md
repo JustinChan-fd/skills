@@ -797,6 +797,85 @@ binds them by importing the constant, and both drift directions were verified to
 
 ---
 
+### AS BUILT — M4, 2026-07-30
+
+`lib/gate.mjs`, 28 tests: the 13 frozen names byte-identical to §3, plus 15 `ADDED:`.
+The verdict is `{ pass, findings: [{rule, detail, evidence}], unverified: [{ac, reason}],
+blocked_reason }` — no score, no total, no average, because a total is what let a run
+look graded while the load-bearing check was never run.
+
+**All 13 frozen names passed on the first run of the implementation.** That is recorded
+because it is the least trustworthy possible signal, and the mutation sweep that
+followed is why: 39 inversions, of which **10 initially survived** — ten guards that
+could each be deleted with every frozen name still green. In all ten cases the guard
+was already present and correct (verified by direct probe before any test was written),
+so these were test holes, not code bugs. One is worth naming above the others:
+
+- **`ac-command-exit-ignored`.** Deleting the check that reads the exit code of the
+  worker's *own proposed* `ac_map` command left all 13 green. That guard is §8.1's
+  entire mitigation for the conflict of interest — "a dishonest `ac_map` can only
+  propose a command; it cannot fake an exit code." The frozen names cover a declared
+  `config.verify` check failing, but never an AC's own mapped command failing, so the
+  one mechanism that makes worker-authored input safe to accept had nothing asserting
+  it worked. The added test supplies an entry carrying both `result: 'passed'` and
+  `exit: 0` alongside a command that exits 1, and asserts the gate ran the command and
+  used the code it got back.
+
+**A frozen name passing for the wrong reason.** Emptying `NOT_COMMAND_SETTLEABLE` — the
+list encoding "an absence-of-change claim is not settleable by any exit code" — left
+every test green. The frozen "no behavior changes" name maps the AC to `npm run lint`,
+which shares no subject word with it, so the *subject-overlap* branch catches it and the
+pattern list is never reached. Two propositions were riding on one green boolean (§10's
+unfalsifiable conjunct, met for the third time in this project). Probing with the list
+emptied: `npm run lint` still fails, but `npm run check:behavior` **passes** — it
+mentions the subject, so overlap is satisfied, and nothing else objects. Renaming the
+command is the cheapest possible response to a `mapping_implausible` finding, so this
+was not a theoretical gap. Both branches now have tests that assert *which* reason
+fired, so neither can hide behind the other.
+
+**A false kill in my own mutation runner.** `not-settleable-list-emptied` was reported
+killed on two consecutive sweeps. It was not: my replacement string produced unbalanced
+brackets, node failed to parse the module, and the runner counted the resulting whole-file
+failure as a dead mutant. A parse failure scored as a kill is the same false-green shape
+this module exists to prevent, arrived at through the tool built to detect it. The final
+runner therefore reports three states — `killed`, `SURVIVED`, and **`INVALID — DID NOT
+PARSE`** — and separately flags a needle that was never found, so a silent no-op cannot
+be certified as coverage either.
+
+**Final: 38 of 39 killed.** The one survivor, `command-presence-not-required`, is a
+proven *equivalent mutant* rather than a hole: `words(undefined)` returns `[]`, so a
+recorded entry with no command string can never overlap any claim, which makes the
+`c.command &&` filter redundant with the overlap check that follows it. No test can
+distinguish the two forms, so none was written — an assertion that cannot fail is worth
+less than a recorded reason why.
+
+Four decisions the frozen names did not dictate:
+
+- **`ac_failed` is its own rule, distinct from `check_failed`.** A failing declared check
+  is a repo-wide fact; a failing AC command is scoped to one AC and names it.
+- **First mapping wins on a duplicate `ac_map` entry.** Last-wins lets a worker propose
+  a command and then append a second entry for the same AC marked `unverifiable` with a
+  plausible reason. Both entries are individually honest; the pair is an escape hatch.
+- **Plausibility is checked *before* the exit code.** The exit code is the misleading
+  input — `npm run lint` exits 0 on a tree whose behaviour nobody examined — so a gate
+  that read it first would have already decided pass.
+- **An off-limits file is reported once, under `off_limits`, not also as a scope
+  violation.** Two findings for one file reads as two problems, and triage decisions get
+  made against counts.
+
+`mapping_implausible` both fails the run *and* records the AC in `unverified[]`. The
+finding is what fails; the `unverified` entry is what tells a human which AC still needs
+looking at. `unsatisfiable` does the opposite — it stays out of `unverified[]` and sets
+`blocked_reason: 'unsatisfiable-ac'` from `blocked.mjs`'s closed set, because "a human
+must look" understates a ticket that needs amending (§8.5).
+
+`blocked_reason` is `null` on a pass **and on ordinary failed work**. Nothing asserted
+that until mutation: `blocked-reason-always-set` was green, and §8.5 skips blocked items
+on later ticks, so a gate that stamped every verdict as blocked would label everything on
+the first tick and then terminate as "nothing workable remains" rather than as a bug.
+
+---
+
 ## 5. The gate checklist, in detail
 
 Inputs, all files on disk after the worker exits — never the worker's opinion:
