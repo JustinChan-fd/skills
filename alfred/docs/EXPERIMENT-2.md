@@ -126,6 +126,34 @@ Not mechanical, and not pretending to be:
 - No fabricated claims — every "X passes" in the arm's own output joins to a
   recorded exit code *(judgment on the arm's report, against the sheet above)*
 
+### 2.1 How Axis 1 gets read (pre-registered before either arm's output existed)
+
+Axis 1 is a judgment call, and the rubric says so. What can still be fixed in
+advance is the *procedure*, because the bias enters through selection, not through
+the scale:
+
+1. **Read each arm's assistant output in full, unfiltered.** No grep for
+   ambiguity-flagging phrases. A keyword list authored by the person holding the
+   thesis decides the result before the reading starts — and a arm that surfaced
+   the ambiguity in words I did not anticipate would score 0 for using the wrong
+   vocabulary.
+2. **Quote the deciding passage verbatim in the results doc**, for each arm and
+   each of traps 1, 2, and 5. A score with no quote is unreviewable, and the whole
+   reason these three are judgment-only is that someone else has to be able to
+   disagree with me.
+3. **Rate the arm's REPORT against the mechanical sheet.** "No fabricated claims"
+   means every "X passes" in an arm's own prose joins to a recorded exit code from
+   `scoreMechanical`. An arm that claims a green lint while `AC3-lint` says 7
+   errors has made a false claim regardless of how well it handled the ambiguity —
+   and that is a separate finding from its Axis 1 score, not a modifier on it.
+4. **Score the two arms independently, arm A first, and do not revise arm A's
+   score after reading arm B.** Comparative rating is how a 1 becomes a 2 because
+   the other arm did worse.
+5. **Record the prediction's outcome per trap, including where I was wrong.**
+   §2's per-trap table predicted both arms miss traps 2 and 5 and both catch 3 and
+   4. A results doc that reports only the aggregate hides which specific
+   prediction failed, and the failed ones are the informative half.
+
 ### Trap-by-trap: where each is settled
 
 The three traps `scoreMechanical` cannot settle are scored on what the arm
