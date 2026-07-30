@@ -16,7 +16,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { priceByModel, decideKill, THRESHOLDS, parseEtimeMs } from '../eval/armcost.mjs';
+import { mkdtemp, mkdir, writeFile, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { priceByModel, decideKill, THRESHOLDS, parseEtimeMs, transcriptsFor } from '../eval/armcost.mjs';
 
 // Rates from harness-core/config/routing.json v2026-07-29.1, sonnet-4-6:
 // in 3, out 15, cache_read 0.3, cache_write 3.75 (per Mtok).
@@ -209,4 +212,62 @@ test('the pre-registered thresholds are recorded as constants, not passed ad hoc
   // Arm B is expected to cost ~5x arm A (§3's ~$1-2 vs ~$5-6), so an identical cap
   // would either kill arm B at its expected cost or let arm A run 5x over.
   assert.ok(THRESHOLDS.armB.spendCapUsd > THRESHOLDS.armA.spendCapUsd);
+});
+
+// --- 5. a subagent's transcript is part of the arm's spend ---
+//
+// The watchdog priced arm B at $1.072 while its true cost was $16.03 — a factor of
+// 15. `transcriptsFor` listed only the top level of each project dir, and every
+// phase driver's transcript lives one level down in `<session-id>/subagents/`.
+//
+// The cap was $18. The watchdog would have reported $1.10 at $18.00 spent, so the
+// spend cap could not fire at all — the same class as §2.7's reset wall clock and
+// §2.5's inert stall detector: THE GUARD WAS GREEN AND BLIND.
+//
+// `transcriptsFor` was a private function inside watch.mjs, which is precisely why
+// this shipped: nothing could test it. It is exported now so this test can exist.
+test('transcripts are collected recursively, so subagent spend is not invisible', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'armcost-txn-'));
+  const proj = join(root, 'exp2-armX-sandbox-a');
+  await mkdir(join(proj, 'sess-1', 'subagents'), { recursive: true });
+  await writeFile(join(proj, 'sess-1.jsonl'), '{}\n');
+  await writeFile(join(proj, 'sess-1', 'subagents', 'agent-aaa.jsonl'), '{}\n');
+  await writeFile(join(proj, 'sess-1', 'subagents', 'agent-bbb.jsonl'), '{}\n');
+
+  const found = transcriptsFor('armX', { projectsDir: root });
+
+  assert.equal(found.length, 3, `expected the loop transcript AND both subagents, got ${found.length}`);
+  assert.ok(found.some((f) => f.endsWith('agent-aaa.jsonl')));
+  assert.ok(found.some((f) => f.endsWith('agent-bbb.jsonl')));
+  await rm(root, { recursive: true, force: true });
+});
+
+test('another arm transcripts are never priced into this arm', async () => {
+  // The dir filter is what keeps the two arms' costs independent. Recursing must not
+  // widen it — a recursive walk from the projects root would price every arm as one.
+  const root = await mkdtemp(join(tmpdir(), 'armcost-txn-'));
+  await mkdir(join(root, 'exp2-armX-sandbox-a'), { recursive: true });
+  await mkdir(join(root, 'exp2-armY-sandbox-a', 'sess-9', 'subagents'), { recursive: true });
+  await writeFile(join(root, 'exp2-armX-sandbox-a', 'mine.jsonl'), '{}\n');
+  await writeFile(join(root, 'exp2-armY-sandbox-a', 'sess-9', 'subagents', 'theirs.jsonl'), '{}\n');
+
+  const found = transcriptsFor('armX', { projectsDir: root });
+
+  assert.equal(found.length, 1);
+  assert.ok(found[0].endsWith('mine.jsonl'));
+  await rm(root, { recursive: true, force: true });
+});
+
+test('a non-jsonl file in a subagents dir is not priced', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'armcost-txn-'));
+  const sub = join(root, 'exp2-armX-sandbox-a', 'sess-1', 'subagents');
+  await mkdir(sub, { recursive: true });
+  await writeFile(join(sub, 'agent-aaa.jsonl'), '{}\n');
+  await writeFile(join(sub, 'agent-aaa.output'), 'not a transcript\n');
+
+  const found = transcriptsFor('armX', { projectsDir: root });
+
+  assert.equal(found.length, 1);
+  assert.ok(found[0].endsWith('.jsonl'));
+  await rm(root, { recursive: true, force: true });
 });

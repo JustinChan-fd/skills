@@ -8,7 +8,7 @@ import { readdirSync, statSync, existsSync, readFileSync, writeFileSync } from '
 import { execFileSync } from 'node:child_process';
 import { join } from 'node:path';
 
-const { priceByModel, decideKill, THRESHOLDS, parseEtimeMs } = await import(
+const { priceByModel, decideKill, THRESHOLDS, parseEtimeMs, transcriptsFor } = await import(
   '/Users/206618626@bwt3.com/Desktop/Repos/skills/alfred/eval/armcost.mjs'
 );
 const { collectFromFiles } = await import(
@@ -31,19 +31,14 @@ const ARMS = [
   },
 ];
 
-// Arm B's drivers are separate `claude` processes with their OWN transcript dirs keyed
-// by their cwd. Pricing only the loop's own transcript would undercount the arm by
-// however much its children spent — which is most of it. So: every transcript dir whose
-// name contains the arm's sandbox path.
-function transcriptsFor(arm) {
-  const files = [];
-  for (const entry of readdirSync(PROJECTS)) {
-    if (!entry.includes(`exp2-${arm.name}-`)) continue;
-    const dir = join(PROJECTS, entry);
-    for (const f of readdirSync(dir)) if (f.endsWith('.jsonl')) files.push(join(dir, f));
-  }
-  return files;
-}
+// Moved to eval/armcost.mjs and made recursive (§2.8). The version that lived here
+// listed only the top level of each project dir, and every phase driver's transcript is
+// one level down in `<session-id>/subagents/`. It priced arm B at $1.072 against an $18
+// cap while the arm had spent $16.03 — so the spend cap could not fire at any price.
+//
+// It was private to this file, which is exactly why it shipped broken: nothing could
+// test it. Three tests now cover recursion, per-arm scoping, and the .jsonl filter.
+const listTranscripts = (arm) => transcriptsFor(arm.name, { projectsDir: PROJECTS });
 
 // Consumed CPU time in ms, from `ps -o time=` ([[dd-]hh:]mm:ss.cc). Null when the
 // process is gone — a missing reading must not read as "no progress".
@@ -95,7 +90,7 @@ async function poll() {
 
   for (const arm of ARMS) {
     const pid = pidOf(arm.name);
-    const files = transcriptsFor(arm);
+    const files = listTranscripts(arm);
     const bytes = files.reduce((n, f) => n + statSync(f).size, 0);
 
     // PROGRESS IS NOT TRANSCRIPT BYTES ALONE.

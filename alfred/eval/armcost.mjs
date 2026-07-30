@@ -14,8 +14,11 @@
 // Nothing an Alfred run touches. Delete with the rest of eval/ once Experiment 2 is
 // scored.
 
-import { readFileSync } from 'node:fs';
+import { readFileSync, readdirSync } from 'node:fs';
+import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+
+const DEFAULT_PROJECTS_DIR = '/Users/206618626@bwt3.com/.claude/projects';
 
 const ROUTING = fileURLToPath(new URL('../../harness-core/config/routing.json', import.meta.url));
 
@@ -47,6 +50,36 @@ export const THRESHOLDS = Object.freeze({
   armA: Object.freeze({ spendCapUsd: 6, expectedUsd: 2, wallCapMs: 45 * 60 * 1000 }),
   armB: Object.freeze({ spendCapUsd: 18, expectedUsd: 6, wallCapMs: 90 * 60 * 1000 }),
 });
+
+// Every transcript belonging to an arm, INCLUDING its subagents'.
+//
+// A phase driver is a subagent, and its transcript is written to
+// `<projects>/<slug>/<session-id>/subagents/agent-*.jsonl` — one level below the loop's
+// own `<session-id>.jsonl`. The first version of this listed only the top level, so it
+// priced arm B at $1.072 against an $18 cap while the arm had actually spent $16.03.
+// The guard was green and blind: 15/16ths of the spend was in files it never opened,
+// and the cap could not have fired at any price.
+//
+// Two properties, both tested, because the fix pulls against the bug:
+//   - recursive, so subagent spend counts;
+//   - still scoped to ONE arm's dirs, so recursing does not merge the arms into one
+//     figure. A walk from the projects root would price arm A's cost into arm B.
+export function transcriptsFor(arm, { projectsDir } = {}) {
+  const root = projectsDir ?? DEFAULT_PROJECTS_DIR;
+  const out = [];
+  const walk = (dir) => {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      const p = join(dir, entry.name);
+      if (entry.isDirectory()) walk(p);
+      else if (entry.name.endsWith('.jsonl')) out.push(p);
+    }
+  };
+  for (const entry of readdirSync(root)) {
+    if (!entry.includes(`exp2-${arm}-`)) continue;
+    walk(join(root, entry));
+  }
+  return out;
+}
 
 // Parses `ps -o etime=` ([[dd-]hh:]mm:ss) into ms — the ARM's own age.
 //

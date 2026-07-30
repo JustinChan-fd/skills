@@ -553,3 +553,57 @@ Stated up front so the result doesn't get over-read:
 - A single run per arm captures no variance. If the two arms land within one
   point on Axis 1, that gap is **not** a result, and I should say so rather than
   break the tie in my own favor.
+
+### 2.8 The spend cap read 6% of the spend, so it could not fire at any price
+
+At 16:16Z the watchdog reported arm B at **$1.072 of an $18 cap**. The arm had actually
+spent **$16.03**. A factor of 15.
+
+`transcriptsFor` listed only the top level of each project directory. Arm B dispatches
+every phase as a subagent, and a subagent's transcript is written one level down, in
+`<session-id>/subagents/agent-*.jsonl`. Eight such files, 2.2 MB, none of them opened.
+The one file it did read — the loop's own transcript — contains the orchestration and
+almost none of the work.
+
+So the reported figure was not "somewhat low." It was **the wrong quantity**: the cost of
+coordinating the run, reported as the cost of the run. On this shape the $18 cap was
+unreachable — the arm would have had to spend roughly $270 for the watchdog to print $18.
+
+The function was private to `watch.mjs`, which is exactly why it shipped broken: nothing
+could test it. It is exported from `armcost.mjs` now, and three tests cover the two
+properties that pull against each other — recurse into subagent dirs, and *don't* widen
+the per-arm filter while doing so (a recursive walk from the projects root would price
+both arms as one, which is a different way to make the number meaningless).
+
+**What this cost the experiment.** Nothing that changes a verdict, and one thing that
+matters. The corrected watchdog fired 60 seconds after restart:
+
+```
+16:20:19 armB RUNNING $18.483/18 ... KILL armB cause=spend :: spend $18.48 exceeded
+         the pre-registered cap of $18.00
+```
+
+Arm B was killed on the pre-registered rule, at 65 minutes, inside `implement`. Not by a
+threshold I chose after seeing its numbers — the $18 was frozen in code before either arm
+ran, and the fix moved no threshold. But it was enforced ~40 minutes late, and in those
+40 minutes the arm spent roughly $14 that a working cap would have prevented. The
+experiment's total came to **$19.10 against a $25 ceiling**: the cap held, barely, and by
+luck rather than by design — a slower-exiting arm would have blown through it while the
+watchdog printed single digits.
+
+**Fourth failure, one shape.** The `in`/`out` pricing bug (both directions priced $0),
+the byte-based stall detector (a healthy arm reads as hung), the wall clock that reset
+with its watcher, and now a spend cap reading 6% of the spend. Every one of them was
+**green and blind**: no error, no warning, a plausible number in the log, and no way to
+tell the reading from a correct one by looking at it. Three were found by comparing the
+guard's own output against an independent measurement, and the fourth only because
+`txn=1` looked too small for four phases.
+
+The requirement this pins down for Alfred, stated more sharply than §2.7 managed:
+
+> A guard must publish the *scope* of what it measured, not just the value. `$1.072` is
+> unfalsifiable. `$1.072 across 1 transcript` invites the question "one? for four
+> phases?" — and that question is the entire bug. Every metric ships with its own
+> denominator, and any component that discovers inputs by walking a filesystem is tested
+> against a fixture that has something one level deeper than the happy path.
+
