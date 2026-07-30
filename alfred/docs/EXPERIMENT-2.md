@@ -221,8 +221,16 @@ design, and would have included Alfred's own subagent seats had this shipped int
 
 ### 2.2 Infrastructure edits do not count as delivered work
 
-Recorded 4 minutes into the run, before either arm produced a diff of substance,
-and therefore before I could know which arm it favours.
+Recorded 4 minutes into the run, before either arm produced a diff of substance.
+
+**Correction, from the timestamps.** The original sentence continued "and therefore
+before I could know which arm it favours." That is false, and the next paragraph of
+this section proves it: arm B's `.gitignore` mtime is 08:15:43 and this rule was
+committed at 08:17:25, 102 seconds later. I knew exactly which arm it cut against —
+I named the arm and the file while writing the rule. What was genuinely unknown was
+whether arm B would go on to deliver substantive work, which is what makes the rule
+consequential rather than decorative. The weaker, true claim: **written before the
+rule could change any arm's verdict, not before I could see what it excluded.**
 
 Arm B added `.harness/` to `.gitignore` during intake — its own run-directory
 housekeeping, not work on the ticket. That file appears in `git diff --name-only`,
