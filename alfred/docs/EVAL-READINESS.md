@@ -288,6 +288,18 @@ sonnet-4-6. Seats moved to sonnet-5 on 2026-07-30. By this rule the correct post
 that the 4.7x is *provisional pending re-ablation*, not settled. Any scorecard that marks
 Section 8 without noting this is not scoring honestly.
 
+*Where the artifacts are, as of 2026-07-30 (#43).* The protocol is written:
+`docs/MODEL-CHANGES.md` argues it, `lib/model-changes.mjs` holds the six steps as a frozen
+ordered list plus a **measurement ledger**, and `test/model-changes.test.mjs` (10 tests)
+fails when the ledger stops naming its models. The sonnet-4-6 → sonnet-5 seam is declared
+in `EXPERIMENT-2.md` §5.1, **before** arm C rather than after. Re-score the checkbox above
+from those files; **do not read this pointer as a PASS.** The protocol being written is a
+different fact from the protocol having been followed — steps 2, 4 and 5 are still
+outstanding work (no post-swap run to read, the size→tier thresholds unreviewed, and the
+re-ablation is task #46). What #43 changed is that *"provisional pending re-ablation"* is
+now derived from `SEATS` rather than asserted in prose, so it cannot be quietly re-marked
+as settled.
+
 ## Section 9 — Staleness & periodic refresh
 
 Skills and workflows rot. Scaffolding written for a weaker model becomes dead weight that

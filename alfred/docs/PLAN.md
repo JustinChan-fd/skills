@@ -961,6 +961,16 @@ Consistent with the standing position: **sonnet in every seat, Opus as
 adjudicator rather than fallback**, and the metric is *tokens per delivered
 issue* — not tokens per run, which rewards not shipping.
 
+**Changing a row in this table is governed by `docs/MODEL-CHANGES.md`** (#43). Six
+ordered steps, held as data in `lib/model-changes.mjs` and asserted in
+`test/model-changes.test.mjs`, because the last seat move (`752f3b0`) changed the model
+and 278 lines of its own tests in one commit. The consequence a reader of this table
+should carry: `MEASUREMENTS` pins each of Alfred's headline numbers to the seat it
+constrains, so moving a row above **re-dates every measurement that depended on it** —
+`provisionalMeasurements()` derives that from `SEATS` rather than trusting prose. All
+three entries read provisional today, including the 4.7x/4.6x that killed phase
+orchestration.
+
 ### 6.1 The two token limits, which are not the same limit
 
 An earlier draft of §4 set `"max_tokens": 200000` on the scan seat and `500000` on

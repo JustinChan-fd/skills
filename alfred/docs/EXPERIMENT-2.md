@@ -594,6 +594,58 @@ Stated up front so the result doesn't get over-read:
 - A single run per arm captures no variance. If the two arms land within one
   point on Axis 1, that gap is **not** a result, and I should say so rather than
   break the tie in my own favor.
+- **Arm C runs on a different model than arms A and B.** Declared in §5.1 below,
+  before the run, because at scoring time there is an incentive to reinterpret it.
+
+### 5.1 The model seam: arm C is not on the same model as arms A and B — added 2026-07-30
+
+Arms A and B ran on **sonnet-4-6**. Arm C will run on **sonnet-5**. That is a second
+variable moving between the arms, and this section exists so arm C's results doc inherits
+the constraint rather than discovering it.
+
+**How we know, and how weakly.** Nothing in `docs/exp2-evidence/armA.json` or `armB.json`
+names a model — they carry only provisioning fields (`slug, root, repo, origin, branch,
+head, tree`). The model is *inferred*: arm B's own pipeline record stamps
+`2026-07-30T15:15:43Z` (= 08:15 PDT) and `752f3b0`, the commit that moved the seats to
+sonnet-5, landed at 10:39 PDT, so both arms finished before the move; and the shell that
+ran them still exported `ANTHROPIC_DEFAULT_SONNET_MODEL=anthropic.claude-sonnet-4-6` when
+checked the same day. The inference is well-grounded and it is still the defect — this is
+the unstamped-result FAIL from the scorecard (§4, §7), seen from the inside. **Arm C must
+carry a stamp**, which is what #42 wired: `lib/suite.mjs`'s `suiteStamp` refuses to build
+one without an explicit model id.
+
+**What survives the seam:**
+
+- **Dollar comparisons.** sonnet-5 and sonnet-4-6 are priced identically in
+  `config/prices.json`, asserted at `test/prices.test.mjs:251`. Arm C's cost is directly
+  comparable to arm A's `$0.617` and arm B's `$18.483` in dollars. (Note the standing
+  conservative bias: sonnet-5 is priced at its post-step-up `$3/$15`, not the
+  introductory `$2/$10`, so every reported figure runs 1.5x above actual billing until
+  2026-09-01. Applied to all arms, so it cannot favour one.)
+- **The Axis 1 rubric and the pre-registered prediction.** Frozen, digested, and
+  unchanged across the seam (`config/suite.json`).
+
+**What does not survive:**
+
+- **Token-efficiency and capability claims.** The output ceiling doubled, 64k → 128k
+  (`lib/models.mjs`). A model that can emit twice as much per response is not measuring
+  the same thing when the metric is tokens.
+- **Any claim that arm C beat arm A or B *because of topology*.** A better arm-C result
+  is topology **plus** a model generation, and this experiment cannot separate them. The
+  clean separation needs arm C re-run on sonnet-4-6, or arms A/B re-run on sonnet-5 —
+  neither is planned, and pretending otherwise is the reinterpretation this section
+  forecloses.
+- **Arm B's 30x, doubly.** 65% of its $18.483 was **opus-4-8** seats and the adjudicator
+  seat is opus-5 now, so that figure crosses two model seams rather than one.
+
+**The consequence for the pass bar.** Arm C's bar stays exactly as §4.1 states it —
+declined *and* filed a `blocked` marker with a closed-set reason code. That bar is
+behavioral, so the model seam does not move it. What the seam limits is the *comparative*
+claim, and the honest form of a win is: **"Alfred on sonnet-5 did X for $Y; the pipeline
+on sonnet-4-6 did Z for $18.483"** — two configurations, named, not one variable isolated.
+
+The general procedure this follows, and the ledger of which of our own numbers are now
+provisional, is `docs/MODEL-CHANGES.md`.
 
 ### 2.8 The spend cap read 6% of the spend, so it could not fire at any price
 
