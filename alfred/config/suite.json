@@ -1,0 +1,24 @@
+{
+  "version": "2026-07-30.1",
+  "digest": "780211540b7c19321b3c42794b2a1cadbafeb86a8b71546eed78184525b74098",
+  "what_this_versions": "The rubric+fixture pair as a UNIT — the four things a score means. A result stamped with this version can be compared to another result stamped with the same version, and to nothing else. Bump on any change to any member.",
+  "why": "docs/eval-readiness/2026-07-30-scorecard.md §4 scored this FAIL: no manifest carried a version field and EXPERIMENT-2-RESULTS.md carried no model id, no config sha, and no run date. Arm A's $0.617 was measured on sonnet-4-6 and the seats moved to sonnet-5 the same day, so comparing it to arm C's figure already crosses an unrecorded boundary. Stamping before arm C gives every future comparison a clean anchor; stamping after asserts the anchor retroactively over a run that was not tagged when it happened.",
+  "convention": "YYYY-MM-DD.N, following config/prices.json's version rather than inventing a second convention. N increments within a day.",
+  "members": [
+    "lib/score.mjs",
+    "fixtures/sandbox-a/manifest.json",
+    "fixtures/sandbox-b/manifest.json",
+    "docs/EXPERIMENT-2.md §'Axis 1 — did the arm handle the ambiguity? (the thing being tested)'",
+    "docs/EXPERIMENT-2.md §'Axis 2 — is the delivered work sound?'",
+    "docs/EXPERIMENT-2.md §'Pre-registered prediction'"
+  ],
+  "members_are_declared_in_code": "lib/suite.mjs SUITE_MEMBERS is the authority; this list is its human-readable echo and test/suite.test.mjs asserts the two agree. A config edit must not be able to quietly narrow what the digest covers.",
+  "why_only_sections_of_EXPERIMENT-2": "That document is alive — §2.1 through §2.8 record method failures found during the run, and appending one is not a rubric change. Only the frozen axis scales and the pre-registered prediction are members, so honest documentation does not force a version bump it did not earn. Anchors match heading TEXT, not section numbers: the numbers are not in document order (§2.5 precedes §2.4) and a renumber is not a rubric change.",
+  "not_members": {
+    "gate": "lib/gate.mjs is the system UNDER TEST, not part of the ruler. If every Alfred improvement bumped the suite version, no before/after comparison could ever run against a constant suite — the ruler would move with the subject. That is what 752f3b0 did by changing the model and 278 lines of its own price/model tests in one commit, which is why whether those lines were a fix or a re-fit is now unanswerable from the history.",
+    "prices": "config/prices.json carries its own version, and cost is reported alongside a score rather than being part of one. A rate change must not invalidate a quality comparison.",
+    "models": "lib/models.mjs SEATS is the routing policy. A seat change is a MODEL change and belongs to the Section 8 protocol (docs/MODEL-CHANGES.md, task #43), which is a separate axis from suite comparability."
+  },
+  "digest_is_deliberately_over_sensitive": "It covers whole file bytes for whole-file members, so a comment-only edit to score.mjs bumps it even though no verdict changed. That bias is intended, and it is this project's standing asymmetry applied to comparability: a false bump costs one line in this file, a missed bump silently rebases the history and makes a trend line lie. Do not narrow this to hashing only executable code.",
+  "how_to_bump": "Run `node -e \"import('./lib/suite.mjs').then(m => console.log(m.computeSuiteDigest()))\"`, paste the result into `digest`, and increment `version`. test/suite.test.mjs fails until the two agree, so the bump cannot be forgotten — but it also cannot tell you WHETHER the change was legitimate. That question is the additive-only policy's, in docs/SANDBOX.md."
+}

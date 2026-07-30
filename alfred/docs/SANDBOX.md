@@ -465,3 +465,75 @@ worth nothing to a loop.
   half. Report both, and don't let a small-repo cost ratio stand in for the
   measured 4.6x.
 - It is n=1 per shape, still. Three shapes ≠ a distribution.
+
+---
+
+## 9. Maintaining the suite — how a fixture is allowed to change
+
+### Additive-only: fixtures grow, they do not get edited
+
+A fixture is half of what a score means. The other half is the rubric, and the two
+are versioned together as one unit in `config/suite.json` — see `lib/suite.mjs` for
+the members and the digest that keeps the declared `suite_version` honest. Every
+rule below follows from one fact: **a result is only comparable to another result
+carrying the same `suite_version`.** Editing a scored fixture in place does not
+change one number, it silently rebases every number ever taken against it, and a
+trend line drawn across that edit lies without any single reading being false.
+
+So the default is **add, never mutate**:
+
+- **A gap in coverage → a new case, or a new slug.** `sandbox-b` was authored
+  rather than folded into `sandbox-a` for exactly this reason (§7, "Why sandbox-b
+  had to come *after* M4"), and it shares `sandbox-a`'s tree by reference so the
+  *repo* stays a constant while the ticket varies.
+- **Any change to a member — including a new case inside an existing manifest —
+  bumps `suite_version` and its digest.** `test/suite.test.mjs` fails until the
+  declared digest matches the members on disk, so the bump cannot be forgotten. It
+  cannot tell you whether the change was *legitimate*; that judgement is this
+  section's.
+
+**When a fixture is not merely incomplete but WRONG.** This is the case the rule
+has to answer, because it is the case where quietly editing feels obviously
+correct. A trap's ground truth is mis-measured; an expected sha is stale; an AC is
+declared unsatisfiable and is in fact satisfiable. Fixing it in place is the worst
+available option: the fixture then asserts something *true*, and every prior result
+scored against the false version is still sitting in the history looking
+comparable. Instead:
+
+1. **Record the error inside the wrong fixture**, naming what is wrong and when it
+   was found. It stays on disk. Preserve-and-mark over delete.
+2. **Mark it superseded**, pointing at its replacement.
+3. **Add the corrected fixture under a new slug**, and bump `suite_version`.
+4. Results stamped with the old version stay readable as *"scored against a
+   fixture later found wrong"* — which is a fact worth keeping — rather than
+   becoming unexplainable disagreements with results scored after a silent fix.
+
+Deleting the wrong fixture is not a cheaper version of this. It destroys the only
+record of what the old numbers meant, and leaves a stamp in the history pointing at
+nothing.
+
+Note what does **not** count as wrong: `sandbox-b`'s three declared gate holes
+(§7). A fixture recording that `lib/gate.mjs` passes input it should fail is the
+fixture working. It is the *gate* that is wrong, and this document's standing rule
+— **tune the fixture, never the gate** — governs which side of that line may move
+in response. The two rules are not in tension: that one says a fixture, not the
+system under test, is what you are allowed to adjust when a comparison misbehaves;
+this one says *how* you adjust it — by adding, under a new version, rather than by
+mutating something already scored.
+
+**Saturation, and why demotion is the answer rather than deletion.** A case that
+every arm passes carries no information about the arms; it is paying for itself in
+runtime and giving back nothing discriminating. The temptation is to delete it. The
+right move is to **demote it to a cheap regression floor** — kept, still run, no
+longer treated as evidence about which arm is better — because "everyone passes
+this now" is a claim that stops being true the moment something regresses, and a
+deleted case cannot notice.
+
+`sandbox-a` is already exactly this, and it should read as the intended pattern
+rather than an accident of history. It cannot discriminate for arm C: M4's gate
+tests and `sandbox-a`'s trap manifest landed in the same commit (`e86cd48`), two of
+the thirteen frozen gate names *are* its traps 5 and 6 verbatim, so the gate
+catches those traps because it was written against them. That makes `sandbox-a`
+worthless as a test of the gate and valuable as a floor under it — the fixture that
+fails loudly if a later change breaks what already worked. Demoted, not deleted,
+and kept out of any before/after quality claim.

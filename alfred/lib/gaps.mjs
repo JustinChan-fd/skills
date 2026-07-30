@@ -22,6 +22,12 @@ export const GAP_CODES = Object.freeze({
   'model-id-disagreement': 'sources reported different model ids for one call',
   'model-id-absent': 'no source reported a model id',
   'direct-api-calls-untracked': 'work bypassed Claude Code and emits no telemetry',
+  // Added for #42. Same family as the rest: the numbers in this record may be fine,
+  // but what they can be COMPARED TO is not known. A record whose stamp names a
+  // rubric+fixture digest the repo cannot reproduce is the trend line lying without
+  // any single reading being false. Aggregatable so "how often do we produce
+  // uncomparable results" is a query rather than a grep.
+  'suite-stamp-invalid': 'the suite stamp is missing, malformed, or disagrees with the suite on disk',
 });
 
 export function newGaps() {

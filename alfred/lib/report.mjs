@@ -53,6 +53,7 @@ import { basename, dirname, join } from 'node:path';
 import { collectFromText } from './tokens.mjs';
 import { priceTokens } from './prices.mjs';
 import { newGaps, noteGap, usageRefusal } from './gaps.mjs';
+import { stampProblems } from './suite.mjs';
 
 const DIRECTIONS = ['input', 'output', 'cache_read', 'cache_creation'];
 
@@ -156,7 +157,7 @@ function readSubagents(subagentsDir) {
 // The shape returned when the transcript itself could not be read. Built as a whole
 // record so a consumer never has to branch on which fields exist — `ok: false` tells
 // it not to trust the numbers, and every field it might read is present.
-function failed({ session, work, sink, error }) {
+function failed({ session, work, sink, error, suite }) {
   return {
     ok: false,
     error,
@@ -178,6 +179,10 @@ function failed({ session, work, sink, error }) {
     },
     gate: { pass: null, findings: [], unverified: [] },
     delivery: { commits: [], pushed_to: null, pr_url: null },
+    // Carried on the failure path too. A run whose transcript could not be read was
+    // still scored against a suite, and a `suite` key that exists on one path and not
+    // the other is the one field a reader would have to guard.
+    suite: suite ?? null,
     sink: sink ?? null,
   };
 }
@@ -206,6 +211,7 @@ export function buildRecord({
   work = null,
   gate = null,
   delivery = null,
+  suite = null,
   sink = null,
 } = {}) {
   let text;
@@ -218,6 +224,7 @@ export function buildRecord({
       session,
       work,
       sink,
+      suite,
       error: `could not read transcript ${transcriptPath}: ${err?.code ?? err?.message ?? 'unknown'}`,
     });
   }
@@ -228,6 +235,7 @@ export function buildRecord({
       session,
       work,
       sink,
+      suite,
       error: collected.error?.detail ?? 'transcript could not be parsed',
     });
   }
@@ -242,6 +250,20 @@ export function buildRecord({
 
   if (nullish(session?.id)) {
     noteGap(gaps, 'session-id-absent', 'no session id was supplied to join this record on');
+  }
+
+  // THE SUITE STAMP, wired. `lib/suite.mjs` held the checker and nothing called it,
+  // which is the unwired-tripwire shape this module's header names.
+  //
+  // Only a SUPPLIED stamp is checked. `suite: null` means the run was not scored
+  // against a rubric — a hand-run session reported by the Stop hook — and that is not
+  // a hole, by the same rule an absent subagents directory is not one: if every
+  // unscored run carried a permanent gap, the list would stop distinguishing anything.
+  // A stamp that IS present and cannot be reproduced is the opposite case and is named.
+  if (suite !== null && suite !== undefined) {
+    for (const problem of stampProblems({ suite })) {
+      noteGap(gaps, 'suite-stamp-invalid', problem);
+    }
   }
 
   const { subagents, unreadable } = readSubagents(subagentsDir);
@@ -312,6 +334,10 @@ export function buildRecord({
       pushed_to: delivery?.pushed_to ?? null,
       pr_url: delivery?.pr_url ?? null,
     },
+    // Carried VERBATIM, including when it is the thing that is wrong. Dropping or
+    // repairing a bad stamp would destroy the only evidence of what the run claimed,
+    // which is what makes a bad stamp diagnosable at all. The gap says not to trust it.
+    suite: suite ?? null,
     // Carried as data. This module never resolves it and never writes to it.
     sink: sink ?? null,
   };

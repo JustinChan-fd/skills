@@ -56,6 +56,12 @@ import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 
 import { buildRecord, recordFromHookPayload } from '../lib/report.mjs';
+import { suiteStamp, loadSuiteConfig, computeSuiteDigest } from '../lib/suite.mjs';
+
+// A stamp's `at` is the record's own timestamp, never `now()` — the rule `priceTokens`
+// follows, for the same reason: a function that reads the wall clock re-prices the same
+// historical record differently tomorrow.
+const AT = '2026-07-30T18:00:00.000Z';
 
 const fixture = (name) => fileURLToPath(new URL(`./fixtures/${name}`, import.meta.url));
 
@@ -541,4 +547,89 @@ test('ADDED: unparseable lines are counted in tokens.skipped, not silently dropp
   // The valid line before it still counts — a half-written tail must not void the run.
   assert.equal(record.tokens.by_model['claude-sonnet-5'].input, 10);
   rmSync(dir, { recursive: true, force: true });
+});
+
+// --- the suite stamp, wired -------------------------------------------------
+
+test('ADDED: a record carries the suite stamp it was given, and null when it was given none', () => {
+  // #42. The scorecard scored result-tagging FAIL: no result in the repo carries a
+  // suite version, a model id, or a run date, and arm A's $0.617 was measured on
+  // sonnet-4-6 while the seats moved to sonnet-5 the same day. The checker existed in
+  // lib/suite.mjs and nothing called it — an unwired tripwire, which is the exact
+  // green-and-blind shape report.mjs's own header warns about.
+  const stamped = buildRecord({
+    transcriptPath: ARM0,
+    subagentsDir: null,
+    session: { id: 'sess-stamped' },
+    suite: suiteStamp({ model: 'claude-sonnet-5', config_sha: 'abc1234', at: AT }),
+  });
+  assert.equal(stamped.suite.suite_version, loadSuiteConfig().version);
+  assert.equal(stamped.suite.suite_digest, computeSuiteDigest());
+  assert.equal(stamped.suite.model, 'claude-sonnet-5');
+  assert.equal(stamped.suite.at, AT);
+
+  // A hand-run session scored against no rubric gets `suite: null`, and that is NOT a
+  // gap. Same rule as an absent subagents dir: if every unscored run carried a
+  // permanent hole, the gaps list would stop distinguishing anything.
+  const unscored = buildRecord({
+    transcriptPath: ARM0,
+    subagentsDir: null,
+    session: { id: 'sess-hand-run' },
+  });
+  assert.equal(unscored.suite, null);
+  assert.deepEqual(unscored.gaps, []);
+});
+
+test('ADDED: a stamp that disagrees with the suite on disk is a named gap, not a silent pass', () => {
+  // The half that makes the stamp worth having. A record claiming a digest the repo
+  // cannot reproduce was scored against a different rubric+fixture pair than the one
+  // present, and comparing it to a current result is the trend line lying.
+  const record = buildRecord({
+    transcriptPath: ARM0,
+    subagentsDir: null,
+    session: { id: 'sess-stale-stamp' },
+    suite: { ...suiteStamp({ model: 'claude-sonnet-5', at: AT, config_sha: null }), suite_digest: 'f'.repeat(64) },
+  });
+  const gap = record.gaps.find((g) => g.code === 'suite-stamp-invalid');
+  assert.ok(gap, `expected a suite-stamp-invalid gap, got ${JSON.stringify(record.gaps)}`);
+  assert.match(gap.detail, /digest/i);
+  // The stamp is still carried verbatim. Dropping it would destroy the only evidence
+  // of what the run claimed, which is what makes a bad stamp diagnosable at all.
+  assert.equal(record.suite.suite_digest, 'f'.repeat(64));
+  // A gap does not condemn the record: the tokens were still measured.
+  assert.equal(record.ok, true);
+});
+
+test('ADDED: a malformed suite stamp is a gap rather than a thrown report', () => {
+  // Pure-sidecar: a stamp problem must not fail the run being reported on. A stamp
+  // missing its model is the case that matters, because a defaulted model id is
+  // precisely what arm A's untagged $0.617 would have produced.
+  for (const bad of [{}, { suite_version: '2026-07-30.1' }, 'nope', 7, []]) {
+    const record = buildRecord({
+      transcriptPath: ARM0,
+      subagentsDir: null,
+      session: { id: 'sess-bad-stamp' },
+      suite: bad,
+    });
+    assert.equal(record.ok, true, `a bad stamp must not void the record: ${JSON.stringify(bad)}`);
+    assert.ok(
+      record.gaps.some((g) => g.code === 'suite-stamp-invalid'),
+      `no gap for ${JSON.stringify(bad)}`,
+    );
+  }
+});
+
+test('ADDED: the failure path carries the stamp too — an unreadable transcript is still a tagged run', () => {
+  // The failure record is built as a whole record so a consumer never branches on
+  // which fields exist. A `suite` key missing there would be the one field a reader
+  // has to guard, and the run it describes was still scored against a suite.
+  const record = buildRecord({
+    transcriptPath: join(tmpdir(), 'alfred-no-such-transcript-stamp-' + process.pid + '.jsonl'),
+    subagentsDir: null,
+    session: { id: 'sess-broken-stamped' },
+    suite: suiteStamp({ model: 'claude-sonnet-5', at: AT, config_sha: null }),
+  });
+  assert.equal(record.ok, false);
+  assert.equal(record.suite.model, 'claude-sonnet-5');
+  assert.equal(record.cost.total_usd, null);
 });

@@ -223,12 +223,13 @@ subagents [ { agent_id, agentType, description, toolUseId, spawnDepth,
 cost      { by_model: {<id>: usd}, total_usd, price_table_version }
 gate      { pass, findings[], unverified[] }
 delivery  { commits[], pushed_to, pr_url|null }
+suite     { suite_version, suite_digest, model, config_sha, at } | null
 ```
 
 `by_phase` is **absent by design.** There are no phases. If a dashboard panel
 needs phases, the honest answer is one bar.
 
-### AS BUILT — five deviations from the sketch above (M2, 2026-07-30)
+### AS BUILT — six deviations from the sketch above (M2, 2026-07-30)
 
 The sketch was written before M0 and M1 existed, so it names shapes those modules
 turned out not to have. The deviations are recorded here rather than silently
@@ -256,6 +257,16 @@ vocabulary — the defect §8 warns about.
    every test green, because each test either injects a sink or ignores the
    field, so the default was never evaluated. The frozen test now asserts the
    uninjected case too.
+6. **`suite` is a top-level field, defaulting to `null`** (added by #42). Carries
+   `{suite_version, suite_digest, model, config_sha, at}` — what a score MEANS, so a
+   result can be compared to another result and to nothing else. `null` is the
+   correct value for a hand-run session that was scored against no rubric, and it
+   records **no gap**: if every unscored run carried a permanent hole, `gaps[]` would
+   stop distinguishing anything (the same rule as an absent subagents directory). A
+   stamp that IS present and disagrees with the suite on disk is a
+   `suite-stamp-invalid` gap — the eighth gap code — and the bad stamp is still
+   carried verbatim, because repairing it would destroy the only evidence of what the
+   run claimed. Present on the failure path too, so a reader never guards the field.
 
 `tokens.lines` is the record's name for the collector's `lines_parsed`, and
 `tokens.skipped` (non-empty lines minus parsed lines) is derived in `report.mjs`

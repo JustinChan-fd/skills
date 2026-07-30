@@ -187,6 +187,14 @@ gap is not a result, and I should say so rather than break the tie in my own fav
 **Variance cannot be retrofitted onto a run already taken.** Anything in this section
 must be settled *before* the run it applies to, or it is settled never.
 
+*Where the artifacts are, as of 2026-07-30 (#42).* The last two items now have
+something to score rather than nothing: the suite version and its digest live in
+`config/suite.json` + `lib/suite.mjs`, results carry a `suite` stamp on the record
+(`lib/report.mjs`, deviation 6 in `PLAN.md` §2.5), and the additive-only policy is
+`docs/SANDBOX.md` §9. Re-score them from those files; **do not read this pointer as a
+PASS.** The first four items — the noise floor, n>1, sample size, pairing — are
+untouched by that work and remain the section's real weakness.
+
 ## Section 5 — Agent/trajectory specifics
 
 - [ ] **End-state assertions on the environment** — branch created, tests pass, PR opened
