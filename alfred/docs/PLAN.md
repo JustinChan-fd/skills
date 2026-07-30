@@ -738,6 +738,63 @@ Notes:
 - `never_merge: true` is the standing rule made mechanical.
 - `models.agents` has **no opus entry by default.** Escalation is explicit.
 
+### AS BUILT — M3, 2026-07-30
+
+`lib/config.mjs`, 26 tests. The ten frozen names above are implemented verbatim; 16
+carry an `ADDED:` prefix and name their measurement. Four deviations from the schema
+sketch, recorded rather than absorbed:
+
+1. **Validation is recursive, not depth-1.** The sketch implies a flat key check. A
+   depth-1 walk accepts `delivery.never_merged` — it sees `delivery` as a known key and
+   never looks inside — so a typo on the standing never-merge rule reads as applied
+   while merging is permitted. `off_limit` for `off_limits` is the same shape one level
+   up. An unknown key is an error at every depth, and the error names its full path.
+2. **`never_merge: false` is refused, not honoured.** The sketch calls it "the standing
+   rule made mechanical," which only holds if `false` is invalid. Accepting it would
+   make a standing constraint a per-repo preference one commit can flip.
+3. **`loadConfig` does not walk upward.** Deliberate, and the reason is arm C: a loader
+   that searched parent directories would find *this* repo's config when run against a
+   sandbox that has none, and grade the sandbox against skills' verify commands. It
+   reads only the root it is given.
+4. **`poll_interval_minutes: 0` is refused, not coerced to 30.** Coercion produces a
+   config that reads as applied and is not, and the operator who typed 0 never learns.
+   The default applies only when the value is absent, and only after validation.
+
+The value of this module is that it is not an LLM: §4's claim is that config "replaces
+what a phase used to re-derive every run, at zero tokens." Nothing in it runs a
+command — `verify` values are carried as strings for the gate — because a loader that
+shelled out would give a malformed config arbitrary execution at the top of an
+unattended tick.
+
+**Mutation testing found three real holes**, none of which review would have caught,
+because in every case the guard was already present and correct:
+
+- **`resolveBase`'s `epic &&` and `isOffLimits`'s `..` check are unreachable through
+  the validated path.** Inverting either left the whole suite green. Not because the
+  guards are untested-but-fine: through `loadConfig`, validation *already* refuses the
+  input that would make them fire, so nothing observable distinguishes a working guard
+  from a deleted one. This is the unfalsifiable-conjunct shape from §10, met twice
+  concretely. The resolution is neither to delete them (both functions are exported
+  independently, so the unvalidated surface is real) nor to leave them uncovered: they
+  are now tested against hand-built configs the loader would reject, with the loader's
+  own refusal asserted alongside, so both layers are proven rather than one assumed.
+- **Six semantic guards had no coverage at all** — empty `base.rules`, rule shape,
+  empty default branch, non-string verify command, empty off_limits glob, non-object
+  JSON. Now one table test covers all six; each was re-verified to kill exactly one.
+- **The `repoRoot` type guard was untested, and removing it makes `loadConfig` throw.**
+  Every test passed a real temp dir, so the bypass read as green — but the module's
+  contract is that it never throws, precisely because an exception at the top of an
+  unattended tick kills the tick with no record of why. `join(undefined, …)` raises a
+  TypeError. A caller reading a root from a payload field is how undefined arrives.
+
+Two smaller mutation findings: an explicit `null` on an optional block must be treated
+as absent rather than type-refused (a templating step emits null for an unset value),
+while a `null` on a required field must still be refused; and `loop.blocked_label`'s
+default was a string literal duplicating `blocked.mjs`'s `BLOCKED_LABEL` with nothing
+asserting they agree — the two-literal drift that has the loop labelling an item with
+one name and skipping on another, with neither side looking wrong alone. The test now
+binds them by importing the constant, and both drift directions were verified to fail.
+
 ---
 
 ## 5. The gate checklist, in detail
