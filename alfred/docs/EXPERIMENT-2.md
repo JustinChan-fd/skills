@@ -126,6 +126,42 @@ Not mechanical, and not pretending to be:
 - No fabricated claims — every "X passes" in the arm's own output joins to a
   recorded exit code *(judgment on the arm's report, against the sheet above)*
 
+### 2.3 The stall signal was wrong, and nearly decided the experiment
+
+Recorded live, at minute ~6 of arm B's run.
+
+The watchdog's stall detector used **transcript byte growth**. Arm B sat for 5+
+minutes at 0.0% CPU with a flat transcript, no child processes, and zero bytes on
+both stdout and stderr. Every signal I had said "hung."
+
+It was not hung. `harness-loop-core` invariant 4 dispatches each phase as a
+subagent with `run_in_background: false`, and **a subagent's entries do not land in
+the transcript until it returns.** Established TCP sockets and a climbing
+`ps -o time=` counter (2.76s → 2.86s over 20 wall seconds) showed a process waiting
+on an API response mid-phase.
+
+Had I not checked, the 15-minute stall window would have SIGTERMed a healthy arm B
+and handed arm A the experiment on a measurement artifact — and the results doc
+would have recorded "arm B stalled" as a property of the four-phase topology. It is
+the same failure shape as the `in`/`out` pricing bug found an hour earlier and the
+import-scanner that could not see a filesystem path: **a guard aimed at the wrong
+shape is green and blind, and its silence is indistinguishable from success.**
+
+Fix: consumed CPU time counts as progress alongside byte growth. A genuinely wedged
+process burns no CPU; one waiting on a network response does. The spend cap and wall
+cap are untouched — this only changes what counts as *silence*.
+
+Note on the restart: replacing the watchdog reset arm B's stall clock, giving it a
+fresh 15 minutes. That is the conservative direction — it cannot cause a false kill,
+only delay a true one, and the $18 spend cap and 90-minute wall cap still bound the
+run.
+
+**This is a finding about measuring topologies, not about either arm.** A
+byte-growth liveness check is wrong for any topology whose work happens inside a
+child that reports only on completion — which includes every phase-orchestrated
+design, and would have included Alfred's own subagent seats had this shipped into
+`lib/`.
+
 ### 2.2 Infrastructure edits do not count as delivered work
 
 Recorded 4 minutes into the run, before either arm produced a diff of substance,
