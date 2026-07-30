@@ -183,6 +183,37 @@ That is evidence for the manifest-as-hypothesis pillar and against the assumptio
 that a single context captures most of what four phases buy. It does not settle Axis
 2: a manifest is not a diff, and at this point arm B had changed zero source files.
 
+### 2.6 A control I violated: my own commits rewrote arm B's provenance stamp
+
+Arm B's two run records disagree about which harness produced them:
+
+| record | `harness_sha` | what that sha actually is |
+|---|---|---|
+| `pipeline` (15:15:43) | `3894455` | *my* commit "record the three controls added at launch time" |
+| `intake` (15:16:58) | `5271905` | *my* commit "pre-register how Axis 1 gets read" |
+
+Neither is a harness-core version. `harnessSha()` runs `git rev-parse --short HEAD`
+against the harness directory — and **`harness-core` is not its own git repository**,
+it is a subdirectory of `skills`. So the field resolves to whatever `skills/HEAD` is
+at the moment the record is written, and I committed documentation four times while
+arm B was running. The stamp moved under it.
+
+**What this does and does not contaminate.** It is not a code change to arm B:
+`git status harness-core/` shows zero tracked modifications, the 543-test suite is
+green, and every commit I made was to `alfred/docs/` and `alfred/lib/`. Arm B ran
+the same bytes throughout. What is contaminated is the *provenance metadata* — the
+records claim a version that does not identify the code that ran, and two phases of
+one run disagree with each other.
+
+Control 3 says "`harness-core` is read-only as code." I honoured the letter and
+missed that a shared repository root makes *any* commit anywhere in `skills` a write
+to harness-core's recorded identity. **The correct control was a clean tree for the
+duration, not a clean subdirectory** — or a `harness_sha` derived from a content
+hash of the harness tree rather than from `HEAD`.
+
+For Alfred: **provenance must not be read from a repository pointer that unrelated work
+can move.** Hash what ran, or record both the pointer and a tree hash.
+
 ### 2.3 The stall signal was wrong, and nearly decided the experiment
 
 Recorded live, at minute ~6 of arm B's run.
