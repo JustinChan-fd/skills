@@ -126,6 +126,36 @@ Not mechanical, and not pretending to be:
 - No fabricated claims — every "X passes" in the arm's own output joins to a
   recorded exit code *(judgment on the arm's report, against the sheet above)*
 
+### 2.5 What the CPU fix cost, and why the kill switch is weaker than it reads
+
+The 2.3 fix was correct and it was not free. Two admissions, recorded while arm B is
+still running rather than after the fact:
+
+**The stall detector is now nearly inert for this topology.** Arm B's consumed CPU
+creeps continuously (3.70s → 4.06s → 4.11s over three polls) because the parent
+process wakes to service the HTTP connection even while doing no work of its own.
+Any change counts as progress, so 15-minutes-of-silence can essentially never fire.
+I traded a detector that produced false positives for one that produces false
+negatives. Given the alternative was killing a healthy arm and recording the
+artifact as a finding, that is the right trade — but "the stall window protects us"
+is no longer true, and the **45/90-minute wall caps are the operative bound.**
+
+**The spend figure is a lower bound, not the spend.** `priceByModel` reads
+transcripts, and a subagent's tokens are not in any transcript until it returns.
+Arm B has read `$0.383` for twelve minutes across an entire intake phase that
+demonstrably did real work — eleven files scanned, six claims audited, four
+corrected. The real figure is higher by whatever the subagent has consumed. So the
+$18 cap cannot fire *during* a long phase, only at the boundary between phases.
+
+A cap that is blind exactly when spend is accumulating fastest is the same
+green-and-blind shape as 2.3 and the `in`/`out` pricing bug: **three instances in one
+session of a guard aimed at a signal that does not carry the thing it claims to
+measure.** Not fixed here, because fixing it means either parsing subagent state
+mid-flight or moving to a wall-clock proxy, and changing the kill rules mid-run
+after seeing one arm's numbers is exactly what pre-registration forbids. Recorded as
+a limitation of this run and a requirement for Alfred's own budget enforcement:
+**per-call accounting at the worker, not post-hoc transcript arithmetic.**
+
 ### 2.4 A per-trap prediction failed, recorded before the arm finished
 
 Arm B's intake manifest was readable at minute ~9, while its implement subagent was
