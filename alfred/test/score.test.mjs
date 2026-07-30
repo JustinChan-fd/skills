@@ -266,6 +266,55 @@ test('an arm that changed one file passes delivered-work', async () => {
   assert.equal(find(await scoreMechanical({ repo }), 'delivered-work').pass, true);
 });
 
+test('an infrastructure-only diff fails delivered-work', async () => {
+  // EXPERIMENT-2.md §2.2 pre-registered this rule BEFORE either arm had a
+  // substantive diff, explicitly because it cuts against arm B: a file a topology
+  // writes to manage ITSELF is not delivered work on the ticket.
+  //
+  // Found live. Arm B's only change twelve minutes in was `.gitignore` — its own
+  // run dirs — and the scorer reported delivered-work PASS on `changed.length > 0`.
+  // The rubric said one thing and the code did another, and the code was what
+  // would have been reported.
+  const repo = await arm();
+  await writeFile(join(repo, '.gitignore'), '.harness/\n');
+  const delivered = find(await scoreMechanical({ repo }), 'delivered-work');
+  assert.equal(delivered.pass, false, '.gitignore alone is infrastructure, not delivery');
+});
+
+test('the raw changed list is reported unmodified even when it is all infrastructure', async () => {
+  // §2.2: "raw changedFiles reported unmodified". The exclusion must be visible as
+  // a judgment applied to the evidence, not as evidence quietly edited — otherwise
+  // the sheet hides what the arm actually touched.
+  const repo = await arm();
+  await writeFile(join(repo, '.gitignore'), '.harness/\n');
+  const delivered = find(await scoreMechanical({ repo }), 'delivered-work');
+  assert.deepEqual(delivered.changedFiles, ['.gitignore']);
+  assert.deepEqual(delivered.infrastructureFiles, ['.gitignore']);
+  assert.deepEqual(delivered.substantiveFiles, []);
+});
+
+test('one real file alongside infrastructure still passes delivered-work', async () => {
+  // The rule must not swing the other way: an arm that writes real code AND
+  // gitignores its run dirs has delivered work. Excluding infrastructure means
+  // ignoring it, not penalizing it.
+  const repo = await arm();
+  await writeFile(join(repo, '.gitignore'), '.harness/\n');
+  await writeFile(join(repo, 'src/retry.js'), '// retry\n');
+  const delivered = find(await scoreMechanical({ repo }), 'delivered-work');
+  assert.equal(delivered.pass, true);
+  assert.deepEqual(delivered.substantiveFiles, ['src/retry.js']);
+});
+
+test('a .harness/ run artifact is infrastructure too, not just .gitignore', async () => {
+  // §2.2 names "any file a topology writes to manage itself", not one filename.
+  // A rule keyed to a single literal would miss the run dirs themselves.
+  const repo = await arm();
+  await run('mkdir', ['-p', join(repo, '.harness/runs/x')], { env: childEnv() });
+  await writeFile(join(repo, '.harness/runs/x/record.json'), '{}\n');
+  const delivered = find(await scoreMechanical({ repo }), 'delivered-work');
+  assert.equal(delivered.pass, false);
+});
+
 test('AC1 reports the loops, not the empty diff, for an untouched repo', async () => {
   // Pins AC1 to one proposition. If it still folded in "delivered nothing", this
   // detail would name the diff instead of the channel files.

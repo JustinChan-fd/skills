@@ -201,14 +201,35 @@ export async function scoreMechanical({ repo } = {}) {
   // conjunct inside AC1: sandbox-a ships inline loops, so AC1 already fails on the
   // scan for an untouched repo, and a conjunct that never decides anything cannot
   // be falsified by a test.
+  // §2.2: files a topology writes to manage ITSELF are infrastructure, not delivery.
+  // Keyed to the shape (`.harness/` anywhere, plus the ignore file) rather than to one
+  // literal name, because the run dirs are the bigger case and a single-filename rule
+  // would miss them.
+  const isInfrastructure = (f) => f === '.gitignore' || f.split('/').includes('.harness');
+  const infrastructure = changed.filter(isInfrastructure);
+  const substantive = changed.filter((f) => !isInfrastructure(f));
+
   checks.push({
     id: 'delivered-work',
-    pass: changed.length > 0,
-    settledBy: 'git diff --name-only against the provisioned commit',
+    // Infrastructure is EXCLUDED, per EXPERIMENT-2.md §2.2 — a rule pre-registered
+    // before either arm had a substantive diff, explicitly because it cuts against
+    // arm B. `changed.length > 0` reported PASS for an arm whose only edit was
+    // gitignoring its own run dirs: managing yourself is not delivering the ticket.
+    pass: substantive.length > 0,
+    settledBy: 'git diff --name-only against the provisioned commit, infrastructure excluded (§2.2)',
+    // Raw list unmodified, per §2.2. The exclusion is a judgment applied ON TOP of
+    // the evidence, never evidence quietly edited — a sheet that hid what the arm
+    // touched would be worse than one that miscounted it.
     changedFiles: changed,
-    detail: changed.length
-      ? `${changed.length} file(s) changed`
-      : 'nothing changed — the arm delivered no work',
+    substantiveFiles: substantive,
+    infrastructureFiles: infrastructure,
+    detail: substantive.length
+      ? `${substantive.length} substantive file(s) changed` +
+        (infrastructure.length ? `, ${infrastructure.length} infrastructure ignored` : '')
+      : changed.length
+        ? `${changed.length} file(s) changed, all infrastructure (${infrastructure.join(', ')}) — ` +
+          'no work delivered on the ticket'
+        : 'nothing changed — the arm delivered no work',
   });
 
   // --- AC1: consolidation ---
