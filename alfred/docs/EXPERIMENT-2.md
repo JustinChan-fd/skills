@@ -126,6 +126,33 @@ Not mechanical, and not pretending to be:
 - No fabricated claims — every "X passes" in the arm's own output joins to a
   recorded exit code *(judgment on the arm's report, against the sheet above)*
 
+### 2.4 A per-trap prediction failed, recorded before the arm finished
+
+Arm B's intake manifest was readable at minute ~9, while its implement subagent was
+still running. Scored and frozen then, per §2.1 rule 4's logic applied within an arm:
+an intake score revised after seeing what implement built with it is not a score.
+
+**§3 predicted arm B misses trap 2 — "no phase's job is to audit the ticket's
+arithmetic." That is wrong, and it was wrong when written.** Intake emits a
+`claims_audit` array; auditing the ticket's factual claims is literally a named
+section of the artifact. The manifest corrected FOUR of the ticket's six claims,
+including the file count: *"find src/ returns 8 files... The count of 12 matches all
+.js files across the whole project (8 src + 3 test + 1 tools/lint.mjs), not just
+src/."* It did not merely flag the number as wrong — it reconstructed how the author
+got it.
+
+The prediction came from a thesis about phase orchestration rather than from reading
+what intake does. Recorded because §2.1 rule 5 requires it and because it is the
+informative half: **§3's hoped-for finding — "if both arms miss traps 2 and 5
+identically... ticket-skepticism is absent from both shapes" — is dead.** Arm A
+missed trap 2, arm B caught it as a structured artifact field. Ticket-skepticism is
+not absent from both shapes; it is present in exactly the shape that has a phase
+dedicated to it.
+
+That is evidence for the manifest-as-hypothesis pillar and against the assumption
+that a single context captures most of what four phases buy. It does not settle Axis
+2: a manifest is not a diff, and at this point arm B had changed zero source files.
+
 ### 2.3 The stall signal was wrong, and nearly decided the experiment
 
 Recorded live, at minute ~6 of arm B's run.
