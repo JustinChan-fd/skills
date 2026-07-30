@@ -336,6 +336,60 @@ test('return value contains no raw transcript text anywhere in its object graph'
 
 *The parser reads no content.* This is why fixtures can be committed at all.
 
+#### M1 as built (2026-07-30) — two decisions the frozen names did not reach
+
+The 20 names above were all implemented without amendment, and the §8.2 mitigation
+passed: on the arm 0 real transcript and all three committed fixtures, Alfred's
+`by_model`, `peak_context`, `active_ms`, and `lines_parsed` match upstream
+`collectFromFile` EXACTLY. Arm 0's anchors are unmoved — 2,207,405 tokens, $1.118285.
+
+Two questions the frozen names leave open, decided here and covered by `ADDED:` tests:
+
+1. **Which row survives a dedupe.** *"Two lines sharing one message.id count that API
+   call once"* does not say whose numbers to keep, and every group in
+   `split-blocks.jsonl` carries identical rows, so that fixture cannot tell first-wins
+   from max-wins. Real duplicates are **not** always identical: id `…7re4umvq` has two
+   rows with `{input 2, cache_creation 5502}` and, ~350 lines later, two more with
+   every top-level count zeroed. Across 17,330 multi-row groups, 2 disagree per
+   direction — and in **0** of them is the first row not the max, so first-wins is
+   right today purely by the order the producer happened to use. **Decided: max per
+   direction per (model, id).** Order-independent, and a zeroed duplicate is a
+   truncated record of one call rather than a second call that cost nothing. The key
+   includes the model because a bare-id key drops a second model's call sharing that
+   id — an undercount that looks exactly like a model not having been used.
+
+2. **Where cache-write tokens are read from.** `split-blocks.jsonl` was privacy-reduced
+   upstream in a way that stripped the nested `cache_creation` block, while **all
+   53,950** real usage rows carry one. Ten real rows report flat `0` with a nonzero
+   nested 5m bucket, in 3 groups where *every* row has flat 0, so no sibling row can
+   supply the number; the largest is 241,475 tokens (~$0.90 at sonnet-5 rates)
+   reported as free. **Decided: flat first, nested only as a fallback** — never both,
+   because flat is the total across TTL buckets (measured: 25204 flat alongside
+   `{5m: 0, 1h: 25204}`) and summing them double-bills. Safe because a nonzero flat
+   agreed with `5m + 1h` on all 53,950 rows.
+
+   This is the one place Alfred deliberately **disagrees** with upstream, and the
+   difference is recorded rather than reconciled: on those three transcripts Alfred
+   reports +1,041, +121, and +241,475 cache-creation tokens. Alfred's figure is the
+   correct one.
+
+**Falsified, not merely green.** All 29 tests passed on the first implementation pass,
+which is the signature of a suite that cannot fail, so 14 mutants were run. Each killed
+a *different* named subset — per-line summing (4 tests), first-wins (1), flat-only
+read (2), flat-plus-nested (1), id-less rows keyed as one (6), peak gated on the window
+(1), peak as a running sum (4), unseeded `Math.max` (3), no gap cap (2), stamps deduped
+with tokens (3), throw-on-malformed (3), iterations ignored (3), NaN uncoerced (2),
+model dropped from the key (1). No mutation failed everything, so the propositions are
+genuinely separate rather than one assertion wearing several names.
+
+*Process note, recorded because it nearly cost more than it did:* the mutation harness
+wrote a literal NUL byte into `lib/tokens.mjs` (an unquoted heredoc expanded
+`` `${model}\0${id}` ``). macOS `grep` silently reports **no matches** in a file
+containing a NUL, so several greps returned empty and were read as "pattern absent"
+when they meant "grep refused to look." One mutant appeared to kill nothing for the
+same reason. The delimiter is now written as the escape sequence `\u0000` rather than a raw byte, and a check for NUL
+bytes across `alfred/` is part of this milestone's verification.
+
 ### M2 — report
 
 ```
