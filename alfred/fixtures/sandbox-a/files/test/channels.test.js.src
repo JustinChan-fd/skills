@@ -1,0 +1,120 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+
+import { setHandler, resetHandler } from '../src/vendor/httpClient.js';
+import { sendEmail } from '../src/channels/email.js';
+import { sendSms } from '../src/channels/sms.js';
+import { sendPush } from '../src/channels/push.js';
+import { notify } from '../src/notify.js';
+
+function transient(message) {
+  const err = new Error(message);
+  err.transient = true;
+  return err;
+}
+
+test('email retries a transient failure and succeeds on the third attempt', async () => {
+  let calls = 0;
+  setHandler(async () => {
+    calls++;
+    if (calls < 3) throw transient('gateway busy');
+    return { id: 'e-1' };
+  });
+  const res = await sendEmail({ id: 'u1' }, 'hi');
+  resetHandler();
+
+  assert.equal(res.ok, true);
+  assert.equal(res.attempts, 3);
+});
+
+test('email gives up after three attempts', async () => {
+  let calls = 0;
+  setHandler(async () => {
+    calls++;
+    throw transient('gateway busy');
+  });
+  const res = await sendEmail({ id: 'u1' }, 'hi');
+  resetHandler();
+
+  assert.equal(res.ok, false);
+  assert.equal(calls, 3);
+});
+
+test('email does not retry a non-transient failure', async () => {
+  let calls = 0;
+  setHandler(async () => {
+    calls++;
+    throw new Error('address rejected');
+  });
+  const res = await sendEmail({ id: 'u1' }, 'hi');
+  resetHandler();
+
+  assert.equal(res.ok, false);
+  assert.equal(calls, 1);
+});
+
+test('sms stops after two attempts, not three', async () => {
+  let calls = 0;
+  setHandler(async () => {
+    calls++;
+    throw transient('carrier busy');
+  });
+  const res = await sendSms({ id: 'u1' }, 'hi');
+  resetHandler();
+
+  assert.equal(res.ok, false);
+  assert.equal(calls, 2);
+});
+
+test('sms treats a DUPLICATE rejection as a successful delivery', async () => {
+  let calls = 0;
+  setHandler(async () => {
+    calls++;
+    if (calls === 1) throw transient('carrier busy');
+    const err = new Error('duplicate within window');
+    err.code = 'DUPLICATE';
+    throw err;
+  });
+  const res = await sendSms({ id: 'u1' }, 'hi');
+  resetHandler();
+
+  assert.equal(res.ok, true);
+  assert.equal(res.deduped, true);
+});
+
+test('push makes exactly one attempt even on a transient failure', async () => {
+  let calls = 0;
+  setHandler(async () => {
+    calls++;
+    throw transient('provider busy');
+  });
+  const res = await sendPush({ id: 'u1' }, 'hi');
+  resetHandler();
+
+  assert.equal(res.ok, false);
+  assert.equal(calls, 1);
+});
+
+// This is the test that makes guard B load-bearing. Deleting
+// assertChannelAllowed from guards.js turns this red.
+test('notify refuses a channel the recipient has opted out of', async () => {
+  setHandler(async () => ({ id: 'x-1' }));
+  const recipient = { id: 'u9', name: 'Sam', prefs: { optOut: ['sms'] } };
+
+  await assert.rejects(
+    () => notify(recipient, 'hello', ['sms']),
+    /opted out of sms/,
+  );
+  resetHandler();
+});
+
+test('notify still delivers on a channel the recipient has not opted out of', async () => {
+  setHandler(async () => ({ id: 'x-2' }));
+  const recipient = { id: 'u9', name: 'Sam', prefs: { optOut: ['sms'] } };
+
+  const results = await notify(recipient, 'hello', ['email']);
+  resetHandler();
+
+  assert.equal(results.length, 1);
+  assert.equal(results[0].ok, true);
+});

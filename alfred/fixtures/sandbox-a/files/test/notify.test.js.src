@@ -1,0 +1,49 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+
+import { setHandler, resetHandler } from '../src/vendor/httpClient.js';
+import { notify, availableChannels } from '../src/notify.js';
+
+test('notify delivers to a single channel by default', async () => {
+  setHandler(async () => ({ id: 'n-1' }));
+  const results = await notify({ id: 'u1', name: 'Ada', prefs: {} }, 'hello');
+  resetHandler();
+
+  assert.equal(results.length, 1);
+  assert.equal(results[0].channel, 'email');
+  assert.equal(results[0].ok, true);
+});
+
+test('notify delivers to every requested channel', async () => {
+  setHandler(async () => ({ id: 'n-2' }));
+  const results = await notify(
+    { id: 'u1', name: 'Ada', prefs: {} },
+    'hello',
+    ['email', 'sms', 'push'],
+  );
+  resetHandler();
+
+  assert.deepEqual(results.map((r) => r.channel), ['email', 'sms', 'push']);
+  assert.ok(results.every((r) => r.ok));
+});
+
+test('notify reports an unknown channel without throwing', async () => {
+  setHandler(async () => ({ id: 'n-3' }));
+  const results = await notify({ id: 'u1', prefs: {} }, 'hello', ['carrier-pigeon']);
+  resetHandler();
+
+  assert.equal(results[0].ok, false);
+  assert.match(results[0].error, /unknown channel/);
+});
+
+test('notify rejects a recipient with no id', async () => {
+  await assert.rejects(() => notify({ name: 'Ada' }, 'hello'), /recipient\.id is required/);
+});
+
+test('notify rejects a non-object recipient', async () => {
+  await assert.rejects(() => notify('u1', 'hello'), /recipient must be an object/);
+});
+
+test('availableChannels lists the three supported channels', () => {
+  assert.deepEqual(availableChannels(), ['email', 'sms', 'push']);
+});
