@@ -138,7 +138,7 @@ export const MEASUREMENTS = Object.freeze([
     model: 'claude-sonnet-4-6',
     seat: 'worker',
     at: '2026-07-30',
-    source: 'docs/exp2-armA-score.md; docs/EXPERIMENT-2-RESULTS.md',
+    source: 'docs/exp2-evidence/armA-score.md; docs/EXPERIMENT-2-RESULTS.md',
     // The model is inferred from the run window, not from the record: arm A and B both
     // started before `752f3b0` landed at 10:39 PDT (arm B's pipeline record stamps
     // 15:15:43Z = 08:15 PDT), and this shell still exported

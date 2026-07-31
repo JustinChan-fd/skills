@@ -33,6 +33,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { existsSync } from 'node:fs';
 
 import {
   PROTOCOL_STEPS,
@@ -90,6 +91,65 @@ test('every measurement names a seat that exists in SEATS', () => {
       Object.hasOwn(SEATS, m.seat),
       `measurement '${m.id}' names seat '${m.seat}', which is not in SEATS. Either the ` +
         'seat was renamed (update the ledger) or the measurement is unanchored.',
+    );
+  }
+});
+
+// --- 1b. the ledger's citations resolve ---
+//
+// #49. `source` is the field that makes a ledger entry checkable by a human: it is where
+// you go to see whether the claim says what the ledger says it says. Nothing verified the
+// paths existed, so a citation could point at a file that had been moved, renamed or
+// deleted and still READ as evidence. That is #48's phantom-mechanism shape one level
+// down — the defect is not a wrong number, it is a reference that looks like support and
+// leads nowhere.
+//
+// This was not hypothetical. `arm-a-baseline-cost` cited `docs/exp2-armA-score.md`, which
+// was a byte-identical stray copy of `docs/exp2-evidence/armA-score.md` (md5 b68cab74…,
+// added first at `a940b86`, copied into the evidence dir at `c6bc1c5`). De-duplicating to
+// the canonical evidence dir deletes the cited path, and before this test nothing would
+// have noticed the ledger now pointing at nothing.
+//
+// WHAT IT DOES NOT CHECK: that the file says what the claim says. No test can hold that —
+// the same limit as `MEASUREMENTS` itself, which records that a number was measured, not
+// that it was measured correctly. This holds the weaker, mechanical property: the reader
+// following a citation lands on a file that exists.
+test('every source a measurement cites resolves to a file on disk', () => {
+  assert.ok(MEASUREMENTS.length > 0, 'the ledger is empty — nothing to resolve');
+
+  // Citations carry human locators — `docs/PLAN.md §9`, `…RESULTS.md:223-236` — which are
+  // part of the value to a reader and not part of the path. Strip only those two forms;
+  // anything else left in the string is meant to be a path and gets checked as one.
+  const toPath = (raw) => raw.trim().replace(/\s+§.*$/, '').replace(/:\d+(-\d+)?$/, '');
+
+  for (const m of MEASUREMENTS) {
+    assert.ok(
+      typeof m.source === 'string' && m.source.trim() !== '',
+      `measurement '${m.id}' cites no source, so its claim cannot be checked by hand`,
+    );
+
+    let checked = 0;
+    for (const raw of m.source.split(';')) {
+      const rel = toPath(raw);
+      if (rel === '') continue;
+      checked += 1;
+      assert.ok(
+        existsSync(new URL(`../${rel}`, import.meta.url)),
+        `measurement '${m.id}' cites '${rel}', which does not exist. A citation that ` +
+          'leads nowhere reads as evidence and is not — either the file moved (repoint ' +
+          'the ledger) or the evidence is gone and the claim is now unsupported.',
+      );
+    }
+
+    // PER MEASUREMENT, not across the ledger. The first version of this counted globally
+    // and a falsification pass caught it passing on `source: ';;'` — five real paths from
+    // the other two entries cleared the aggregate threshold while THIS entry contributed
+    // none. That is the unfalsifiable conjunct: one counter answering two questions, so a
+    // measurement with no checkable citation hid behind its neighbours' citations.
+    assert.ok(
+      checked > 0,
+      `measurement '${m.id}' has a non-empty source that yields no path (${JSON.stringify(m.source)}). ` +
+        'Separators without citations read as sourced and are not.',
     );
   }
 });

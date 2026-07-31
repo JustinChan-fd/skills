@@ -12,12 +12,31 @@ claim in the results doc can be checked against what was actually written at the
 | `armB-projection.md` | pace projection + a falsifiable prediction | minute 26, before any cap could fire |
 | `method-notes.md` | the §2.6 provenance decision | 16:16Z, mid-run |
 | `results-draft.md` | the draft written while arm B was still live | superseded by `../EXPERIMENT-2-RESULTS.md` |
-| `armA.json` / `armB.json` | provisioned fixture state (head, tree, branch) | at provision time |
+| `armA.json` / `armB.json` | provisioned fixture state (head, tree, branch) — **not results**, see below | at provision time |
 | `watchdog.log` | every poll, both arms, including the kill line | live |
 | `armB-differential-oracle.mjs` | **arm B's own** equivalence oracle | by arm B, during implement |
 | `armB-implement-record.json` | the `status=attempted phases=[] wall_ms=null` record | by arm B; never finalized (SIGTERM) |
 
-## Two things to know before reading
+## Three things to know before reading
+
+**`armA.json` and `armB.json` are named after arms and contain no arm results.** Both hold
+the same eight *provisioning* fields — `slug`, `root`, `repo`, `origin`, `branch`, `head`,
+`tree` — and are byte-identical apart from paths. No score, no cost, no verdict. A reader
+who opens `armA.json` expecting arm A's result finds fixture state.
+
+**Considered and rejected 2026-07-30 (#49): renaming them.** `provision-armA.json` would
+read better, and the cost is wrong. These are frozen mid-run evidence, and §9's rule is
+**preserve-and-mark over delete** — a rename severs the correspondence between the filename
+and the six places the run and its scoring already refer to, for a cosmetic gain. It is also
+the wrong direction of fix: the durable answer is that results become a **machine-readable
+record** (#47) rather than prose, at which point these files stop being mistaken for
+results because actual result files exist. Marked here rather than moved.
+
+What the naming *did* cause, and is now fixed: `lib/model-changes.mjs` cited the score
+sheet at a path that got de-duplicated away, and nothing checked that a ledger citation
+resolves. `test/model-changes.test.mjs` now fails when one does not.
+
+## Two more things to know before reading
 
 **`armB-differential-oracle.mjs` is arm B's artifact, copied verbatim — and it does not
 run as-is.** It was mid-rename from `console.log` to an `emit` helper when the spend cap
