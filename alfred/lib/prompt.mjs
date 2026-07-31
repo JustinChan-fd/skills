@@ -13,7 +13,10 @@
 // half nobody updated. So both contracts arrive by import, byte for byte, and a test asserts
 // the composed prompt `includes()` the imported function's own output.
 //
-// WHY NOT eval/run-armc.mjs's `composePrompt`. Three reasons, and the third is the real one:
+// WHY NOT THE EXPERIMENT RUNNER'S OWN `composePrompt`. (Named by role, not by filename: the arm C
+// test file's §9 guard refuses any mention of that runner's path from lib/ and stays deliberately
+// blunt — lib/gate.mjs carries the same note. It lives under eval/.) Three reasons, and the third
+// is the real one:
 // it reads a fixture manifest (test/isolation.test.mjs forbids lib/ reaching outside alfred/),
 // it strips an answer-key footer (a runtime composer has no answer key to strip), and it is
 // DELIBERATELY NEUTERED — arm C must not be told what to conclude, because a prompt supplying
