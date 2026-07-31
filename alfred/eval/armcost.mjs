@@ -99,6 +99,50 @@ export const THRESHOLDS = Object.freeze({
 //   - recursive, so subagent spend counts;
 //   - still scoped to ONE arm's dirs, so recursing does not merge the arms into one
 //     figure. A walk from the projects root would price arm A's cost into arm B.
+// #66: THE RUN, NOT THE INDEX. Claude Code names its project dir from the worker's CWD by
+// flattening the path, so the provisioned clone's unique suffix (`exp2-armC1-v7lN0Q`) is
+// carried into that name and identifies the RUN. `transcriptsFor` matches only the index
+// token (`exp2-armC1-`), which every re-run of that index shares, so on 2026-07-31 it summed
+// the gated run with the previous night's ungated one and every cost figure was the sum of
+// two runs. See test 20's header for the reconciliation.
+//
+// RETURNS THE DIR COUNT ALONGSIDE THE FILES, and that is the load-bearing part. A selector
+// can be re-broken by a path-naming change; a count that the caller refuses to price when it
+// is not 1 cannot be. Files are NOT the observable — one run legitimately produces several
+// (a top-level transcript plus each subagent's), and §2.8's defect was a walk too shallow to
+// see them. Subagents multiply files, never dirs.
+//
+// The match is on the flattened form: the runner holds `/private/var/.../exp2-armC1-v7lN0Q/
+// sandbox-b` and the project dir is `-private-var-...-exp2-armC1-v7lN0Q-sandbox-b`. Only the
+// leaf token is compared, since $TMPDIR's own path differs between the two representations
+// (`/var/folders/...` vs the resolved `/private/var/folders/...`) and matching the whole
+// thing would find nothing.
+export function runDirToken(repoRoot) {
+  // The unique run directory is the parent of the fixture checkout: `.../exp2-armC1-v7lN0Q/
+  // sandbox-b`. Matching on the fixture leaf (`sandbox-b`) would match every run ever.
+  const m = String(repoRoot ?? '').match(/(exp2-[^/]+)/);
+  return m ? m[1] : null;
+}
+
+export function transcriptsForRun({ repoRoot, projectsDir } = {}) {
+  const token = runDirToken(repoRoot);
+  // No token means no query — and a query that cannot be formed returns no dirs, so the
+  // caller's count check refuses to price rather than pricing everything.
+  if (!token) return { files: [], projectDirs: 0, token: null };
+  const root = projectsDir ?? DEFAULT_PROJECTS_DIR;
+  const dirs = readdirSync(root).filter((entry) => entry.includes(token));
+  const files = [];
+  const walk = (dir) => {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      const p = join(dir, entry.name);
+      if (entry.isDirectory()) walk(p);
+      else if (entry.name.endsWith('.jsonl')) files.push(p);
+    }
+  };
+  for (const d of dirs) walk(join(root, d));
+  return { files, projectDirs: dirs.length, token };
+}
+
 export function transcriptsFor(arm, { projectsDir } = {}) {
   const root = projectsDir ?? DEFAULT_PROJECTS_DIR;
   const out = [];

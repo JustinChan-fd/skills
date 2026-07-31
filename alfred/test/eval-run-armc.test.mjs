@@ -41,7 +41,7 @@ import {
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
-import { THRESHOLDS, transcriptsFor } from '../eval/armcost.mjs';
+import { THRESHOLDS, transcriptsFor, transcriptsForRun } from '../eval/armcost.mjs';
 import {
   countsTowardN,
   decideTotalKill,
@@ -2116,4 +2116,155 @@ test("summarize's gate_pass column is fed by the record, not by a default that r
     { index: 3, status: 'completed', usd: 1, gate_pass: null },
   ]);
   assert.deepEqual(s.runs.map((r) => r.gate_pass), [false, true, null]);
+});
+
+// --- 20. #66: the substring match summed every historical run sharing an index ---
+//
+// MEASURED on the gated n=3 run of 2026-07-31, not reasoned about. `transcriptsFor` filters
+// project dirs with `entry.includes('exp2-armC1-')`, and by that night TWO dirs matched: the
+// gated run's `exp2-armC1-v7lN0Q` and the previous night's ungated `exp2-armC1-l2SLsy`, kept
+// on disk as evidence. Every run reported `transcripts: 2` and every figure was the sum of
+// two runs:
+//
+//   run 1: 2.4269 (gated) + 2.9613 (ungated) = 5.3882 == the runner's 5.388128
+//   run 2: 1.5702 + 1.8194 = 3.3896 == 3.389607
+//   run 3: 1.6707 + 1.8211 = 3.4918 == 3.491759
+//
+// It reconciles to the cent, and the CLI's own total_cost_usd matches the gated column, so
+// `priceByModel` and the rate table were never wrong. Only the FILE SELECTION was.
+//
+// WHAT IT COST: the published verdict. REJECTED on `mean $4.09 exceeds the $4 ceiling`, where
+// the gated-only mean is $1.889 and passes. The defect manufactured a rejection — and would
+// manufacture an ACCEPTANCE for anyone who deleted the old dirs to tidy up. It is not
+// monotone in the safe direction, and it grows: an Nth re-run of index 1 sums N transcripts.
+//
+// #61 fixed the CROSS-SEAT collision and its comment describes this hazard one variable away
+// ("a figure that was already published"). It did not fix the CROSS-RUN one, because the seat
+// token is identical when the same seat runs twice.
+//
+// WHY IT SURVIVED 90 TESTS: nothing pinned `transcripts` to an expected count. The
+// three-valued discipline covers null-vs-0 everywhere and 1-vs-N nowhere, so a sum over two
+// runs is indistinguishable from a sum over one.
+
+test('a rerun of the same index does not absorb the earlier run of that index', async () => {
+  // The regression, at the layer where it happened. Two dirs, same index token, distinct
+  // unique suffixes — exactly the disk state of 2026-07-31 — and the query must select one.
+  const root = mkdtempSync(join(tmpdir(), 'armc-rerun-'));
+  try {
+    for (const suffix of ['l2SLsy', 'v7lN0Q']) {
+      const dir = join(root, `-private-tmp-exp2-armC1-${suffix}-sandbox-b`);
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(join(dir, `${suffix}.jsonl`), '{}\n');
+    }
+
+    // The OLD behaviour, asserted so the test documents what it is preventing rather than
+    // only what it wants. This is the bug, and it must stay visible as a bug.
+    assert.equal(
+      transcriptsFor('armC1', { projectsDir: root }).length,
+      2,
+      'a bare index token still matches both dirs — that is the defect, not a thing to fix here',
+    );
+
+    // The FIX: the run's own directory is the query. `repoRoot` is what the worker ran in and
+    // what Claude Code named its project dir from, so it identifies the run uniquely where
+    // the index does not.
+    const sel = transcriptsForRun({
+      repoRoot: '/private/tmp/exp2-armC1-v7lN0Q/sandbox-b',
+      projectsDir: root,
+    });
+    assert.equal(sel.projectDirs, 1, `matched ${sel.projectDirs} dirs — one run ran in one dir`);
+    assert.equal(sel.files.length, 1, `selected ${JSON.stringify(sel.files)} — one run, one transcript set`);
+    assert.ok(sel.files[0].endsWith('v7lN0Q.jsonl'), 'selected the wrong run of index 1');
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('a run that swept in more than one project dir is unpriced, never priced wrong', async () => {
+  // THE GENERAL GUARD, and the reason it exists rather than trusting the selector: a wrong
+  // denominator must produce a BLANK, not an answer. Same rule `usd: null` follows for an
+  // unreadable repo — an unmeasured cost is not a cheap one — applied to the case where the
+  // measurement happened but spanned more than one run.
+  //
+  // THE OBSERVABLE IS PROJECT DIRS, NOT TRANSCRIPT FILES, and picking the wrong one here
+  // would have re-broken something already fixed. Test 8 above asserts `files.length === 2`
+  // for a SINGLE run — a top-level transcript plus a subagent's — because §2.8's recorded
+  // defect was a walk too shallow to see subagent spend. So a file count of 1 is not the
+  // invariant and asserting it would forbid subagents. What is invariant: one run ran in one
+  // directory, so exactly one project dir may match. Subagents multiply files, never dirs.
+  //
+  // Deliberately independent of the selector. If a future change to path naming reopens the
+  // collision, this fires even though the selector believes it is fine, and the published
+  // figure is null instead of inflated.
+  const rec = await executeRun(1, {
+    at: '2026-07-31T00:00:00.000Z',
+    repoRoot: '/tmp/exp2-armC1-zzz/sandbox-b',
+    spawn: () => ({ spawned: Promise.resolve({ killed: false, sinceProgressMs: 0 }) }),
+    priceOf: async () => ({ usd: 5.38, transcripts: 2, projectDirs: 2, unpriced: [] }),
+    deliveredFiles: () => ['src/a.js'],
+    diffstatOf: async () => [],
+    gateOf: async () => ({ pass: true, findings: [] }),
+  });
+
+  assert.equal(rec.usd, null, 'a sum over two runs was published as one run\u2019s cost');
+  assert.equal(rec.project_dirs, 2, 'the observed count must survive on the record as the evidence');
+  assert.ok(
+    rec.unpriced.some((u) => String(u).includes('project dir')),
+    `the reason must name the problem, got ${JSON.stringify(rec.unpriced)}`,
+  );
+});
+
+test('one project dir prices normally, however many transcripts it holds', async () => {
+  // The other side of the guard, and it carries TWO transcripts on purpose: making `usd`
+  // unconditionally null would satisfy the test above, and asserting on files rather than
+  // dirs would fail here. A run with a subagent must still be priced.
+  const rec = await executeRun(1, {
+    at: '2026-07-31T00:00:00.000Z',
+    repoRoot: '/tmp/exp2-armC1-zzz/sandbox-b',
+    spawn: () => ({ spawned: Promise.resolve({ killed: false, sinceProgressMs: 0 }) }),
+    priceOf: async () => ({ usd: 2.4269, transcripts: 2, projectDirs: 1, unpriced: [] }),
+    deliveredFiles: () => ['src/a.js'],
+    diffstatOf: async () => [],
+    gateOf: async () => ({ pass: true, findings: [] }),
+  });
+
+  assert.equal(rec.usd, 2.4269);
+  assert.equal(rec.project_dirs, 1);
+  assert.deepEqual(rec.unpriced, []);
+});
+
+test('priceRun itself selects by run dir, not by the index token', async () => {
+  // MUTATION FOUND THIS HOLE. Replacing `const selection = repoRoot ? runQuery : indexQuery`
+  // with `const selection = false ? ...` — bypassing the fix completely — left all 93 tests
+  // green. Test 91 exercises `transcriptsForRun` directly and tests 92/93 inject `priceOf`,
+  // so the SEAM between the selector and its only caller was never crossed by a test. A fake
+  // at a seam cannot see the seam is unwired.
+  //
+  // So this calls the real `priceRun` against a real projects root holding two dirs for the
+  // same index — the disk state of 2026-07-31 — with `collect` stubbed only to keep the
+  // assertion on WHICH FILES were selected rather than on a price.
+  const root = mkdtempSync(join(tmpdir(), 'armc-pricerun-'));
+  try {
+    for (const suffix of ['l2SLsy', 'v7lN0Q']) {
+      const dir = join(root, `-private-tmp-exp2-armC1-${suffix}-sandbox-b`);
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(join(dir, `${suffix}.jsonl`), '{}\n');
+    }
+
+    let sawFiles = null;
+    const priced = await priceRun(1, {
+      projectsDir: root,
+      repoRoot: '/private/tmp/exp2-armC1-v7lN0Q/sandbox-b',
+      collect: async (files) => {
+        sawFiles = files;
+        return { by_model: {} };
+      },
+    });
+
+    assert.equal(sawFiles?.length, 1, `priceRun collected ${JSON.stringify(sawFiles)} — it must see one run`);
+    assert.ok(sawFiles[0].endsWith('v7lN0Q.jsonl'), 'priceRun priced the wrong run of index 1');
+    assert.equal(priced.projectDirs, 1, 'the dir count must reach the caller so the guard can read it');
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });

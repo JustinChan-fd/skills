@@ -49,7 +49,7 @@ import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { join, dirname } from 'node:path';
 
-import { THRESHOLDS, priceByModel, transcriptsFor, decideKill, parseEtimeMs } from './armcost.mjs';
+import { THRESHOLDS, priceByModel, transcriptsFor, transcriptsForRun, decideKill, parseEtimeMs } from './armcost.mjs';
 // Reused, not reimplemented. #44 says so explicitly, and a second copy of the seat rule is
 // the shape that produced the `in`/`out` price defect: two copies agree until one is fixed.
 import { staleSeatEnv } from './otel-capture.mjs';
@@ -382,21 +382,38 @@ const GH_SHIM = join(ALFRED, 'eval', 'gh-shim.sh');
 // Priced from this run's own transcripts, recursively. Returns null rather than 0 when
 // nothing is readable: a 0 reads as "free" and a null reads as "unmeasured", and the
 // difference decides whether the run counts toward n.
-export async function priceRun(index, { projectsDir = PROJECTS, collect, model } = {}) {
+export async function priceRun(index, { projectsDir = PROJECTS, collect, model, repoRoot } = {}) {
   // #61: THE SEAT IS PART OF THE QUERY, and this is the most expensive of the four places the
   // slug is derived. Without it an Opus `--run 1` reads the THREE COMMITTED SONNET RUNS'
   // transcripts and reports roughly the baseline's $2.96 having spent ~$5 — and `decideKill`
   // compares that wrong figure to the $8 cap. A missing cost figure is a blank; this one is
   // an answer, and the answer it gives is "Opus costs the same as sonnet".
-  const files = transcriptsFor(runProjectSlug(index, { model }), { projectsDir });
-  if (!files.length) return { usd: null, transcripts: 0, unpriced: [] };
+  // #66: THE RUN DIR IS THE QUERY WHEN WE HAVE ONE. `transcriptsFor(slug)` matches only the
+  // index token, which every re-run of that index shares — on 2026-07-31 that summed the
+  // gated run with the previous night's ungated one and inflated all three figures. `repoRoot`
+  // carries the provisioned clone's unique suffix, so it identifies the run.
+  //
+  // The index-token query remains the fallback for a caller with no repoRoot (the watcher,
+  // and the tests that predate this). It is the WIDER query, so the projectDirs count below
+  // is what keeps a fallback from silently pricing two runs as one.
+  const selection = repoRoot
+    ? transcriptsForRun({ repoRoot, projectsDir })
+    : { files: transcriptsFor(runProjectSlug(index, { model }), { projectsDir }), projectDirs: null };
+  const files = selection.files;
+  if (!files.length) return { usd: null, transcripts: 0, projectDirs: selection.projectDirs ?? 0, unpriced: [] };
   const collectFromFiles =
     collect ??
     (await import('/Users/206618626@bwt3.com/Desktop/Repos/skills/harness-core/tools/lib/tokens-collect.mjs'))
       .collectFromFiles;
   const r = await collectFromFiles(files);
   const p = priceByModel(r.by_model);
-  return { usd: p.total_usd, transcripts: files.length, unpriced: p.unpriced, price_table_version: p.price_table_version };
+  return {
+    usd: p.total_usd,
+    transcripts: files.length,
+    projectDirs: selection.projectDirs,
+    unpriced: p.unpriced,
+    price_table_version: p.price_table_version,
+  };
 }
 
 // Reads the sandbox's own state for the control checks, rather than asserting they hold.
@@ -1126,7 +1143,29 @@ export async function executeRun(index, opts = {}) {
 
   const outcome = (await plan.spawned) ?? {};
   const priced = (await priceOf(index, opts)) ?? {};
-  const usd = Number.isFinite(priced.usd) ? priced.usd : null;
+
+  // #66: A DENOMINATOR OVER MORE THAN ONE RUN IS A BLANK, NOT A CHEAPER OR DEARER ANSWER.
+  //
+  // Independent of the selector on purpose. `transcriptsForRun` pins the query to this run's
+  // own directory, and if a future path-naming change reopens the collision this still fires:
+  // the selector reports how many project dirs it matched, and anything but 1 means the figure
+  // is a sum over runs. Publishing it would restate whichever runs got swept in — which on
+  // 2026-07-31 flipped the verdict to REJECTED off a $4.09 mean whose true value was $1.89.
+  //
+  // THE OBSERVABLE IS DIRS, NOT FILES. One run legitimately writes several transcripts (its
+  // own plus each subagent's), and §2.8's defect was a walk too shallow to see them, so a
+  // file-count guard would forbid subagents to fix a collision. Subagents multiply files
+  // within one dir; only another RUN adds a dir.
+  //
+  // `null` is the fallback query's answer (no repoRoot, so no count) and is NOT treated as a
+  // problem — it means unmeasured, and the caller that supplies no repoRoot is the watcher,
+  // which reports rather than deciding. Same three-valued discipline as `usd` and `delivered`.
+  const projectDirs = Number.isFinite(priced.projectDirs) ? priced.projectDirs : null;
+  const dirProblem =
+    projectDirs !== null && projectDirs !== 1
+      ? `priced across ${projectDirs} project dir(s); one run is one dir, so this figure sums more than this run`
+      : null;
+  const usd = dirProblem === null && Number.isFinite(priced.usd) ? priced.usd : null;
 
   // Read regardless of how the worker ended. See property 1 above.
   const marker = readRunMarker(repoRoot);
@@ -1197,7 +1236,8 @@ export async function executeRun(index, opts = {}) {
     status: outcome.killed || kill.kill ? 'killed' : 'completed',
     usd,
     transcripts: priced.transcripts ?? 0,
-    unpriced: priced.unpriced ?? [],
+    project_dirs: projectDirs,
+    unpriced: dirProblem ? [...(priced.unpriced ?? []), dirProblem] : priced.unpriced ?? [],
     price_table_version: priced.price_table_version ?? null,
     marker_state: marker.state,
     blocked_reason: marker.reason,
