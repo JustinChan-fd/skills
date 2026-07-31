@@ -148,6 +148,24 @@ export function runDirFor({ repoRoot, itemId, stamp, runRoot = null } = {}) {
   return join(root, `${stamp}-${slug(itemId)}`);
 }
 
+// Names and creates the run directory. Exported because `--dry-run` needs one too, and it needs
+// it for a reason worth stating: a rehearsal still FETCHES the ticket, and §2.1 calls writing the
+// raw payload non-negotiable — "fetch once with no copy means no run is replayable". A dry run
+// that fetched and discarded would reintroduce exactly that, on the path an operator uses to
+// check what a run is about to do.
+//
+// One function rather than two call sites so the stamp format cannot differ between them; a
+// rehearsal whose directory sorts differently from the real run's is a needless puzzle at 3am.
+export function newRunDir({ repoRoot, ref, runRoot = null, stamp = null } = {}) {
+  const at = stamp ?? new Date().toISOString().replace(/[-:]/g, '').replace(/\.\d+Z$/, 'Z');
+  // Named from the REF, which is known before the id: resolving the item is what writes into
+  // this directory, so the directory has to exist first. A ticket ref slugs to the same thing
+  // its id would.
+  const dir = runDirFor({ repoRoot, itemId: ref, stamp: at, runRoot });
+  mkdirSync(dir, { recursive: true });
+  return dir;
+}
+
 const numstat = async (repoRoot, args) => {
   const { stdout } = await execFileAsync('git', ['-C', repoRoot, ...args], {
     maxBuffer: 32 * 1024 * 1024,
@@ -313,12 +331,7 @@ export async function executeWork({
     cfg = loaded.config;
   }
 
-  const at = stamp ?? new Date().toISOString().replace(/[-:]/g, '').replace(/\.\d+Z$/, 'Z');
-  // The slug needs the item id, which needs the resolution that writes into the run dir — so the
-  // directory is named from the REF, which is known first. A ticket ref slugs to the same thing
-  // its id would.
-  const runDir = runDirFor({ repoRoot: root, itemId: ref, stamp: at, runRoot });
-  mkdirSync(runDir, { recursive: true });
+  const runDir = newRunDir({ repoRoot: root, ref, runRoot, stamp });
 
   // Step 2. Resolve the item AND write the raw payload, before anything else happens. §2.1 calls
   // this non-negotiable and a bug fix: harness-core persisted a one-line excerpt, so no run there
