@@ -33,6 +33,7 @@
 import { readFileSync } from 'node:fs';
 import { isAbsolute, join, relative, sep } from 'node:path';
 
+import { budgetUsdFor } from './router.mjs';
 import { matchesPathPattern } from './paths.mjs';
 
 export const CONFIG_RELATIVE_PATH = join('.alfred', 'config.json');
@@ -85,6 +86,12 @@ const SCHEMA = {
     },
   },
   off_limits: { type: 'array', required: true },
+  // Reachable at last (#70). `lib/router.mjs`'s `budgetUsdFor` has always read this key and
+  // handed it to `--max-budget-usd` — the only ceiling the CLI was measured to enforce — but it
+  // was absent here, so the unknown-key rule refused every config that set it and the only
+  // budget a real run could use was the router's hardcoded default. Two modules each correct in
+  // isolation, and the gap only appeared when a real fixture was validated.
+  budget_usd: { type: 'number' },
   models: { type: 'object' },
   telemetry: { type: 'object', keys: { sink: { type: 'string' }, repo_slug: { type: 'string' } } },
 };
@@ -167,6 +174,19 @@ function validateSemantics(raw) {
     // absolute rule stops matching the relative paths `git diff --name-only` reports.
     if (isAbsolute(glob) || glob.split('/').includes('..')) {
       return `off_limits[${i}] must be relative to the repo root and must not escape it: ${glob}`;
+    }
+  }
+
+  // ASKED OF THE ROUTER RATHER THAN RE-STATED. `budgetUsdFor` already refuses a non-positive or
+  // non-finite dollar figure, and a second copy of that rule here is the drift this key's own
+  // absence was a case of. What the loader adds is WHERE it is refused: the router throws, and
+  // at the top of an unattended tick an exception is a dead tick with no record, so it is caught
+  // and reported as an error string like every other one in this file.
+  if (!nullish(raw.budget_usd)) {
+    try {
+      budgetUsdFor(raw);
+    } catch (e) {
+      return `budget_usd: ${e.message}`;
     }
   }
 
