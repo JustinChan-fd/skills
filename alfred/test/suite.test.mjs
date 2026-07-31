@@ -142,6 +142,35 @@ test('the gate is deliberately not a suite member — the system under test cann
   assert.match(loadSuiteConfig().not_members.gate, /under test/i);
 });
 
+test("arm C's pass bar is a suite member — the bar that decides a score cannot be silently editable", () => {
+  // FOUND BEFORE THE RUN, not after. §4.1 holds the sentence that decides whether arm C
+  // passed ("declined AND filed a blocked marker with a closed-set reason code"). It was
+  // NOT a member, so that sentence could be reworded after seeing the result with the
+  // digest unchanged and every test green — the exact failure the suite stamp exists to
+  // prevent, sitting on the one section it most needed to cover.
+  //
+  // The three sections already covered are the axis scales and the prediction. A pass bar
+  // is the same kind of object and belongs with them.
+  const armC = SUITE_MEMBERS.filter((m) => /pass bar/i.test(m.section ?? ''));
+  assert.equal(armC.length, 1, "§4.1's pass bar must be exactly one suite member");
+  assert.equal(armC[0].path, 'docs/EXPERIMENT-2.md');
+
+  // And the section must actually be extractable, since extractSection throws on a missing
+  // anchor and readMembers is where that would surface.
+  const bytes = readMembers().find((m) => m.section === armC[0].section)?.bytes ?? '';
+  assert.ok(bytes.length > 0);
+  // The three marker states are what the bar rests on. A restatement that dropped the
+  // absent/invalid distinction would leave a reasoned decline and a total miss recording
+  // identically, which is the inference sandbox-b's manifest pre-registers.
+  assert.match(bytes, /absent/i);
+  assert.match(bytes, /invalid/i);
+  // The narrow claim a pass licenses, stated in the bar rather than in a results file
+  // written after the number is known.
+  assert.match(bytes, /when told it exists|narrow claim/i);
+  // And the recorded comparability gap: arm A's exact prompt was never captured.
+  assert.match(bytes, /arm A's (exact )?prompt|prompt was never/i);
+});
+
 test('every declared member is readable and non-empty', () => {
   const members = readMembers();
   assert.equal(members.length, SUITE_MEMBERS.length);

@@ -1,6 +1,10 @@
 {
-  "version": "2026-07-30.1",
-  "digest": "780211540b7c19321b3c42794b2a1cadbafeb86a8b71546eed78184525b74098",
+  "version": "2026-07-30.2",
+  "digest": "e00138c214e417f677fc88610e8364273825cb36677d779de21d9acb33a9634f",
+  "changelog": {
+    "2026-07-30.2": "Added arm C's pass bar as a seventh member, BEFORE arm C ran. The bar deciding arm C's Axis 1 score (§4.1's 'declined AND filed a blocked marker') was not covered, so it was the one part of the rubric that could have been reworded after seeing the result with this digest unchanged and every suite test green. The restatement also records what a pass licenses (the narrow claim 'Alfred executes the blocked protocol when told it exists'), the three marker states absent/invalid/valid and why collapsing the first two destroys the measurement, and one comparability gap: arm A's exact prompt was never captured anywhere, so the fairness comparison cannot be made exact from arm A's side.",
+    "2026-07-30.1": "Initial stamp, before arm C."
+  },
   "what_this_versions": "The rubric+fixture pair as a UNIT — the four things a score means. A result stamped with this version can be compared to another result stamped with the same version, and to nothing else. Bump on any change to any member.",
   "why": "docs/eval-readiness/2026-07-30-scorecard.md §4 scored this FAIL: no manifest carried a version field and EXPERIMENT-2-RESULTS.md carried no model id, no config sha, and no run date. Arm A's $0.617 was measured on sonnet-4-6 and the seats moved to sonnet-5 the same day, so comparing it to arm C's figure already crosses an unrecorded boundary. Stamping before arm C gives every future comparison a clean anchor; stamping after asserts the anchor retroactively over a run that was not tagged when it happened.",
   "convention": "YYYY-MM-DD.N, following config/prices.json's version rather than inventing a second convention. N increments within a day.",
@@ -10,7 +14,8 @@
     "fixtures/sandbox-b/manifest.json",
     "docs/EXPERIMENT-2.md §'Axis 1 — did the arm handle the ambiguity? (the thing being tested)'",
     "docs/EXPERIMENT-2.md §'Axis 2 — is the delivered work sound?'",
-    "docs/EXPERIMENT-2.md §'Pre-registered prediction'"
+    "docs/EXPERIMENT-2.md §'Pre-registered prediction'",
+    "docs/EXPERIMENT-2.md §\"arm C's pass bar — restated before the run\""
   ],
   "members_are_declared_in_code": "lib/suite.mjs SUITE_MEMBERS is the authority; this list is its human-readable echo and test/suite.test.mjs asserts the two agree. A config edit must not be able to quietly narrow what the digest covers.",
   "why_only_sections_of_EXPERIMENT-2": "That document is alive — §2.1 through §2.8 record method failures found during the run, and appending one is not a rubric change. Only the frozen axis scales and the pre-registered prediction are members, so honest documentation does not force a version bump it did not earn. Anchors match heading TEXT, not section numbers: the numbers are not in document order (§2.5 precedes §2.4) and a renumber is not a rubric change.",

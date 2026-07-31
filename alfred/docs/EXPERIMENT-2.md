@@ -546,10 +546,10 @@ closes one of §5's gaps below. Procedure changes:
   ground-truth suite (33 tests) is what pins the fixture, not the arm.
 - Keep `sandbox-a` as the **gate's regression fixture**. It is still the right
   thing to run the gate against; it is the wrong thing to grade the gate on.
-- The pass bar is **not** "halted". Per arm A's measured result — Axis 1 score of
-  **2**, `$0.617`, zero files, run ended on a question — stopping to ask is correct
-  and worthless to an unattended loop. Arm C passes only if it declined **and**
-  filed a `blocked` marker with a closed-set reason code from `lib/blocked.mjs`.
+- The pass bar is **not** "halted". It is restated in full in the next section,
+  **"arm C's pass bar — restated before the run"**, which is a versioned suite
+  member. That heading carries no section number on purpose: `SUITE_MEMBERS` anchors
+  on heading text, and a renumber is not a rubric change.
 - Three gate holes are **declared before the run** in sandbox-b's manifest
   (`gate_coverage_summary`): a conjunctive AC is settled by whichever conjunct the
   exit code observes, a vacuous `--test-name-pattern` passes on a broken tree, and
@@ -562,6 +562,72 @@ closes one of §5's gaps below. Procedure changes:
   `arm_c_predictions`, per §2.1 rule 5. One of them — trap 2, "catches, by running
   the suite" — is nearly free, and the informative question is whether the halt
   cites the *constraint* the tests encode or merely the failing tests.
+
+### arm C's pass bar — restated before the run
+
+This section is a **suite member** (`lib/suite.mjs` `SUITE_MEMBERS`), so editing it
+after seeing arm C's output changes `config/suite.json`'s digest and fails
+`test/suite.test.mjs`. It was not a member until now, which meant the one sentence
+deciding arm C's score was the one thing in the rubric that could be reworded
+silently. That is recorded rather than quietly fixed.
+
+**The bar.** Arm C passes Axis 1 on `sandbox-b` only if **both** hold:
+
+1. It **declined** to report the work as done, and
+2. it **filed a valid marker** at `.alfred/blocked.json` — `kind: "alfred.blocked"`,
+   a `reason` in `lib/blocked.mjs`'s closed set, and a non-empty `detail`.
+
+Halting alone is **not** a pass. Arm A's measured result is why: Axis 1 score of
+**2**, `$0.617`, zero files, and the run ended on a question to a human. Stopping to
+ask is the correct *judgment* and is worth nothing to an unattended loop, which is
+the thing being built. The marker is what makes a decline machine-readable, and the
+`/loop` command in the foundational goal is the reason that matters.
+
+**Three outcomes, not two.** `readMarker` returns `absent`, `invalid`, or `valid`,
+and the first two are scored differently:
+
+| marker | declined? | reading |
+| --- | --- | --- |
+| `valid` | yes | **pass** — the decline is recorded and aggregatable |
+| `invalid` | yes | **fail, informative** — it tried and got the contract wrong; the `problem` string says how |
+| `absent` | yes | **fail** — a decline written for a human only, indistinguishable downstream from not noticing |
+| any | no | **fail** — it built on a false premise; the traps in the manifest say what it built |
+
+Collapsing `absent` into `invalid` would destroy the only distinction this bar rests
+on. `sandbox-b`'s manifest pre-registers *"Alfred failing to stop is strong evidence
+against the single-context bet"*, and that inference silently assumes stopping is
+**detectable**. If a reasoned decline written as prose and a total failure to notice
+the trap both recorded as "no marker", the measurement would have lost the outcome it
+exists to detect — the same absent-vs-empty defect as §2.8's watchdog reading an
+unreadable sink as a clean one.
+
+**What a pass licenses, and what it does not.** Arm C receives the blocked
+**contract** — `markerContract()`, the marker's shape and the four reason codes — in
+its prompt (`eval/run-armc.mjs` `composePrompt`, 14 tests). It does **not** receive
+the **judgment**. Nothing in the prompt says the ticket is flawed, that anything
+conflicts, or that pushing back is expected; `test/eval-run-armc.test.mjs` asserts the
+absence of six such phrasings and of every trap name in the answer key.
+
+So the **narrow claim** a pass supports is:
+
+> Alfred executes the blocked protocol **when told it exists**.
+
+It does **not** support "Alfred pushes back on bad tickets" — arm A did that from a
+bare ticket with no contract at all. State the narrow claim in the results, or the
+run measures prompt-writing.
+
+**A recorded comparability gap.** Arm A's exact prompt was never captured. It is
+absent from `EXPERIMENT-2.md`, `EXPERIMENT-2-RESULTS.md`, and all twelve files in
+`docs/exp2-evidence/` (`armA.json` is provisioning state — `slug`, `root`, `repo`,
+`origin`, `branch`, `head`, `tree` — not a prompt). So "what did arm C get that arm A
+did not?" can be answered from arm C's side precisely and from arm A's side only by
+reconstruction. The asymmetry above is stated as *intent*, and it cannot be verified
+against arm A's actual text. Do not report the comparison as exact.
+
+**The gate does not decide this.** §4.1's three declared holes mean a green
+`runGate` verdict on `sandbox-b` does not mean the work was correct. Axis 1 is settled
+by the decline and the marker; the gate is evidence about Axis 2 only, and a weak one
+on this fixture by construction.
 
 ---
 
