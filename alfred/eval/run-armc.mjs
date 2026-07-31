@@ -32,12 +32,22 @@
 // because a threshold that can only be exercised by burning a real run is a threshold
 // nobody ever exercises — which is precisely how §2.8's kill switch shipped green.
 
-import { execFileSync } from 'node:child_process';
-import { existsSync, readFileSync } from 'node:fs';
+import { execFileSync, spawn } from 'node:child_process';
+import {
+  existsSync,
+  readFileSync,
+  openSync,
+  closeSync,
+  mkdirSync,
+  writeFileSync,
+  chmodSync,
+  rmSync,
+  symlinkSync,
+} from 'node:fs';
 import { mkdtemp } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
-import { join } from 'node:path';
+import { join, dirname } from 'node:path';
 
 import { THRESHOLDS, priceByModel, transcriptsFor, decideKill, parseEtimeMs } from './armcost.mjs';
 // Reused, not reimplemented. #44 says so explicitly, and a second copy of the seat rule is
@@ -368,6 +378,227 @@ export function workerArgv({ prompt, model, maxTurns = null } = {}) {
   ];
   if (maxTurns) argv.push('--max-turns', String(maxTurns));
   return argv;
+}
+
+// --- the live spawn path ---
+//
+// Everything below is what `node eval/run-armc.mjs --run 1` needs and did not have. Found by
+// attempting the run, not by reading: the run refused safely (planRun demands a spawn for a
+// live run), and chasing that surfaced three more gaps that would NOT have refused. All four
+// were invisible to 60 green tests because every one injects a fake at the seam that was
+// missing — the same lesson as #55's origin/HEAD, one layer out.
+
+// Where the shim dir is built. Under the alfred tree rather than TMPDIR so it survives a
+// reboot mid-experiment and so `which gh` in a transcript points somewhere a reader can look.
+const SHIM_DIR = join(ALFRED, 'eval', '.shim-bin');
+
+// CONTROL 8'S TEETH, which the preflight never had.
+//
+// preflightProblems only asserts gh-shim.sh EXISTS. That is a different claim from "the
+// worker cannot reach real gh", and the gap between them is the whole control: a shim nobody
+// installed refuses nothing. Arm C receives a real GITHUB_SLUG because the eval issue lives
+// there, so `gh pr create` was reachable and would have put sandbox code on a real
+// repository — the one outcome the shim was written to prevent.
+//
+// PREPENDED, never replacing: the worker needs node, git and claude off the inherited PATH.
+// A replaced PATH would fail for the environment's reason and be scored as the arm's.
+export function workerEnv({ env = process.env, shimDir = SHIM_DIR } = {}) {
+  mkdirSync(shimDir, { recursive: true });
+  const link = join(shimDir, 'gh');
+  // Rewritten every call rather than created once: a stale shim from an earlier commit is
+  // indistinguishable from a current one, and this is a control.
+  writeFileSync(link, `#!/bin/bash\nexec ${GH_SHIM} "$@"\n`);
+  chmodSync(link, 0o755);
+  return { ...env, PATH: `${shimDir}:${env.PATH ?? ''}` };
+}
+
+// The gap that would have cost real money and returned no data.
+//
+// `priceRun` finds transcripts via `transcriptsFor`, which matches the PROJECT DIRECTORY
+// NAME on `exp2-armC{N}-`. Claude Code derives that directory from the worker's CWD. main()
+// provisioned to `alfred-armc-run{N}-*/sandbox-b`, which matches nothing — so a live run
+// would have spent, then reported `usd: null, transcripts: 0`, and NOT COUNTED TOWARD n.
+// Measured before fixing: transcriptsFor('armA') = 1, transcriptsFor('armC1') = 0.
+//
+// A symlink, not a move: the clone stays where provision put it (it is the evidence the run
+// is scored from) and gains a second path carrying the token. Both resolve to one tree, so
+// the marker the worker writes is the marker readRunMarker reads.
+export function workerCwd(index, repoRoot, { tmp = tmpdir() } = {}) {
+  const token = `exp2-${runProjectSlug(index)}-`;
+
+  // THE LIVE PATH TAKES THIS BRANCH. `provisionRun` names the run directory with the token,
+  // so the clone the worker gets IS the path pricing can find, and no indirection sits
+  // between the two. #55's t58 established that identity for the preflight — same clone the
+  // preflight checked, same clone the worker edits — and this extends it to the pricing.
+  if (repoRoot.includes(token)) return repoRoot;
+
+  // Fallback for a caller-supplied root that carries no token. BEST-EFFORT, and the reason
+  // is worth stating: Node's process.cwd() returns the PHYSICAL path, so a worker launched
+  // in a symlink may report the resolved target and be named from that instead — which
+  // would put the transcript back where transcriptsFor cannot see it. That is precisely why
+  // the live path does not depend on this branch.
+  const dir = join(tmp, `${token}sandbox-b`);
+  // Removed first: a dangling link left by an earlier run or a test is indistinguishable
+  // from a current one, and this path now shares a name shape with real run leavings.
+  rmSync(dir, { recursive: true, force: true });
+  symlinkSync(repoRoot, dir);
+  return dir;
+}
+
+// Polls a running worker and enforces the wall cap.
+//
+// The cap fires HERE, not on the child exiting by itself — a spawn that merely awaited the
+// process would let a hung worker run past 25 minutes unbounded, which is §2.8's recorded
+// kill-switch failure in a different place.
+//
+// STALLED IS NOT SLOW, and the distinction is why cpuMs is read at all. A worker thinking
+// hard through a long tool loop is making progress; one whose CPU time has not moved is not.
+// `sinceProgressMs` measures the second, and executeRun's decideKill call reads it.
+//
+// `probe` and `kill` are injected so the cap is testable without launching anything —
+// exactly the property §2.8 says a threshold needs, since one that can only be exercised by
+// burning a real run never gets exercised.
+export async function pollWorker({
+  pid,
+  wallCapMs = THRESHOLDS.armC.wallCapMs,
+  pollMs = 5000,
+  probe = defaultProbe,
+  kill = (sig) => process.kill(pid, sig),
+  sleep = (ms) => new Promise((r) => setTimeout(r, ms)),
+} = {}) {
+  // A PROBE OF AN UNDEFINED PID IS NOT EVIDENCE OF ANYTHING, and this is the root cause of the
+  // false-completed-run above rather than a defensive check. `spawn` leaves `child.pid`
+  // undefined when the binary cannot be found, `ps -p undefined` exits non-zero, and
+  // defaultProbe reads a failed probe as `alive: false` — which this loop then reports as a
+  // worker that finished. Refused here so the same confusion cannot arise through any caller.
+  if (!Number.isInteger(pid) || pid <= 0) {
+    throw new Error(
+      `pollWorker needs a real pid, got ${JSON.stringify(pid ?? null)}. A probe of a pid that ` +
+        'never existed fails, and a failed probe is indistinguishable from a finished worker.',
+    );
+  }
+
+  let lastCpuMs = null;
+  let lastMovedAt = 0;
+  let elapsed = 0;
+  let killed = false;
+
+  for (;;) {
+    const s = probe(pid) ?? {};
+    if (!s.alive) {
+      // ZERO, not the accrued window. A stall is an INFERENCE DRAWN FROM SILENCE, which is
+      // valid for a running worker and meaningless for one that has ended — its own exit is
+      // the fact. executeRun feeds this field to decideKill, so a non-zero value here labels a
+      // clean run `status: 'killed'` with `cause: 'stall'` and nothing killed it. Measured
+      // against the stub worker: a normal exit came back sinceProgressMs 5000.
+      return { killed, sinceProgressMs: 0, wallMs: s.wallMs ?? elapsed, exit: s.exit ?? null };
+    }
+
+    const wallMs = Number.isFinite(s.wallMs) ? s.wallMs : elapsed;
+    if (s.cpuMs !== lastCpuMs) {
+      lastCpuMs = s.cpuMs;
+      lastMovedAt = wallMs;
+    }
+
+    if (wallMs >= wallCapMs) {
+      // SIGTERM, not SIGKILL: the worker gets a chance to flush its transcript, which is
+      // what the run is priced from. Arm B was killed this way and still priced.
+      kill('SIGTERM');
+      killed = true;
+      return { killed: true, sinceProgressMs: wallMs - lastMovedAt, wallMs, exit: null };
+    }
+
+    await sleep(pollMs);
+    elapsed = wallMs + pollMs;
+  }
+}
+
+// `ps` twice rather than once: etime is the arm's own age and survives an arbitrary number of
+// watcher restarts (parseEtimeMs's recorded reason), while time= is the progress signal.
+function defaultProbe(pid) {
+  const read = (fmt) => {
+    try {
+      return execFileSync('ps', ['-o', fmt, '-p', String(pid)], { encoding: 'utf8' }).trim();
+    } catch {
+      return null;
+    }
+  };
+  const etime = read('etime=');
+  if (etime === null || etime === '') return { alive: false };
+  return { alive: true, wallMs: parseEtimeMs(etime), cpuMs: parseEtimeMs(read('time=')) };
+}
+
+// Launches the worker and returns the outcome shape executeRun destructures.
+//
+// Unref'd + detached is deliberate: the child must not die with this process mid-run, and
+// pollWorker owns the lifetime from here. stdio to a file rather than inherit, because the
+// worker's own output is not the measurement — the transcript is.
+export function spawnWorker(
+  argv,
+  { repoRoot, index, env = process.env, cwd = null, logDir = null, ...pollOpts } = {},
+) {
+  const runCwd = cwd ?? workerCwd(index, repoRoot);
+
+  // ALONGSIDE THE CLONE, never inside it and never at a fixed path.
+  //
+  // Not inside: the experiment is scored on the clone's working-tree diff, so a worker.log there
+  // would be counted as delivered work — the same contamination class as three runs sharing one
+  // clone. Not fixed: `$TMPDIR/armC1-worker.log` means running `--run 1` twice silently replaces
+  // the first run's output, and this log holds the worker's own `--output-format json` payload —
+  // the disagreement detector the model reconciliation reads. Each provisioned run directory is
+  // already unique, so using it costs nothing and makes overwriting impossible.
+  const log = join(logDir ?? dirname(runCwd), `armC${index}-worker.log`);
+  const sink = openSync(log, 'w');
+
+  // A FILE, NOT A PIPE, and this is a measured fix rather than a preference. With
+  // `stdio: 'pipe'` and nothing draining it, a stub worker emitting 200 KB never exited — the
+  // child blocks once the 64 KB pipe buffer fills and stays blocked. Arm C runs with
+  // `--output-format json`, whose payload is far past that, so every run would have hung until
+  // the 25-minute cap fired and been scored as a slow topology. The kill switch would have
+  // hidden the launcher's own bug as a finding about Alfred.
+  const child = spawn('claude', argv, {
+    cwd: runCwd,
+    env: workerEnv({ env }),
+    detached: false,
+    stdio: ['ignore', sink, sink],
+  });
+
+  // A LAUNCH FAILURE IS NOT A COMPLETED RUN, and without this race it reads as one.
+  //
+  // `spawn` reports ENOENT asynchronously, so `child.pid` is undefined and pollWorker's first
+  // probe sees a dead process — indistinguishable from a worker that finished its work. Measured
+  // on a PATH with no `claude`: the promise resolved `{killed: false, exit: null}` and the
+  // process then died on an unhandled 'error' event. That is property 4 inverted — a delivery
+  // outcome of "completed" for a run that never started.
+  //
+  // Raced rather than checked, because the error arrives on a later tick than this function
+  // returns. Whichever settles first wins, and a launch error always beats the first poll.
+  const launched = new Promise((_resolve, reject) => {
+    child.once('error', (err) =>
+      reject(
+        new Error(
+          `the worker never launched: ${err.message}. A run that did not start is not a run that ` +
+            'delivered nothing — refusing rather than reporting a completed run with no cost.',
+          { cause: err },
+        ),
+      ),
+    );
+  });
+
+  // Checked BEFORE the poll is started, not after. Building `polled` first and returning early
+  // leaves a rejected promise nobody awaits, which surfaces as an unhandledRejection that
+  // crashes the process rather than as the refusal above — a second false-success shape hiding
+  // behind the fix for the first.
+  if (!Number.isInteger(child.pid)) return launched.finally(() => closeSync(sink));
+
+  const polled = pollWorker({ pid: child.pid, ...pollOpts }).then((outcome) => ({
+    ...outcome,
+    pid: child.pid,
+    cwd: runCwd,
+    log,
+  }));
+
+  return Promise.race([launched, polled]).finally(() => closeSync(sink));
 }
 
 // The provenance footer eval-issue.mjs appends, removed before the text reaches a worker.
@@ -783,7 +1014,14 @@ export async function main({
   provisionRun = async (index) => {
     const { provision } = await import('../lib/fixture.mjs');
     // A per-run directory, so the three clones cannot be the same path even by accident.
-    const into = await mkdtemp(join(tmpdir(), `alfred-armc-run${index}-`));
+    //
+    // The NAME carries `exp2-armC{N}-` for a measured reason, not cosmetics. Claude Code
+    // derives its project directory from the worker's cwd, and `transcriptsFor` finds a
+    // run's transcripts by matching that directory on this exact token. The earlier prefix
+    // was `alfred-armc-run{N}-`, which matches nothing: transcriptsFor('armA') = 1,
+    // transcriptsFor('armC1') = 0. A live run would have spent real money, reported
+    // `usd: null, transcripts: 0`, and NOT COUNTED TOWARD n.
+    const into = await mkdtemp(join(tmpdir(), `exp2-${runProjectSlug(index)}-`));
     const { repo } = await provision(slug, { into, replace: true });
     return repo;
   },
@@ -795,6 +1033,18 @@ export async function main({
       ghShim: GH_SHIM,
     }),
   execute = executeRun,
+  // The launch itself, and the ONLY seam a test may replace. Injecting `spawn` directly
+  // would skip the wiring below and pass on a file that has no default at all — which is
+  // how this gap survived 60 green tests. Replacing `spawnImpl` exercises everything except
+  // the process, so t61 proves the default exists rather than that the test can supply one.
+  spawnImpl = spawnWorker,
+  // A LIVE RUN'S DEFAULT SPAWNER, absent until now.
+  //
+  // `main` wired real defaults for provisionRun, preflight and execute and NOTHING for
+  // spawn, so `node eval/run-armc.mjs --run 1` reached planRun and refused: "a live run
+  // with no spawner would report success having done nothing." That refusal was correct and
+  // cost nothing — it is also the whole reason arm C had never run.
+  spawn = (argv, plan) => spawnImpl(argv, { repoRoot: plan.repo_root, index: plan.index }),
   ...opts
 } = {}) {
   // Parsed FIRST. An ambiguous invocation must be refused before anything reads the
@@ -805,7 +1055,7 @@ export async function main({
     throw new Error('main requires an explicit `at`. Every record downstream refuses a clock-read timestamp.');
   }
 
-  const shared = { ...opts, at, caps, model, dryRun: mode.dryRun };
+  const shared = { ...opts, at, caps, model, dryRun: mode.dryRun, spawn };
 
   // Wraps `execute` rather than sitting beside it, so there is no ordering for the loop to
   // get wrong: the only way to reach a spawn is through a clone that already passed. The
@@ -838,7 +1088,7 @@ export async function main({
 export const gate = () => import('../lib/gate.mjs');
 export const report = () => import('../lib/report.mjs');
 
-export { THRESHOLDS, GH_SHIM, parseEtimeMs, decideKill };
+export { THRESHOLDS, GH_SHIM, SHIM_DIR, parseEtimeMs, decideKill };
 
 // ---------------------------------------------------------------------------
 // 16. The CLI edge.

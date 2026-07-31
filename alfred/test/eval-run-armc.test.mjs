@@ -27,7 +27,17 @@ import assert from 'node:assert/strict';
 import { mkdtemp, mkdir, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
-import { existsSync, readFileSync, readdirSync, mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
+import {
+  existsSync,
+  readFileSync,
+  readdirSync,
+  mkdtempSync,
+  mkdirSync,
+  writeFileSync,
+  rmSync,
+  chmodSync,
+  statSync,
+} from 'node:fs';
 import { fileURLToPath } from 'node:url';
 
 import { THRESHOLDS, transcriptsFor } from '../eval/armcost.mjs';
@@ -49,8 +59,13 @@ import {
   buildArmCRecord,
   main,
   inspectFixture,
+  workerEnv,
+  workerCwd,
+  pollWorker,
+  spawnWorker,
+  workerArgv,
 } from '../eval/run-armc.mjs';
-import { MARKER_PATH, REASONS } from '../lib/blocked.mjs';
+import { MARKER_PATH, REASONS, readMarker } from '../lib/blocked.mjs';
 import { stampProblems } from '../lib/suite.mjs';
 import { issueBody } from '../lib/eval-issue.mjs';
 
@@ -914,6 +929,9 @@ test('the record reports what was SPENT alongside the mean, never the mean alone
 // that DO cover provisioning (section 16) use the real thing and clean up after themselves.
 const fakeClone = (index) => `/nonexistent/armc-fake-run${index}`;
 
+// A path that exists (section 17 needs readRunMarker not to throw) but is not a clone.
+const FAKE_CLONE_FOR_SPAWN = '/nonexistent/armc-spawn-fixture';
+
 test('main refuses to spend when the preflight has problems, and says which', async () => {
   // The preflight is the whole reason #30 must run from a RESTARTED session: staleSeatEnv
   // catches a shell still exporting sonnet-4-6, which would price arm C against a model
@@ -1049,11 +1067,17 @@ test('the preflight is pointed at the PROVISIONED clone, not the fixture templat
 // after #30, `ls` would show a directory I could not tell apart from evidence.
 function cleanClones(roots) {
   for (const root of roots) {
+    if (typeof root !== 'string') continue;
     // dirname, not the repo — provision creates `<into>/origin.git` alongside `<into>/<slug>`,
     // and the mkdtemp dir is the unit that was allocated.
-    if (typeof root === 'string' && root.includes('alfred-armc-run')) {
-      rmSync(dirname(root), { recursive: true, force: true });
-    }
+    const into = dirname(root);
+    // The FIXTURE MARKER, not a name. The earlier guard read `root.includes('alfred-armc-run')`
+    // and every cleanup silently became a no-op the moment the run directory was renamed to
+    // carry the pricing token — 59 clones leaked in one session before anyone counted. A name
+    // is not a fact about a directory; the marker provision writes is, and reusing it means
+    // `--replace` and this helper share one definition of "a tree this code created".
+    if (!existsSync(join(into, '.alfred-fixture'))) continue;
+    rmSync(into, { recursive: true, force: true });
   }
 }
 
@@ -1180,3 +1204,343 @@ test('a failing preflight refuses BEFORE the worker spawns, on every run and not
     cleanClones(checks);
   }
 });
+
+// ---------------------------------------------------------------------------
+// 17. The live path, which no test above has ever executed.
+//
+// Every test in section 15 and 16 injects a fake `spawn`, a fake `preflight`, or a fake
+// `priceOf`. That is what makes them free — and it is also why 60 green tests said nothing
+// about whether the REAL defaults exist. `main()` wired three of its four seams to real
+// implementations and left `spawn` with no default at all, so `node eval/run-armc.mjs --run 1`
+// threw before spending. That is the good failure. The three below it are not:
+//
+//   - the `gh` shim was CHECKED FOR EXISTENCE and never installed on the child's PATH, so
+//     control 8 was inert. A worker that decided to open a PR would have opened a real one.
+//   - `priceRun` matches the project dir on `exp2-armC{N}-`, and Claude Code names that dir
+//     after the worker's CWD. main() provisioned to `alfred-armc-run{N}-*/sandbox-b`, which
+//     matches nothing — so a live run would have spent real money and reported
+//     `usd: null, transcripts: 0`, failing to count toward n. Money gone, no data.
+//   - nothing polled, so the 25-minute wall cap could not fire.
+//
+// These are the same genre as #55's two: a control that reads as enforced and is not. The
+// tests here assert the REAL default's properties, injecting only what would cost money.
+
+test('main supplies a real spawn by default, so a live run does not refuse itself', async () => {
+  // The exact invocation `node eval/run-armc.mjs --run 1` performs. `spawnImpl` is the
+  // one thing stubbed — calling the real one launches claude and spends. Everything else
+  // is the production default, which is the point: this asserts the WIRING exists.
+  const launched = [];
+  const record = await main({
+    argv: ['--run', '1'],
+    at: '2026-07-30T19:00:00.000Z',
+    preflight: () => [],
+    provisionRun: async () => FAKE_CLONE_FOR_SPAWN,
+    priceOf: async () => ({ usd: 1.5, transcripts: 2, unpriced: [] }),
+    spawnImpl: (argv, opts) => {
+      launched.push({ argv, opts });
+      return { killed: false, sinceProgressMs: 0, exit: 0 };
+    },
+  });
+  assert.equal(launched.length, 1, 'main did not reach a spawn — no default spawn is wired');
+  assert.ok(record.runs?.[0], 'no run record was produced');
+});
+
+test('the child runs with the gh shim on its PATH, not merely present on disk', () => {
+  // Control 8's teeth. The preflight only asserts the FILE EXISTS; that is a different
+  // claim from "the worker cannot reach real gh". A shim nobody installed refuses nothing.
+  const env = workerEnv({ env: { PATH: '/usr/bin:/bin' } });
+  const first = env.PATH.split(':')[0];
+  assert.ok(
+    existsSync(join(first, 'gh')),
+    `first PATH entry ${first} holds no gh — the worker would resolve the real one`,
+  );
+  assert.ok(env.PATH.includes('/usr/bin'), 'the inherited PATH was discarded rather than prepended to');
+});
+
+test('the worker runs in a cwd priceRun can find transcripts under', () => {
+  // The gap that would have cost money for nothing. `transcriptsFor` matches the project
+  // dir name, which Claude Code derives from CWD — so the cwd must carry the arm token or
+  // the run is unpriceable AFTER it has already been paid for.
+  const cwd = workerCwd(1, '/tmp/alfred-armc-run1-xyz/sandbox-b');
+  try {
+    assert.ok(
+      cwd.includes(`exp2-${runProjectSlug(1)}-`),
+      `cwd ${cwd} carries no exp2-${runProjectSlug(1)}- token, so priceRun finds 0 transcripts`,
+    );
+  } finally {
+    // The fallback branch makes a symlink. Removed here rather than left for the operator,
+    // because after #30 a leftover with this exact name shape is indistinguishable from a
+    // real run's evidence — the hazard memory already records for alfred-armc-run*.
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test('a worker past the wall cap is killed rather than waited on', async () => {
+  // The cap fires on the POLLER, not on the process exiting by itself. A spawn that only
+  // awaited the child would let a hung worker run past 25 minutes unbounded — §2.8's
+  // recorded failure, in a different place.
+  const signals = [];
+  const outcome = await pollWorker({
+    pid: 4242,
+    wallCapMs: 1000,
+    pollMs: 1,
+    // Never finishes on its own, and never progresses.
+    probe: () => ({ alive: true, wallMs: 5000, cpuMs: 10 }),
+    kill: (sig) => signals.push(sig),
+  });
+  assert.ok(signals.includes('SIGTERM'), 'the wall cap did not SIGTERM the worker');
+  assert.equal(outcome.killed, true, 'a killed worker must report killed: true');
+});
+
+
+test('the clone main provisions is itself priceable — no indirection between run and price', async () => {
+  // t63 pins workerCwd in isolation. This pins the LIVE path, which is a different claim: if
+  // the default provisionRun names the clone something transcriptsFor cannot match, workerCwd
+  // falls through to its symlink fallback and the run's cost depends on Node reporting a
+  // symlinked cwd rather than the resolved target. That fallback is best-effort by
+  // construction, so the live path must never need it.
+  //
+  // The failure this guards is silent and expensive: money spent, `usd: null,
+  // transcripts: 0`, and the run does not count toward n. Measured before the fix:
+  // transcriptsFor('armA') = 1, transcriptsFor('armC1') = 0.
+  const roots = [];
+  try {
+    await main({
+      argv: ['--run', '2'],
+      at: '2026-07-30T20:00:00.000Z',
+      preflight: () => [],
+      execute: async (index, opts) => {
+        roots.push(opts.repoRoot);
+        return { index, status: 'completed', usd: 1, marker_state: 'valid', declined: true };
+      },
+    });
+    const root = roots[0];
+    assert.ok(
+      root.includes(`exp2-${runProjectSlug(2)}-`),
+      `the provisioned clone ${root} carries no exp2-${runProjectSlug(2)}- token, so priceRun ` +
+        'would find 0 transcripts for a run that spent real money',
+    );
+    assert.equal(
+      workerCwd(2, root),
+      root,
+      'workerCwd took its symlink fallback on the live path — the worker would run somewhere ' +
+        'other than the clone the preflight checked and the marker is read from',
+    );
+  } finally {
+    cleanClones(roots);
+  }
+});
+
+test('cleanClones actually removes the clones it is given, and refuses anything unmarked', async () => {
+  // MEASURED, not hypothetical: renaming the run directory to carry the pricing token turned
+  // this helper's name filter into a no-op, and 59 provisioned clones (≈25 MB) leaked in one
+  // session before anyone counted directories. #55 found a 146-clone leak the same way — by
+  // counting, because a leak produces no failing test.
+  //
+  // The filter is now the fixture MARKER rather than a name, for two reasons. It survives the
+  // next rename, and it is the same guard `provision --replace` already uses, so there is one
+  // definition of "a tree this code created" instead of two that drift.
+  const { provision } = await import('../lib/fixture.mjs');
+  const into = await mkdtemp(join(tmpdir(), 'exp2-armC9-cleanclones-'));
+  const { repo } = await provision('sandbox-b', { into, replace: true });
+  assert.ok(existsSync(repo));
+  cleanClones([repo]);
+  assert.ok(!existsSync(into), `cleanClones left ${into} on disk — every test using it leaks`);
+
+  // And it must not delete a directory it did not create. `dirname` climbs one level, so a
+  // wrong root reaches real work.
+  const unmarked = await mkdtemp(join(tmpdir(), 'exp2-armC9-notafixture-'));
+  const inner = join(unmarked, 'sandbox-b');
+  mkdirSync(inner, { recursive: true });
+  cleanClones([inner]);
+  assert.ok(existsSync(unmarked), 'cleanClones deleted a tree carrying no fixture marker');
+  rmSync(unmarked, { recursive: true, force: true });
+});
+
+test('an exited worker reports no stall, so a completed run is not recorded as killed', async () => {
+  // MEASURED against the stub worker: a clean exit came back `sinceProgressMs: 5000` because
+  // the counter kept accruing from the last CPU movement. executeRun reads that field into
+  // decideKill, and decideKill's stall branch is an INFERENCE DRAWN FROM SILENCE — valid for a
+  // live worker, meaningless for one that has already exited. Its own end is the fact.
+  //
+  // The consequence is a mislabelled record: `status: 'killed'` with `kill.cause: 'stall'` on a
+  // run nothing killed. That inverts property 3 — the record must say what happened.
+  const outcome = await pollWorker({
+    pid: 1,
+    wallCapMs: 60_000,
+    pollMs: 1,
+    probe: (() => {
+      let n = 0;
+      // CPU frozen at 5ms throughout, then the process exits on its own.
+      return () => (++n < 4 ? { alive: true, wallMs: n * 1000, cpuMs: 5 } : { alive: false, wallMs: 4000, exit: 0 });
+    })(),
+    kill: () => assert.fail('an exited worker must not be signalled'),
+  });
+  assert.equal(outcome.killed, false);
+  assert.equal(outcome.exit, 0, 'the exit status is the fact an exited worker carries');
+  assert.equal(
+    outcome.sinceProgressMs,
+    0,
+    'an exited worker reported a stall window, which decideKill turns into a spurious stall kill',
+  );
+});
+
+test('a worker writing more than a pipe buffer is not deadlocked by the launcher', async () => {
+  // MEASURED: with stdio 'pipe' and nothing draining, a stub worker emitting 200 KB never
+  // exited — still running at 25 s. Arm C's worker runs with `--output-format json`, whose
+  // payload is far past the 64 KB pipe buffer, so EVERY run would have blocked on a full pipe
+  // until the wall cap fired. The kill switch would have masked it as a slow topology and the
+  // arm would have been scored on it.
+  //
+  // The log lands OUTSIDE the clone. The experiment is scored on the working-tree diff, so a
+  // worker.log inside the sandbox would be read as delivered work.
+  const { provision } = await import('../lib/fixture.mjs');
+  const into = await mkdtemp(join(tmpdir(), 'exp2-armC9-pipe-'));
+  const { repo } = await provision('sandbox-b', { into, replace: true });
+  const bin = join(into, 'bin');
+  mkdirSync(bin, { recursive: true });
+  writeFileSync(join(bin, 'claude'), "#!/bin/bash\npython3 -c \"print('x'*200000)\"\nexit 0\n");
+  chmodSync(join(bin, 'claude'), 0o755);
+  try {
+    const outcome = await spawnWorker(workerArgv({ prompt: 'x', model: 'm' }), {
+      repoRoot: repo,
+      index: 9,
+      env: { ...process.env, PATH: `${bin}:${process.env.PATH}` },
+      pollMs: 50,
+      wallCapMs: 15_000,
+    });
+    assert.equal(outcome.killed, false, 'the worker was killed by the wall cap — it deadlocked on a full pipe');
+    assert.ok(outcome.log, 'no log path was reported, so the worker output is unreadable');
+    assert.ok(!outcome.log.startsWith(repo), `the log ${outcome.log} sits inside the scored clone`);
+    assert.ok(statSync(outcome.log).size > 100_000, 'the log did not capture the worker output');
+  } finally {
+    cleanClones([repo]);
+  }
+});
+
+test('a worker that never launches rejects, rather than resolving as a completed run', async () => {
+  // MEASURED with a PATH holding no `claude`: spawnWorker resolved
+  // `{killed: false, exit: null}` — a COMPLETED RUN — and then crashed the process with an
+  // unhandled 'error' event. Both halves are wrong, and the first is the dangerous one.
+  //
+  // `spawn` reports ENOENT asynchronously, so the pid is undefined and pollWorker's first probe
+  // sees a dead process, which is indistinguishable from a worker that finished. Property 4
+  // says a cost figure never travels without a delivery outcome; this produces the inverse — a
+  // delivery outcome of "completed" for a run that never started, priced `usd: null`, which
+  // `countsTowardN` would then have to reject on cost alone.
+  //
+  // A rejection is the honest answer: main's refusal path already exists and exits non-zero.
+  const root = mkdtempSync(join(tmpdir(), 'exp2-armC9-enoent-'));
+  try {
+    await assert.rejects(
+      () =>
+        spawnWorker(workerArgv({ prompt: 'x', model: 'm' }), {
+          repoRoot: root,
+          index: 9,
+          pollMs: 50,
+          // No `claude` anywhere on this PATH.
+          env: { PATH: '/nonexistent-bin' },
+        }),
+      (err) => {
+        assert.match(err.message, /claude|ENOENT|launch/i, `unexpected rejection: ${err.message}`);
+        return true;
+      },
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('pollWorker refuses a pid that never existed, rather than reporting a finished worker', async () => {
+  // SPLIT OUT OF t69 DELIBERATELY. t69 passes with this guard deleted, because spawnWorker's own
+  // early return catches the same case one layer up — so folding both into one pass boolean would
+  // make this half unfalsifiable and I would not know which proposition the green covered.
+  //
+  // The claim here is narrower and belongs to pollWorker alone: `ps -p undefined` exits non-zero,
+  // defaultProbe reads a failed probe as `alive: false`, and this loop would report that as a
+  // worker that finished. Any future caller — a watcher, a resumed run — hits it the same way.
+  for (const pid of [undefined, null, 0, -1, '4242']) {
+    await assert.rejects(
+      () => pollWorker({ pid, pollMs: 1 }),
+      /needs a real pid/,
+      `pollWorker accepted pid ${JSON.stringify(pid)}`,
+    );
+  }
+});
+
+test('each run writes its own worker log, so re-running one does not overwrite the last', async () => {
+  // `$TMPDIR/armC1-worker.log` is a FIXED path, so `--run 1` twice silently replaces the first
+  // run's output. The transcript is the cost source, not this log — but the log holds the
+  // worker's own `--output-format json` payload, which is the disagreement detector the model
+  // reconciliation reads. Overwriting evidence quietly is the failure this whole section exists
+  // to stop, and it costs one directory to avoid.
+  //
+  // Alongside the clone, never inside it: the clone's working-tree diff IS the delivered work.
+  const { provision } = await import('../lib/fixture.mjs');
+  const roots = [];
+  const logs = [];
+  try {
+    for (const attempt of [1, 2]) {
+      const into = await mkdtemp(join(tmpdir(), `exp2-armC9-log${attempt}-`));
+      const { repo } = await provision('sandbox-b', { into, replace: true });
+      roots.push(repo);
+      const bin = join(into, 'bin');
+      mkdirSync(bin, { recursive: true });
+      writeFileSync(join(bin, 'claude'), `#!/bin/bash\necho attempt-${attempt}\nexit 0\n`);
+      chmodSync(join(bin, 'claude'), 0o755);
+      const outcome = await spawnWorker(workerArgv({ prompt: 'x', model: 'm' }), {
+        repoRoot: repo,
+        index: 9,
+        pollMs: 50,
+        env: { ...process.env, PATH: `${bin}:${process.env.PATH}` },
+      });
+      logs.push(outcome.log);
+      assert.ok(!outcome.log.startsWith(repo), `the log ${outcome.log} sits inside the scored clone`);
+    }
+    assert.notEqual(logs[0], logs[1], `both runs wrote the same log path ${logs[0]}`);
+    assert.match(readFileSync(logs[0], 'utf8'), /attempt-1/, "run 1's log was overwritten by run 2");
+    assert.match(readFileSync(logs[1], 'utf8'), /attempt-2/);
+  } finally {
+    cleanClones(roots);
+  }
+});
+
+// The pass bar's other half. §4.1 is a CONJUNCTION — "declined AND filed a VALID marker" —
+// so a contract the worker can follow to the letter and still score `invalid` makes that
+// clause unreachable, and an unreachable clause reads exactly like a clause nobody tripped.
+// That is #55's "a check that cannot pass is worse than no check", one layer out.
+//
+// Asserting `composePrompt` mentions the path, or that both modules read REASONS, is the
+// SHARED-SOURCE ARGUMENT and it does not cover what breaks: the envelope keys and a typo in
+// the example block. So this fills the literal example from the composed prompt the way a
+// compliant worker would and hands it to the real readMarker.
+test('the marker example in the worker prompt parses as valid, so §4.1 declined clause is reachable', () => {
+  const body = composePrompt({ repoRoot: '/x/sandbox-b', slug: 'sandbox-b' });
+  const block = body.match(/```json\n([\s\S]*?)```/)?.[1];
+  assert.ok(block, 'the composed prompt carries no JSON marker example for the worker to copy');
+
+  const codes = Object.keys(REASONS);
+  assert.ok(codes.length > 0);
+  for (const code of codes) {
+    const filled = block
+      .replace('"<one of the codes below>"', JSON.stringify(code))
+      .replace(
+        '"<what specifically stopped you, citing files and lines>"',
+        '"api/sms.js:12 contradicts AC 3"',
+      );
+    const read = readMarker(filled);
+    assert.equal(
+      read.state,
+      'valid',
+      `a worker copying the prompt's example with reason '${code}' scores ` +
+        `${read.state}: ${read.problem ?? ''}`,
+    );
+    assert.equal(read.reason, code);
+  }
+
+  // And every code the prompt ADVERTISES is one readMarker accepts. A prompt offering a
+  // fifth code would produce a decline that scores invalid through no fault of the worker.
+  const advertised = [...body.matchAll(/^ {2}- `([a-z-]+)` —/gm)].map((m) => m[1]);
+  assert.deepEqual(advertised.sort(), codes.slice().sort());
+});
+
