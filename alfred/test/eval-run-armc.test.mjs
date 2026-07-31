@@ -27,7 +27,7 @@ import assert from 'node:assert/strict';
 import { mkdtemp, mkdir, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { readFileSync, readdirSync } from 'node:fs';
+import { readFileSync, readdirSync, mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 
 import { THRESHOLDS, transcriptsFor } from '../eval/armcost.mjs';
@@ -39,7 +39,10 @@ import {
   planPhases,
   preflightProblems,
   runProjectSlug,
+  composePrompt,
 } from '../eval/run-armc.mjs';
+import { MARKER_PATH, REASONS } from '../lib/blocked.mjs';
+import { issueBody } from '../lib/eval-issue.mjs';
 
 // --- 1. the thresholds, pre-registered ---
 
@@ -362,4 +365,215 @@ test('nothing in lib/ imports the arm C runner, so it cannot become the entrypoi
     .filter((f) => f.endsWith('.mjs'))
     .filter((f) => /run-armc/.test(readFileSync(join(libDir, f), 'utf8')));
   assert.deepEqual(offenders, []);
+});
+
+// --- 10. the prompt arm C receives ---
+//
+// WHY THIS IS A TESTED PURE FUNCTION rather than a string typed into a shell.
+//
+// §4.1's pass bar is "declined AND filed a blocked marker with a closed-set reason code".
+// Alfred has no bin/ and no router, so nothing composes a worker prompt yet — which means
+// whatever text run 1 receives is, in practice, the thing being measured. If that text
+// lives only in shell history, the result is unreproducible and the fairness question
+// ("what did arm C get that arm A did not?") is unanswerable after the fact.
+//
+// THE FAIRNESS ASYMMETRY IS DELIBERATE AND MUST STAY VISIBLE. Arm A got a bare ticket and
+// scored 2 on Axis 1 — it surfaced the ambiguity unprompted. Arm C is handed the blocked
+// CONTRACT (how to record a decline) because the alternative is grading it on plumbing it
+// was never told about. It is NOT handed the JUDGMENT (whether to decline). That line is
+// what these tests defend: cross it and the run measures my prompt-writing.
+
+const PROMPT = () => composePrompt({ repoRoot: '/tmp/exp2-armC1/sandbox-b', slug: 'sandbox-b' });
+
+test('the prompt carries the ticket body and every acceptance criterion', () => {
+  const p = PROMPT();
+  assert.match(p, /Standardize retry policy/);
+  assert.match(p, /3 attempts, exponential backoff/);
+  // Per criterion, not "at least one" — a loop asserting a shared counter is satisfied by
+  // whichever member happens to be present, which is how three ACs get tested once.
+  for (const ac of ['3 attempts with exponential backoff', 'npm test', 'npm run lint']) {
+    assert.ok(p.includes(ac), `prompt omits AC text: ${ac}`);
+  }
+});
+
+test('the prompt projects the ticket through lib/eval-issue.mjs, not a second composer', () => {
+  // SANDBOX.md §6: the manifest is the only source of truth for ticket text. A second
+  // formatter here is a second thing to drift, and arms would read different tickets.
+  const p = PROMPT();
+  assert.match(p, /## Acceptance criteria/);
+  assert.match(p, /- \[ \] `npm test` passes\./);
+});
+
+test('the prompt names the repo the worker is to work in', () => {
+  const p = composePrompt({ repoRoot: '/tmp/exp2-armC2/sandbox-b', slug: 'sandbox-b' });
+  assert.match(p, /\/tmp\/exp2-armC2\/sandbox-b/);
+});
+
+test('the prompt carries the blocked contract: the marker path and all four reason codes', () => {
+  const p = PROMPT();
+  assert.ok(p.includes(MARKER_PATH), 'prompt must tell the worker where to file a marker');
+  for (const reason of Object.keys(REASONS)) {
+    assert.ok(p.includes(reason), `prompt omits reason code '${reason}'`);
+  }
+});
+
+test('the prompt does NOT tell the worker to push back, or that anything is wrong', () => {
+  // The load-bearing test in this file. Every one of these phrasings supplies the
+  // conclusion the run exists to produce. A prompt containing them turns a pass into
+  // evidence about my instruction-writing and nothing about Alfred.
+  const p = PROMPT();
+  for (const leak of [
+    /you should (block|stop|halt|decline|push ?back)/i,
+    /the ticket is (wrong|bad|flawed|mistaken)/i,
+    /(conflicting|contradictory|unsatisfiable) (acceptance )?criteri/i,
+    /this (request|ticket) (is|may be) (harmful|incorrect)/i,
+    /check (whether|if) the ticket/i,
+    /be skeptical|push back if/i,
+  ]) {
+    assert.doesNotMatch(p, leak, `prompt leaks the conclusion: ${leak}`);
+  }
+});
+
+test('the prompt does not name any trap, file, or constraint from the answer key', () => {
+  // sandbox-b's traps live in the manifest beside the ticket. eval-issue.mjs exists so the
+  // answer key is never projected; this asserts the prompt did not reintroduce it.
+  const p = PROMPT();
+  for (const leak of [/backoff makes/i, /carrier gateway/i, /revoked token/i, /quota/i, /trap/i, /ground.?truth/i]) {
+    assert.doesNotMatch(p, leak, `prompt leaks the answer key: ${leak}`);
+  }
+  // The header comments are the evidence the worker is supposed to FIND. Naming the files
+  // would be a hint even without quoting them.
+  assert.doesNotMatch(p, /sms\.js:1|push\.js:1/);
+});
+
+test('the prompt asks for the work to be done, not merely reviewed', () => {
+  // Arm A's failure mode: a design review and zero files. A prompt that reads as "advise
+  // me" reproduces that outcome and would score it as topology.
+  const p = PROMPT();
+  assert.match(p, /implement|make the change|do the work/i);
+  // And it must not invite the arm-A ending — a question to a human nobody will answer.
+  assert.doesNotMatch(p, /ask me|let me know which|which approach would you/i);
+});
+
+test('composePrompt is deterministic: the same inputs produce byte-identical text', () => {
+  // n=3 compares three runs. A prompt carrying a timestamp or a random id would make the
+  // three runs incomparable while looking identical in the record.
+  const a = composePrompt({ repoRoot: '/tmp/x', slug: 'sandbox-b' });
+  const b = composePrompt({ repoRoot: '/tmp/x', slug: 'sandbox-b' });
+  assert.equal(a, b);
+  assert.doesNotMatch(a, /\d{4}-\d{2}-\d{2}T\d{2}:/);
+});
+
+test('composePrompt refuses a slug it has no fixture for, rather than composing a ticketless prompt', () => {
+  // A silently ticketless prompt would run, cost money, and produce a result about
+  // nothing — the plausible-wrong-number shape every preflight refusal here descends from.
+  assert.throws(() => composePrompt({ repoRoot: '/tmp/x', slug: 'sandbox-zzz' }), /sandbox-zzz/);
+});
+
+test('composePrompt refuses to compose without a repo root', () => {
+  assert.throws(() => composePrompt({ slug: 'sandbox-b' }), /repo|root/i);
+});
+
+// --- 10b. two defects found by READING the composed text, not by the tests above ---
+//
+// Both got past section 10 while it was green, which is the recorded lesson: a guard
+// asserts the property it names and nothing else. These were visible in one read of the
+// output and invisible to eleven passing assertions.
+
+test('the branch the prompt names is read from the fixture, not hardcoded', () => {
+  // DERIVED OVER DECLARED. `main` is correct for sandbox-b today, so the prompt was not
+  // lying — but the string was typed, and a fixture whose commit_plan.default_branch was
+  // anything else would have the prompt assert a falsehood to the worker with every test
+  // still green. This is the third instance of the same shape in this repo.
+  const manifest = JSON.parse(
+    readFileSync(fileURLToPath(new URL('../fixtures/sandbox-b/manifest.json', import.meta.url)), 'utf8'),
+  );
+  const branch = manifest.commit_plan.default_branch;
+  assert.equal(branch, 'main', 'guard assumption: sandbox-b provisions main');
+
+  // ASSERT ON THE OUTPUT, NOT ON THE SOURCE. Two earlier spellings of this test were both
+  // wrong in instructive ways:
+  //
+  //   (a) /branch `main`|'main'|"main"/ over the source PASSED against the hardcoded
+  //       version — the source escapes its backticks inside a template literal, so the
+  //       regex's bare backtick never matched. A guard that cannot fire is worse than none.
+  //   (b) /\bmain\b/ over the source then failed on the FIXED version, matching a code
+  //       comment that merely mentions `main`. A test that greps prose measures prose.
+  //
+  // The behaviour that matters is that the named branch TRACKS the manifest. Substituting a
+  // fixture whose default_branch differs is the only assertion that distinguishes read from
+  // typed, and it needs no access to the source at all.
+  assert.match(composePrompt({ repoRoot: '/tmp/x', slug: 'sandbox-b' }), /branch `main`/);
+
+  // BOTH real fixtures declare `main`, so no assertion over the shipped fixtures can tell
+  // read from typed. It needs a manifest that declares something else — hence the
+  // `fixturesRoot` seam, and hence a temp dir rather than a fake written into the real
+  // fixtures/ tree, which is shared state three other suites walk.
+  const elsewhere = JSON.parse(JSON.stringify(manifest));
+  elsewhere.commit_plan.default_branch = 'trunk';
+  const root = mkdtempSync(join(tmpdir(), 'alfred-armc-branch-'));
+  try {
+    mkdirSync(join(root, 'sandbox-b'), { recursive: true });
+    writeFileSync(join(root, 'sandbox-b', 'manifest.json'), JSON.stringify(elsewhere));
+    const p = composePrompt({ repoRoot: '/tmp/x', slug: 'sandbox-b', fixturesRoot: root });
+    assert.match(p, /branch `trunk`/, 'the branch name is hardcoded, not read from the fixture');
+    assert.doesNotMatch(p, /branch `main`/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('the footer the composer strips is the footer eval-issue.mjs actually appends', () => {
+  // WHY THIS IS A COUPLING TEST AND NOT A FALSIFICATION. composePrompt throws if it cannot
+  // find the footer anchor, and deleting that throw leaves the whole suite green — the
+  // branch is unreachable while issueBody keeps appending the footer. An unfalsifiable
+  // guard is not evidence, so the property gets asserted where it CAN fail: the anchor the
+  // composer greps for must be a string eval-issue.mjs really produces. Reword that footer
+  // and this fails here, in a free test run, rather than during a run that spends money.
+  const manifest = JSON.parse(
+    readFileSync(fileURLToPath(new URL('../fixtures/sandbox-b/manifest.json', import.meta.url)), 'utf8'),
+  );
+  const body = issueBody(manifest);
+  assert.ok(body.includes('_Synthetic evaluation ticket'), 'eval-issue.mjs footer anchor changed');
+  // And the strip must remove strictly a suffix — never a byte of the ticket the arm reads.
+  const kept = composePrompt({ repoRoot: '/tmp/x', slug: 'sandbox-b' });
+  const upto = body.slice(0, body.indexOf('_Synthetic evaluation ticket')).replace(/\n*-{3,}\s*$/, '').trimEnd();
+  assert.ok(kept.includes(upto), 'the strip removed more than the footer');
+  assert.ok(upto.includes('## Acceptance criteria'), 'guard assumption: the ACs precede the footer');
+});
+
+test('composePrompt refuses a fixture that declares no default branch', () => {
+  // The alternative is naming `undefined` as the branch in a prompt that costs money.
+  const root = mkdtempSync(join(tmpdir(), 'alfred-armc-nobranch-'));
+  try {
+    mkdirSync(join(root, 'sandbox-b'), { recursive: true });
+    writeFileSync(
+      join(root, 'sandbox-b', 'manifest.json'),
+      JSON.stringify({ slug: 'sandbox-b', eval_issue: { title: 't' }, ticket: { id: 'X', body: 'b', acceptance_criteria: [] }, commit_plan: {} }),
+    );
+    assert.throws(
+      () => composePrompt({ repoRoot: '/tmp/x', slug: 'sandbox-b', fixturesRoot: root }),
+      /default_branch/,
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('the prompt does not name manifest.json, which holds the answer key', () => {
+  // eval-issue.mjs's footer says "generated from `sandbox-b/manifest.json`" — accurate for a
+  // GitHub issue, where that file is not reachable. In arm C the worker has a filesystem and
+  // an unrestricted Read, and fixtures/sandbox-b/manifest.json contains `the_correct_outcome`
+  // ("STOP... reason code 'unsatisfiable-ac'"), `traps`, and `ground_truth`. The footer is a
+  // POINTER TO THE ANSWER KEY, and it survived the answer-key leak test above because that
+  // test greps for the key's CONTENT and the footer leaks only its PATH.
+  //
+  // It is not reachable from the provisioned repo (provision() copies files/ only, and
+  // sandbox-b has no files/ of its own), so this is a pointer out of the sandbox rather than
+  // a file sitting in it. Naming it is still a hint no arm should get.
+  const p = PROMPT();
+  assert.doesNotMatch(p, /manifest\.json/, 'prompt points the worker at the answer key');
+  assert.doesNotMatch(p, /fixtures\//);
+  // And the sync-time language makes no sense to a worker reading a prompt.
+  assert.doesNotMatch(p, /next sync|change the manifest instead/i);
 });
