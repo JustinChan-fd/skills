@@ -20,10 +20,14 @@ import { fileURLToPath } from 'node:url';
 
 const DEFAULT_PROJECTS_DIR = '/Users/206618626@bwt3.com/.claude/projects';
 
-const ROUTING = fileURLToPath(new URL('../../harness-core/config/routing.json', import.meta.url));
+// #59: rates come from Alfred's own decided table. See priceByModel for why this is not
+// the drift the header warns about — the two tables encode different DECISIONS about the
+// sonnet-5 rate, so "reach upstream to avoid a copy" priced arm C at the introductory
+// rate the project had explicitly chosen against.
+const PRICES = fileURLToPath(new URL('../config/prices.json', import.meta.url));
 
-function routing() {
-  return JSON.parse(readFileSync(ROUTING, 'utf8'));
+function priceTable() {
+  return JSON.parse(readFileSync(PRICES, 'utf8'));
 }
 
 // PRE-REGISTERED KILL THRESHOLDS.
@@ -134,9 +138,19 @@ export function parseEtimeMs(raw) {
   return secs * 1000;
 }
 
-function normalize(model) {
-  return String(model ?? '').replace(/-\d{8}$/, '');
-}
+// One normalizer, imported, not a third copy.
+//
+// This was `String(model).replace(/-\d{8}$/, '')` — dates only. So `anthropic.claude-sonnet-5`,
+// the id form the gateway and the worker JSON both carry, missed every row in the table and
+// came back `unpriced`. It did not surface on run 1 because harness-core's collector happens
+// to emit the bare id, which is exactly the mocked-seam shape: the input the fixtures chose
+// is the one input on which the bug is invisible.
+//
+// Task #38 already removed two copies of this logic for drifting. `lib/prices.mjs` exports
+// the full version — prefix, `-vN(:N)`, date — and eval/ may import lib/ (only the reverse
+// is forbidden, per test/isolation.test.mjs). A private copy here would be that same drift
+// reintroduced in the file whose whole job is to be believed about money.
+import { normalizeModelId as normalize } from '../lib/prices.mjs';
 
 // Maps the collector's direction keys onto the price table's columns.
 //
@@ -167,15 +181,36 @@ function tokensFor(counts, keys) {
 
 // Prices a collector `by_model` map. Returns per-model dollars, a total, the table
 // version, and the ids it could not price.
-export function priceByModel(byModel, { config = routing() } = {}) {
-  const table = config.model_prices_usd_per_mtok ?? {};
-  // `price_table.version` — the stamp that makes a figure re-priceable when rates
-  // change. Read from the file's real shape rather than guessed: an 'unknown' fallback
-  // here would produce cost numbers nobody can re-derive later.
-  const version = config.price_table?.version;
+//
+// #59: THE RATES COME FROM ALFRED'S OWN `config/prices.json`, not from harness-core's
+// routing.json. The header above says reaching upstream avoids a second copy that could
+// drift — true for the COLLECTOR, wrong for the RATES, because the two tables encode
+// different decisions and had already diverged:
+//
+//   harness-core  claude-sonnet-5  in 2 / out 10   + introductory_until 2026-08-31
+//   alfred        claude-sonnet-5  in 3 / out 15
+//
+// The $3/$15 choice is deliberate (task #38): it keeps every figure comparable to arm
+// B's $18.483 and valid past the step-up, at the cost of reporting ~1.5x above actual
+// billing until then. Reading upstream inverted that bias. Measured on arm C run 1 —
+// recorded $1.974173, actual $2.961259, which is the CLI's own self-reported
+// total_cost_usd to seven decimals.
+//
+// It is not only a reporting bug. `decideKill` compares THIS figure to the $8/run cap,
+// so a 1.5x understatement made the real ceiling $12/run and $30 total.
+//
+// `config` stays injectable so a test can price against a known table without touching
+// either file on disk.
+export function priceByModel(byModel, { config = priceTable() } = {}) {
+  const table = config.models ?? config.model_prices_usd_per_mtok ?? {};
+  // The stamp that makes a figure re-priceable when rates change. Read from the file's
+  // real shape rather than guessed: an 'unknown' fallback here would produce cost
+  // numbers nobody can re-derive later. Accepts either file's shape — Alfred's table
+  // versions at the top level, harness-core's under `price_table`.
+  const version = config.version ?? config.price_table?.version;
   if (!version) {
     throw new Error(
-      `no price_table.version in ${ROUTING}: a cost figure with no table version cannot ` +
+      `no version in ${PRICES}: a cost figure with no table version cannot ` +
         'be re-priced, and rates change. Refusing to report an unstamped number.',
     );
   }

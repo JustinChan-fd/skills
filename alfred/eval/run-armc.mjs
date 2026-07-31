@@ -87,7 +87,16 @@ export function countsTowardN(run = {}) {
   // Belt to the status braces. A `completed` record whose pricing threw has no number to
   // average, and letting it through computes a mean over fewer points than the
   // denominator claims — the §2.8 failure shape in miniature.
-  return Number.isFinite(run.usd);
+  if (!Number.isFinite(run.usd)) return false;
+  // #59: and a finite figure is not automatically a measured one. `priceByModel` names an
+  // unresolvable model rather than zeroing it, precisely so an unpriced run cannot read as
+  // free — but a run where nothing resolved totals 0, which is finite, so this admitted it
+  // as a $0 data point. That is worse than a missing point: the phantom has a value, and
+  // the value is the most flattering one available. Cheapness is anti-evidence here.
+  //
+  // NOT a cost test. A run may legitimately cost $0.00 and count; what it may not do is
+  // count while carrying models whose rate nobody knows.
+  return !(run.unpriced?.length > 0);
 }
 
 // ---------------------------------------------------------------------------

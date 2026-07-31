@@ -271,3 +271,105 @@ test('a non-jsonl file in a subagents dir is not priced', async () => {
   assert.ok(found[0].endsWith('.jsonl'));
   await rm(root, { recursive: true, force: true });
 });
+
+// --- 4. the price table this file reads is ALFRED'S decided table, not the upstream one ---
+//
+// #59, found by comparing a live arm C figure against the CLI's own total. The run
+// recorded usd 1.974173; Alfred's config/prices.json over the same usage computes
+// 2.961259, which matches the CLI's self-reported total_cost_usd (2.96125875) to seven
+// decimals. Ratio exactly 1.5 — the $2/$10 introductory sonnet-5 rate against the
+// $3/$15 decided one.
+//
+// WHY 25 GREEN TESTS ABOVE DID NOT SEE IT: every one of them prices `claude-sonnet-4-6`,
+// whose rate is $3/$15 in BOTH tables because it has no introductory period. The tests
+// agreed with the wrong table on the one model where the two tables agree. The seat
+// Alfred actually runs — sonnet-5 — is the only row where they differ, and no test
+// priced it. That is the mocked-seam shape one level out: the fixture chose the input
+// on which the defect is invisible.
+//
+// Two propositions, deliberately separate, because a single assertion on the dollar
+// figure would pass if the reporting were fixed and the KILL SWITCH left reading the
+// old table:
+//
+//   4a. the reported figure uses the decided rate
+//   4b. the kill threshold is compared against that same figure
+//
+// 4a alone is a reporting bug. 4a + 4b is a spend-control bug: the $8/run cap enforced
+// against a 1.5x-understated number is really a $12 cap.
+
+import { readFileSync as _readFileSync } from 'node:fs';
+
+const ALFRED_TABLE = JSON.parse(
+  _readFileSync(new URL('../config/prices.json', import.meta.url), 'utf8'),
+);
+
+// Run 1's real usage, from docs/exp2-evidence/armC1-worker.json. Real counts rather
+// than round numbers so the assertion is against a figure that was actually billed.
+const RUN1_USAGE = Object.freeze({
+  input: 160_302,
+  output: 71_615,
+  cache_read: 3_363_605,
+  cache_creation: 105_879,
+});
+
+test('sonnet-5 is priced at the decided $3/$15, not the introductory $2/$10', () => {
+  const { by_model, price_table_version } = priceByModel({ 'claude-sonnet-5': RUN1_USAGE });
+  const rates = ALFRED_TABLE.models['claude-sonnet-5'];
+  assert.equal(rates.in, 3, 'guard: the decided table must carry the $3 input rate');
+
+  const expected =
+    (RUN1_USAGE.input * rates.in +
+      RUN1_USAGE.output * rates.out +
+      RUN1_USAGE.cache_read * rates.cache_read +
+      RUN1_USAGE.cache_creation * rates.cache_write) /
+    1e6;
+
+  // The CLI's own figure for this exact run, to seven decimals. An independent oracle:
+  // it is not computed from either table.
+  assert.equal(Math.round(expected * 1e6) / 1e6, 2.961259);
+  assert.equal(
+    by_model['claude-sonnet-5'].usd.toFixed(6),
+    expected.toFixed(6),
+    'armcost priced sonnet-5 off a different table than config/prices.json',
+  );
+  assert.equal(price_table_version, ALFRED_TABLE.version);
+});
+
+test('the run spend cap is enforced against the decided rate, so $8 means $8', () => {
+  // Usage scaled so the DECIDED rate lands just over the $8 cap and the introductory
+  // rate lands just under it. Reading the wrong table turns this kill into a pass.
+  const scale = 2.9;
+  const usage = Object.fromEntries(
+    Object.entries(RUN1_USAGE).map(([k, v]) => [k, Math.round(v * scale)]),
+  );
+  const { total_usd } = priceByModel({ 'claude-sonnet-5': usage });
+  const cap = THRESHOLDS.armC.spendCapUsd;
+
+  assert.ok(total_usd > cap, `priced at $${total_usd.toFixed(2)}, which must exceed the $${cap} cap`);
+  assert.ok(total_usd / 1.5 < cap, 'guard: the introductory rate must NOT trip this cap');
+  assert.equal(decideKill({ usd: total_usd, spendCapUsd: cap, sinceProgressMs: 0, stallMs: 1e9 }).cause, 'spend');
+});
+
+// --- 5. #59, part two: the gateway id form, and one normalizer instead of three ---
+//
+// The collector happens to emit bare `claude-sonnet-5`, so this is not a demonstrated
+// live-path break — run 1 priced non-null. It is the same shape of defect one level out:
+// a table lookup that works only for the spelling the fixtures use. `lib/prices.mjs`
+// already exports a normalizer that strips the prefix, the `-vN` suffix AND the date, and
+// eval/ is allowed to import lib/ (only the reverse is forbidden). A third private copy
+// here is the two-copies drift of task #38 reintroduced.
+
+test('gateway-prefixed and versioned ids price the same as the bare id', () => {
+  const usage = { input: 1_000_000, output: 1_000_000 };
+  const bare = priceByModel({ 'claude-sonnet-5': usage });
+
+  for (const id of [
+    'anthropic.claude-sonnet-5',
+    'anthropic.claude-sonnet-5-v1:0',
+    'claude-sonnet-5-20260601',
+  ]) {
+    const got = priceByModel({ [id]: usage });
+    assert.deepEqual(got.unpriced, [], `${id} did not resolve to a priced row`);
+    assert.equal(got.total_usd, bare.total_usd, `${id} priced differently from the bare id`);
+  }
+});

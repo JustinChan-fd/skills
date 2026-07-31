@@ -1544,3 +1544,25 @@ test('the marker example in the worker prompt parses as valid, so §4.1 declined
   assert.deepEqual(advertised.sort(), codes.slice().sort());
 });
 
+
+// --- 12. #59, part three: an unpriced run must not average in as $0 ---
+//
+// `priceByModel` deliberately names an unresolvable model rather than zeroing it, so the
+// kill switch keeps protecting something. `countsTowardN` then threw that away: it admits
+// any run whose `usd` is finite, and a run where NO model resolved has total_usd === 0,
+// which is finite. So the run counts — as a free one — and drags the mean down toward the
+// acceptance threshold using a figure that was never measured.
+//
+// This is the §2.8 shape the sibling test names: a denominator that claims more points
+// than it has. Here it is worse than a missing point, because the phantom point has a
+// value, and that value is the most flattering one available.
+
+test('a run whose models could not be priced does not count as a $0 run', () => {
+  assert.equal(
+    countsTowardN({ status: 'completed', usd: 0, unpriced: ['anthropic.claude-sonnet-5'] }),
+    false,
+  );
+  // A genuinely-zero run with nothing unpriced is a different claim and still counts:
+  // the rule is about unmeasured cost, not about cheapness.
+  assert.equal(countsTowardN({ status: 'completed', usd: 0, unpriced: [] }), true);
+});
