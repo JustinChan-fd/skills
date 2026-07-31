@@ -49,6 +49,37 @@ export const THRESHOLDS = Object.freeze({
   totalCapUsd: 25,
   armA: Object.freeze({ spendCapUsd: 6, expectedUsd: 2, wallCapMs: 45 * 60 * 1000 }),
   armB: Object.freeze({ spendCapUsd: 18, expectedUsd: 6, wallCapMs: 90 * 60 * 1000 }),
+
+  // ARM C, decided 2026-07-30 (task #41) BEFORE arm C ran. Five numbers, and the
+  // relationships between them are the load-bearing part:
+  //
+  //   n              3. One run measures a cost; three measure whether that cost is a
+  //                  property of the topology or of the day.
+  //   spendCapUsd    $8 per run. A KILL threshold — loose enough that it never aborts a
+  //                  healthy run.
+  //   acceptMeanUsd  $4 mean. An ACCEPTANCE threshold, and deliberately HALF the kill
+  //                  cap. kill != acceptance: a run may legitimately cost $6, fail
+  //                  acceptance, and still be worth finishing for its delivery outcome.
+  //                  Collapsing these to one number would kill every run that was about
+  //                  to produce the evidence that makes its own cost figure meaningful.
+  //   totalCapUsd    $20 across all three, checked against CUMULATIVE spend. Below
+  //                  3 x $8 = $24 on purpose: a per-run cap alone permits 3x the agreed
+  //                  exposure, and $24 is not an amount anyone agreed to.
+  //   wallCapMs      25 minutes. Arm B took 24.6 for two phases; arm C is one context,
+  //                  so 25 minutes is generous for the topology being measured and short
+  //                  enough that a wedged run does not eat an afternoon.
+  //
+  // The acceptance rule is a CONJUNCTION: mean <= $4 AND (max - min) <= mean. The spread
+  // clause is what makes n=3 mean anything — $1, $2, $9 averages to $4 and "passes"
+  // while the variance exceeds the signal. A mean-only rule would accept that.
+  armC: Object.freeze({
+    n: 3,
+    spendCapUsd: 8,
+    expectedUsd: 3,
+    acceptMeanUsd: 4,
+    totalCapUsd: 20,
+    wallCapMs: 25 * 60 * 1000,
+  }),
 });
 
 // Every transcript belonging to an arm, INCLUDING its subagents'.
