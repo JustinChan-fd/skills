@@ -64,6 +64,7 @@ import {
   pollWorker,
   spawnWorker,
   workerArgv,
+  priceRun,
 } from '../eval/run-armc.mjs';
 import { MARKER_PATH, REASONS, readMarker } from '../lib/blocked.mjs';
 import { stampProblems } from '../lib/suite.mjs';
@@ -613,9 +614,18 @@ test('--run N and --all parse, and an ambiguous invocation is refused rather tha
   // loop. Refusing BOTH together matters: `--all --run 2` has two plausible readings
   // ("all, starting at 2" / "just 2") and picking one silently would spend against a plan
   // the caller did not express.
-  assert.deepEqual(parseArgv(['--run', '1']), { mode: 'run', index: 1, dryRun: false });
-  assert.deepEqual(parseArgv(['--all']), { mode: 'all', index: null, dryRun: false });
-  assert.deepEqual(parseArgv(['--run', '2', '--dry-run']), { mode: 'run', index: 2, dryRun: true });
+  // `model: null` is part of the shape, deliberately asserted by deepEqual rather than
+  // loosened to a subset match. #61 added the key, and "absent means use the declared
+  // default" is a claim worth pinning: a parseArgv that started RETURNING the default seat
+  // would put the seat id in two places, and the one that drifts is the one nobody re-reads.
+  assert.deepEqual(parseArgv(['--run', '1']), { mode: 'run', index: 1, dryRun: false, model: null });
+  assert.deepEqual(parseArgv(['--all']), { mode: 'all', index: null, dryRun: false, model: null });
+  assert.deepEqual(parseArgv(['--run', '2', '--dry-run']), {
+    mode: 'run',
+    index: 2,
+    dryRun: true,
+    model: null,
+  });
 
   assert.throws(() => parseArgv(['--all', '--run', '2']), /both|ambiguous/i);
   // No mode at all must not default to spending. A bare invocation is the likeliest
@@ -1565,4 +1575,211 @@ test('a run whose models could not be priced does not count as a $0 run', () => 
   // A genuinely-zero run with nothing unpriced is a different claim and still counts:
   // the rule is about unmeasured cost, not about cheapness.
   assert.equal(countsTowardN({ status: 'completed', usd: 0, unpriced: [] }), true);
+});
+
+// --- 13. #61: a second seat must not price itself into the first seat's figures ---
+//
+// `transcriptsFor` finds a run's transcripts by matching the project dir on `exp2-armC1-`.
+// The sonnet run's dirs are still on disk and are the evidence behind the committed
+// mean of $2.2006. An Opus run at `--run 1` would create ANOTHER `exp2-armC1-*` dir, the
+// token would match both, and the recursive walk would sum them: the Opus figure inflated
+// by the sonnet run's spend, and the sonnet baseline silently restated. One collision
+// corrupts both arms of the comparison the run exists to make.
+//
+// So the seat belongs IN the slug. Then `--run 1` under a second model is a different
+// denominator by construction rather than by remembering to move the old dirs.
+
+test('the project slug separates seats, so a second model cannot merge into the first', () => {
+  const sonnet = runProjectSlug(1, { model: 'anthropic.claude-sonnet-5' });
+  const opus = runProjectSlug(1, { model: 'anthropic.claude-opus-5' });
+
+  assert.notEqual(sonnet, opus, 'both seats would write to one project dir and be summed as one run');
+  // The committed baseline's dirs are literally `exp2-armC1-<rand>-sandbox-b`. The sonnet
+  // slug must keep matching them or the three figures in fd287be become unreadable.
+  assert.equal(sonnet, 'armC1');
+  // And the opus slug must not be a substring-match of the sonnet one, because
+  // transcriptsFor uses `includes`, not equality.
+  assert.ok(!`exp2-${sonnet}-`.includes(`exp2-${opus}-`));
+  assert.ok(!`exp2-${opus}-`.includes(`exp2-${sonnet}-`));
+});
+
+test('the default seat is the one the committed baseline was measured on', () => {
+  // No argument means sonnet-5: the three runs already priced. A default that silently
+  // became "whatever ran last" would repoint the baseline query at a different arm.
+  assert.equal(runProjectSlug(2), 'armC2');
+  assert.equal(runProjectSlug(2, {}), 'armC2');
+});
+
+test('--model reaches the CLI, because a model main cannot be told is a model nobody ran', () => {
+  // `main` accepted a `model` parameter that parseArgv had no flag for and the CLI edge
+  // never passed, so the only reachable seat was the default. The Opus run is a
+  // single-variable change against an invariant 3/3 baseline; if the variable cannot be
+  // set from the command line, the run measures the baseline again at Opus prices.
+  assert.equal(parseArgv(['--run', '1']).model, null, 'absent means "use the declared default"');
+  assert.equal(
+    parseArgv(['--run', '1', '--model', 'anthropic.claude-opus-5']).model,
+    'anthropic.claude-opus-5',
+  );
+  // An empty or missing value must refuse rather than fall back: a silent fallback spends
+  // money on the wrong seat and stamps the record with a model that never ran.
+  assert.throws(() => parseArgv(['--run', '1', '--model']), /--model/i);
+  assert.throws(() => parseArgv(['--all', '--model', '']), /--model/i);
+});
+
+test('the --model flag reaches the record stamp and the provisioned clone, not just parseArgv', async () => {
+  // Parsing a flag that main() then ignores is the mocked-seam shape again: the unit is
+  // green and the live path spends on the default seat. main() takes `model` as a parameter,
+  // so the flag has to WIN over that default — otherwise the only reachable seat is the one
+  // the signature happens to name.
+  const clones = [];
+  const record = await main({
+    argv: ['--run', '1', '--model', 'anthropic.claude-opus-5'],
+    at: '2026-07-31T06:00:00.000Z',
+    // Left at the sonnet default ON PURPOSE. If the flag does not override it, this test
+    // passes for the wrong reason and the real run prices Opus as sonnet.
+    provisionRun: async (index, opts) => {
+      clones.push({ index, slug: runProjectSlug(index, { model: opts?.model }) });
+      return '/tmp/fake-clone';
+    },
+    preflight: () => [],
+    execute: async (index, opts) => ({
+      index,
+      status: 'completed',
+      usd: 4,
+      model: opts?.model,
+      marker_state: 'valid',
+      declined: true,
+    }),
+  });
+
+  assert.equal(record.suite.model, 'anthropic.claude-opus-5', 'the record stamped a model that never ran');
+  assert.equal(record.runs[0].model, 'anthropic.claude-opus-5', 'the seat did not reach the run');
+  // And the clone lands in a seat-separated project dir, so priceRun cannot sum it with the
+  // committed sonnet baseline.
+  assert.equal(clones[0].slug, 'armC-opus-5-run1');
+});
+
+test('the LIVE default provisionRun puts a non-default seat in its own project dir', async () => {
+  // t77 proves the flag reaches provisionRun; it injects one, so it is structurally blind to
+  // whether the REAL default uses the seat when building the clone path. That default is the
+  // only code that runs when money moves, and it is where the collision would actually happen:
+  // a `exp2-armC1-*` dir under Opus merges with the committed sonnet baseline's transcripts.
+  //
+  // Same shape as #55/#56 — the injected fake stands in for exactly the wiring in question.
+  //
+  // `execute` is NOT injected, and that is the difference from t77. The real executeRun runs,
+  // so planRun and the default `spawn` wiring run with it — `spawnImpl` is the single seam,
+  // exactly as t61 established, because injecting anything above it skips the wiring in
+  // question. Only `priceOf` and `spawnImpl` are stubbed; neither can spend.
+  const roots = [];
+  const launched = [];
+  // Snapshotted BEFORE, because the assertion below is about what this run CREATES. TMPDIR
+  // already holds `exp2-armC1-*` clones from the committed sonnet runs — they are the
+  // evidence — so a bare "no such directory exists" check would fail for the wrong reason.
+  const before = new Set(readdirSync(tmpdir()));
+  try {
+    await main({
+      argv: ['--run', '1', '--model', 'anthropic.claude-opus-5'],
+      at: '2026-07-31T06:30:00.000Z',
+      preflight: () => [],
+      priceOf: async () => ({ usd: 1, transcripts: 2, unpriced: [] }),
+      spawnImpl: (argv, opts) => {
+        roots.push(opts.repoRoot);
+        launched.push(opts);
+        return { killed: false, sinceProgressMs: 0, exit: 0 };
+      },
+    });
+    const root = roots[0];
+    assert.ok(
+      root?.includes('exp2-armC-opus-5-run1-'),
+      `the live clone ${root} carries no seat token, so an Opus run would be priced into the ` +
+        'committed sonnet baseline and both figures would be wrong',
+    );
+    // The sonnet query must not see it. `transcriptsFor` matches with `includes`, so this is
+    // the assertion that actually rules out contamination.
+    assert.ok(!root.includes('exp2-armC1-'), 'the sonnet baseline query would match this clone');
+    // THE SEAT MUST REACH THE SPAWNER. Everything downstream of here — workerCwd's token, and
+    // therefore the directory Claude Code derives its project name from — is computed from
+    // this field. The three fixes above are inert defaults if the wiring drops it, which is
+    // precisely what `spawn = (argv, plan) => spawnImpl(argv, {repoRoot, index})` did.
+    assert.equal(launched[0]?.model, 'anthropic.claude-opus-5', 'the seat never reached spawnWorker');
+    // And nothing named for the sonnet baseline came into existence as a side effect. This is
+    // the mint, which is the defect; a wrong return value from workerCwd is only its symptom.
+    const minted = readdirSync(tmpdir()).filter((e) => !before.has(e) && e.includes('exp2-armC1-'));
+    assert.deepEqual(minted, [], 'the live Opus path created a sonnet-baseline directory');
+  } finally {
+    cleanClones(roots);
+  }
+});
+
+test('workerCwd keeps a non-default seat’s clone as its own cwd, and never mints the sonnet dir', () => {
+  // THE FAILURE MODE IS CREATION, not just a mismatch. `workerCwd` builds its token from
+  // `runProjectSlug(index)` with no seat, so an Opus clone does not contain `exp2-armC1-`,
+  // falls to the symlink branch, and MAKES `$TMPDIR/exp2-armC1-sandbox-b`. The worker then
+  // runs there, Claude Code names its project dir from that path, and
+  // `transcriptsFor('armC1')` sums the Opus session into the sonnet baseline committed in
+  // fd287be. Both figures wrong, no error anywhere — and the sonnet mean silently restated
+  // after it was published.
+  const tmp = mkdtempSync(join(tmpdir(), 'armc-cwd-seat-'));
+  try {
+    const root = join(tmp, 'exp2-armC-opus-5-run1-abc123', 'sandbox-b');
+    mkdirSync(root, { recursive: true });
+    assert.equal(
+      workerCwd(1, root, { tmp, model: 'anthropic.claude-opus-5' }),
+      root,
+      'the Opus clone was not recognised as already carrying its own token',
+    );
+    // The assertion that rules out contamination: nothing named for the sonnet baseline
+    // may come into existence as a side effect of running Opus.
+    assert.deepEqual(
+      readdirSync(tmp).filter((e) => e.includes('exp2-armC1-')),
+      [],
+      'workerCwd minted a sonnet-baseline directory while running Opus',
+    );
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('priceRun prices a non-default seat from its own transcripts, not the baseline’s', async () => {
+  // The most expensive of the four leaks. `priceRun` queries `runProjectSlug(index)` with no
+  // seat, so an Opus run reads the THREE COMMITTED SONNET RUNS' transcripts: it would report
+  // roughly the baseline's $2.96 having spent ~$5, and `decideKill` would compare the wrong
+  // figure to the $8 cap. A wrong cost figure is worse than a missing one — it reads as an
+  // answer, and this one reads as "Opus costs the same as sonnet".
+  const root = await mkdtemp(join(tmpdir(), 'armc-price-seat-'));
+  try {
+    // One dir per seat, both for index 1 — exactly the on-disk shape after an Opus --run 1.
+    for (const slug of ['exp2-armC1-sandbox-b', 'exp2-armC-opus-5-run1-sandbox-b']) {
+      const dir = join(root, `-Users-x-tmp-${slug}`);
+      await mkdir(dir, { recursive: true });
+      await writeFile(join(dir, 'session-1.jsonl'), '{}\n');
+    }
+    const seen = [];
+    const collect = async (files) => {
+      seen.push(...files);
+      return { by_model: {} };
+    };
+    await priceRun(1, { projectsDir: root, collect, model: 'anthropic.claude-opus-5' });
+    assert.equal(seen.length, 1, `priced ${seen.length} transcripts, so the two seats were merged`);
+    assert.ok(
+      seen[0].includes('exp2-armC-opus-5-run1-'),
+      `priced ${seen[0]}, which belongs to the sonnet baseline`,
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('the plan records the seat-separated slug, so the record names the dir that was actually used', () => {
+  // Not a pricing path — `project_slug` is what a reader uses later to FIND the transcripts a
+  // figure came from. #42 exists because arm A's $0.617 cannot be traced to a model or a run
+  // dir. A slug that names a directory the run never wrote is that same unreadability with a
+  // confident-looking value in place of a blank.
+  const plan = planRun(1, {
+    dryRun: true,
+    repoRoot: '/tmp/exp2-armC-opus-5-run1-abc/sandbox-b',
+    model: 'anthropic.claude-opus-5',
+  });
+  assert.equal(plan.project_slug, 'armC-opus-5-run1');
 });

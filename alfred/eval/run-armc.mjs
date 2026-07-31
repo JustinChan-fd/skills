@@ -69,7 +69,35 @@ import { issueBody, issueTitle } from '../lib/eval-issue.mjs';
 // The arm name `transcriptsFor` matches on. Per-RUN, not per-arm: n=3 exists to measure
 // variance BETWEEN runs, and a denominator shared across the three would report a spread
 // of zero by construction — the recursive fix pulling against itself.
-export const runProjectSlug = (index) => `armC${index}`;
+//
+// #61: AND PER-SEAT, once a second model runs. `transcriptsFor` matches the project dir on
+// the token `exp2-armC1-` with `includes`, and the sonnet run's dirs are still on disk as
+// the evidence behind the committed $2.2006 mean. An Opus run at `--run 1` would create
+// another `exp2-armC1-*` dir, the token would match both, and the recursive walk would sum
+// them — inflating the Opus figure by the sonnet run's spend AND silently restating the
+// baseline it is supposed to be compared against. One collision corrupts both arms.
+//
+// The DEFAULT SEAT IS UNSUFFIXED on purpose. Suffixing sonnet too would be tidier and would
+// repoint every baseline query at directories that do not exist, making fd287be's three
+// figures unreadable. So the declared seat keeps the name it was measured under and every
+// other seat is explicitly distinguished.
+// THE SEAT GOES BEFORE THE INDEX, and that ordering is the whole fix. The obvious shape —
+// `armC1-opus-5` — does not work, because `transcriptsFor` matches with `includes` and
+// `exp2-armC1-opus-5-` CONTAINS `exp2-armC1-`. The sonnet query would still sweep up the
+// Opus run's transcripts while the Opus query stayed clean: a one-directional collision,
+// which is the kind that looks fixed. Caught by the test asserting neither token is a
+// substring of the other, in both directions — one direction passing is not the property.
+export const SONNET_SEAT = 'anthropic.claude-sonnet-5';
+export const runProjectSlug = (index, { model = SONNET_SEAT } = {}) => {
+  if (model === SONNET_SEAT) return `armC${index}`;
+  // Strip the vendor prefix and the `claude-` noise so the dir stays readable, and keep it
+  // filesystem-safe. `opus-5` reads as a seat; a full gateway id reads as a path accident.
+  const seat = String(model)
+    .replace(/^anthropic\./, '')
+    .replace(/^claude-/, '')
+    .replace(/[^a-zA-Z0-9-]/g, '-');
+  return `armC-${seat}-run${index}`;
+};
 
 // ---------------------------------------------------------------------------
 // 2. What counts toward n.
@@ -329,8 +357,13 @@ const GH_SHIM = join(ALFRED, 'eval', 'gh-shim.sh');
 // Priced from this run's own transcripts, recursively. Returns null rather than 0 when
 // nothing is readable: a 0 reads as "free" and a null reads as "unmeasured", and the
 // difference decides whether the run counts toward n.
-export async function priceRun(index, { projectsDir = PROJECTS, collect } = {}) {
-  const files = transcriptsFor(runProjectSlug(index), { projectsDir });
+export async function priceRun(index, { projectsDir = PROJECTS, collect, model } = {}) {
+  // #61: THE SEAT IS PART OF THE QUERY, and this is the most expensive of the four places the
+  // slug is derived. Without it an Opus `--run 1` reads the THREE COMMITTED SONNET RUNS'
+  // transcripts and reports roughly the baseline's $2.96 having spent ~$5 — and `decideKill`
+  // compares that wrong figure to the $8 cap. A missing cost figure is a blank; this one is
+  // an answer, and the answer it gives is "Opus costs the same as sonnet".
+  const files = transcriptsFor(runProjectSlug(index, { model }), { projectsDir });
   if (!files.length) return { usd: null, transcripts: 0, unpriced: [] };
   const collectFromFiles =
     collect ??
@@ -432,8 +465,15 @@ export function workerEnv({ env = process.env, shimDir = SHIM_DIR } = {}) {
 // A symlink, not a move: the clone stays where provision put it (it is the evidence the run
 // is scored from) and gains a second path carrying the token. Both resolve to one tree, so
 // the marker the worker writes is the marker readRunMarker reads.
-export function workerCwd(index, repoRoot, { tmp = tmpdir() } = {}) {
-  const token = `exp2-${runProjectSlug(index)}-`;
+export function workerCwd(index, repoRoot, { tmp = tmpdir(), model } = {}) {
+  // #61: THE SEAT IS IN THE TOKEN, and here the leak CREATES the collision rather than merely
+  // mismatching. A seat-blind token does not appear in an Opus clone's path, so the fallback
+  // below runs and mints `$TMPDIR/exp2-armC1-sandbox-b` — a directory named for the sonnet
+  // baseline, which the worker then runs in, which Claude Code names its project dir from, and
+  // which `transcriptsFor('armC1')` sums into a figure that was already published. The failing
+  // assertion is on the DIRECTORY LISTING, not on the return value, because the return value
+  // being wrong is the symptom and the mint is the defect.
+  const token = `exp2-${runProjectSlug(index, { model })}-`;
 
   // THE LIVE PATH TAKES THIS BRANCH. `provisionRun` names the run directory with the token,
   // so the clone the worker gets IS the path pricing can find, and no indirection sits
@@ -544,9 +584,12 @@ function defaultProbe(pid) {
 // worker's own output is not the measurement — the transcript is.
 export function spawnWorker(
   argv,
-  { repoRoot, index, env = process.env, cwd = null, logDir = null, ...pollOpts } = {},
+  { repoRoot, index, env = process.env, cwd = null, logDir = null, model, ...pollOpts } = {},
 ) {
-  const runCwd = cwd ?? workerCwd(index, repoRoot);
+  // `model` is destructured OUT rather than left in `pollOpts` — it is not a poll option, and
+  // spreading it into pollWorker would silently make it a no-op field there instead of an
+  // argument here. The seat has to reach workerCwd or that fix is an inert default.
+  const runCwd = cwd ?? workerCwd(index, repoRoot, { model });
 
   // ALONGSIDE THE CLONE, never inside it and never at a fixed path.
   //
@@ -754,7 +797,33 @@ export function parseArgv(argv = []) {
     );
   }
 
-  if (wantsAll) return { mode: 'all', index: null, dryRun };
+  // #61: the seat, parsed here so it is refused before anything spends.
+  //
+  // `main` has always taken a `model` parameter, and parseArgv had no flag for it while the
+  // CLI edge passed nothing — so the only reachable seat was the default. A comparison run
+  // whose single variable cannot be set from the command line measures the baseline again.
+  //
+  // NULL, NOT THE DEFAULT VALUE. `parseArgv` reports what was ASKED FOR; `main` owns what
+  // the default IS. Returning the default here would put the seat id in two places, and the
+  // one that drifts is the one nobody re-reads.
+  const mAt = args.indexOf('--model');
+  let model = null;
+  if (mAt !== -1) {
+    const raw = args[mAt + 1];
+    // A missing or empty value must REFUSE, never fall back. A silent fallback spends real
+    // money on one seat and stamps the record with the other, and the record is the only
+    // thing that outlives the run.
+    if (typeof raw !== 'string' || raw.trim() === '' || raw.startsWith('--')) {
+      throw new Error(
+        `--model needs a model id, got ${JSON.stringify(raw ?? null)}. Refusing rather than falling ` +
+          'back to the default seat: a run that spends on one model and reports another is worse than ' +
+          'no run.',
+      );
+    }
+    model = raw.trim();
+  }
+
+  if (wantsAll) return { mode: 'all', index: null, dryRun, model };
 
   const raw = args[at + 1];
   const index = Number(raw);
@@ -768,7 +837,7 @@ export function parseArgv(argv = []) {
         'belongs to no measurement.',
     );
   }
-  return { mode: 'run', index, dryRun };
+  return { mode: 'run', index, dryRun, model };
 }
 
 // What has actually been SPENT, across every run including the killed ones.
@@ -793,12 +862,16 @@ export function spentSoFar(runs = []) {
 // Builds everything a run needs and spawns only when told to. `spawn` is injected so the
 // wiring is testable without paying for it, and `dryRun` is checked HERE rather than at the
 // call site so there is exactly one place the decision to spend is made.
-export function planRun(index, { spawn, dryRun = false, repoRoot, slug = 'sandbox-b', model = 'anthropic.claude-sonnet-5' } = {}) {
+export function planRun(index, { spawn, dryRun = false, repoRoot, slug = 'sandbox-b', model = SONNET_SEAT } = {}) {
   const prompt = composePrompt({ repoRoot, slug });
   const argv = workerArgv({ prompt, model });
   const plan = {
     index,
-    project_slug: runProjectSlug(index),
+    // #61: seat-aware, though nothing prices off this field. `project_slug` is how a reader
+    // later FINDS the transcripts a figure came from — #42 exists because arm A's $0.617
+    // cannot be traced to a model or a run dir. A slug naming a directory the run never wrote
+    // is that same unreadability with a confident-looking value in place of a blank.
+    project_slug: runProjectSlug(index, { model }),
     prompt,
     argv,
     model,
@@ -1020,7 +1093,7 @@ export async function main({
   model = 'anthropic.claude-sonnet-5',
   caps = THRESHOLDS.armC,
   slug = 'sandbox-b',
-  provisionRun = async (index) => {
+  provisionRun = async (index, runOpts) => {
     const { provision } = await import('../lib/fixture.mjs');
     // A per-run directory, so the three clones cannot be the same path even by accident.
     //
@@ -1030,7 +1103,15 @@ export async function main({
     // was `alfred-armc-run{N}-`, which matches nothing: transcriptsFor('armA') = 1,
     // transcriptsFor('armC1') = 0. A live run would have spent real money, reported
     // `usd: null, transcripts: 0`, and NOT COUNTED TOWARD n.
-    const into = await mkdtemp(join(tmpdir(), `exp2-${runProjectSlug(index)}-`));
+    // #61: the SEAT is part of the token, taken from runOpts rather than from this closure.
+    // t77 injects provisionRun, so it cannot see whether this default — the only one that
+    // runs when money moves — uses the seat at all. Without it an Opus `--run 1` writes to
+    // `exp2-armC1-*` and `transcriptsFor('armC1')` sums it with the committed sonnet
+    // baseline: the Opus figure inflated, the sonnet mean silently restated, and no error
+    // anywhere. The same injected-fake blindness as #55 and #56.
+    const into = await mkdtemp(
+      join(tmpdir(), `exp2-${runProjectSlug(index, { model: runOpts?.model })}-`),
+    );
     const { repo } = await provision(slug, { into, replace: true });
     return repo;
   },
@@ -1053,7 +1134,11 @@ export async function main({
   // spawn, so `node eval/run-armc.mjs --run 1` reached planRun and refused: "a live run
   // with no spawner would report success having done nothing." That refusal was correct and
   // cost nothing — it is also the whole reason arm C had never run.
-  spawn = (argv, plan) => spawnImpl(argv, { repoRoot: plan.repo_root, index: plan.index }),
+  // #61: `plan.model`, not the closure's `model` — same leak as the record stamp. planRun puts
+  // the seat that was actually used on the plan; reading the parameter here would send Opus's
+  // clone through workerCwd under the sonnet token and mint the colliding directory.
+  spawn = (argv, plan) =>
+    spawnImpl(argv, { repoRoot: plan.repo_root, index: plan.index, model: plan.model }),
   ...opts
 } = {}) {
   // Parsed FIRST. An ambiguous invocation must be refused before anything reads the
@@ -1064,7 +1149,13 @@ export async function main({
     throw new Error('main requires an explicit `at`. Every record downstream refuses a clock-read timestamp.');
   }
 
-  const shared = { ...opts, at, caps, model, dryRun: mode.dryRun, spawn };
+  // #61: THE FLAG WINS OVER THE PARAMETER. `model` in the signature is the DECLARED default
+  // (sonnet-5, the seat the committed baseline was measured on); `mode.model` is what this
+  // invocation asked for. Reading the parameter here instead would have made the flag inert
+  // — parsed, validated, refused-on-empty, and then ignored — which is the mocked-seam shape
+  // where the unit is green and the live path spends on the wrong seat.
+  const seat = mode.model ?? model;
+  const shared = { ...opts, at, caps, model: seat, dryRun: mode.dryRun, spawn };
 
   // Wraps `execute` rather than sitting beside it, so there is no ordering for the loop to
   // get wrong: the only way to reach a spawn is through a clone that already passed. The
@@ -1091,7 +1182,12 @@ export async function main({
         // of three. A --run that looped would spend 3x what the caller asked for.
         [await provisionThenExecute(mode.index, shared)];
 
-  return buildArmCRecord({ runs, at, model, caps });
+  // `seat`, not `model` — the stamp must name the model that RAN. This line read `model`
+  // and was the last place the flag leaked: provisioning and execute both take it through
+  // `shared`, so the run would have spent on Opus and stamped sonnet. #42 exists because an
+  // unstamped figure is unreadable later; a WRONGLY-stamped one is worse, because it reads
+  // as an answer.
+  return buildArmCRecord({ runs, at, model: seat, caps });
 }
 
 export const gate = () => import('../lib/gate.mjs');
