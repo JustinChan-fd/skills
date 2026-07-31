@@ -114,13 +114,44 @@ function parseTap(stdout) {
   return { count: read('tests'), pass: read('pass'), fail: read('fail') };
 }
 
+// §2.2: files a topology writes to manage ITSELF are infrastructure, not delivery.
+// Keyed to the shape (`.harness/` or `.alfred/` anywhere, plus the ignore file) rather
+// than to one literal name, because the run dirs are the bigger case and a
+// single-filename rule would miss them.
+//
+// `.alfred/` ADDED 2026-07-31 (#63) and it is load-bearing rather than tidy. §4.1's pass
+// bar needs "filed a marker and left the tree alone" to be distinguishable from "filed a
+// marker and shipped 294 lines" — and the marker is an UNTRACKED FILE, so `changedFiles`
+// sees it. Without this line the honest decline the bar was written for scores as
+// delivered work and fails, which is the same defect inverted. This predates the marker:
+// the rule was written for arm B's `.gitignore`, before `.alfred/blocked.json` existed.
+export const isInfrastructure = (f) => {
+  if (f === '.gitignore') return true;
+  const parts = f.split('/');
+  return parts.includes('.harness') || parts.includes('.alfred');
+};
+
 // Files the arm changed relative to the provisioned start state. Uses the diff
 // against the first commit rather than the working tree, so an arm that committed
 // and an arm that did not are treated alike.
-async function changedFiles(repo) {
+//
+// EXPORTED for the arm C runner (#63), which needs the same observable to decide whether
+// a run DELIVERED work — a question §4.1's clause 1 asks and the runner previously derived
+// from the marker instead of measuring. One definition, so "what counts as delivery"
+// cannot drift between the mechanical sheet and the pass bar.
+//
+// RETURNS `null`, NOT `[]`, WHEN THE REPO CANNOT BE READ. `attempt` treats a non-zero exit
+// as data, so a path that is not a git checkout yields empty stdout — indistinguishable
+// from a repo where nothing changed. Read as "delivered nothing" that promotes a failed
+// MEASUREMENT into a finding, which is the defect #63 exists to remove, one level down.
+// Verified before the fix: pointing this at a nonexistent path returned an empty list and
+// no error. Callers must decide what an unobserved repo means; `scoreMechanical` treats it
+// as empty because a fixture it was handed must be a repo, and the runner records it as
+// unobserved because a §4.1 clause may not rest on a measurement that did not happen.
+export async function changedFiles(repo) {
   const root = await attempt('git', ['rev-list', '--max-parents=0', 'HEAD'], repo);
   const base = root.stdout.trim().split('\n')[0];
-  if (!base) return [];
+  if (!base) return null;
   const diff = await attempt('git', ['diff', '--name-only', base], repo);
   const untracked = await attempt('git', ['ls-files', '--others', '--exclude-standard'], repo);
   return [...diff.stdout.split('\n'), ...untracked.stdout.split('\n')]
@@ -134,7 +165,10 @@ export async function scoreMechanical({ repo } = {}) {
   }
 
   const checks = [];
-  const changed = await changedFiles(repo);
+  // `?? []` is safe HERE and only here: the guard above already established this is a
+  // provisioned fixture repo, so an unreadable tree is a broken fixture rather than an
+  // arm's outcome. The runner, which scores a §4.1 clause on the same call, must not.
+  const changed = (await changedFiles(repo)) ?? [];
 
   // --- AC4 / trap 4: the test suite ---
   const tests = parseTap((await attempt(process.execPath, ['--test'], repo)).stdout);
@@ -245,11 +279,8 @@ export async function scoreMechanical({ repo } = {}) {
   // conjunct inside AC1: sandbox-a ships inline loops, so AC1 already fails on the
   // scan for an untouched repo, and a conjunct that never decides anything cannot
   // be falsified by a test.
-  // §2.2: files a topology writes to manage ITSELF are infrastructure, not delivery.
-  // Keyed to the shape (`.harness/` anywhere, plus the ignore file) rather than to one
-  // literal name, because the run dirs are the bigger case and a single-filename rule
-  // would miss them.
-  const isInfrastructure = (f) => f === '.gitignore' || f.split('/').includes('.harness');
+  // §2.2's exclusion, defined once at the top of this file and shared with the arm C
+  // runner so the two cannot disagree about what delivery means.
   const infrastructure = changed.filter(isInfrastructure);
   const substantive = changed.filter((f) => !isInfrastructure(f));
 
