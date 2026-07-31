@@ -17,6 +17,35 @@ claim in the results doc can be checked against what was actually written at the
 | `armB-differential-oracle.mjs` | **arm B's own** equivalence oracle | by arm B, during implement |
 | `armB-implement-record.json` | the `status=attempted phases=[] wall_ms=null` record | by arm B; never finalized (SIGTERM) |
 
+Arm C's artifacts, added as the runs happened. Two seats, named in the filenames, because
+`armC1` on sonnet-5 and `armC-opus-run1` on opus-5 are different configurations and a
+reader who conflates them reads a model comparison as a repeat:
+
+| file | what it is | when written |
+|---|---|---|
+| `armC1-record.json` | sonnet-5 run 1's runner record | at run end |
+| `armC1-worker.json` | sonnet-5 run 1's raw `--output-format json` | by the CLI |
+| `armC1-delivered.diff` | what sonnet-5 run 1 changed | after the run |
+| `armC1-new-src-retry.js` | the `src/retry.js` sonnet-5 run 1 added | after the run |
+| `armC-opus-run1-record.json` | opus-5 run 1's runner record — **carries the full worker prompt** | at run end |
+| `armC-opus-run1-score.md` | opus-5 run 1 scored per trap, vs §4.1 | after the run |
+| `armC-opus-run1-delivered.diff` | what opus-5 run 1 changed | after the run |
+| `armC-opus-run1-new-src-retry.js` | the `src/retry.js` opus-5 run 1 added | after the run |
+
+**`armC1-record.json`'s `$1.974173` is superseded, and is kept anyway.** It was priced
+before #59 fixed the introductory-rate defect; the same run at the decided $3/$15 table is
+**$2.961259** (= 1.974173 × 1.5), which is the CLI's own `total_cost_usd`. Per §9's
+preserve-and-mark rule the file is not rewritten — the figure is what the runner actually
+reported at the time, and `armC-opus-run1-score.md` states the correction where the
+comparison is made.
+
+**`armC-opus-run1-record.json` contains the worker's full prompt, and that is deliberate.**
+§4.1 records a comparability gap: arm A's exact prompt was never captured, so "what did arm
+C get that arm A did not?" is answerable from one side only. Arm C's side is now on disk
+verbatim rather than reconstructable. It also makes the §4.1 claim checkable — that nothing
+in the prompt says the ticket is flawed or that pushing back is expected. `worker.log` in
+that file is a **path**, not log content.
+
 ## Three things to know before reading
 
 **`armA.json` and `armB.json` are named after arms and contain no arm results.** Both hold
