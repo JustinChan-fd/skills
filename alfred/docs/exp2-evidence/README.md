@@ -32,6 +32,24 @@ reader who conflates them reads a model comparison as a repeat:
 | `armC-opus-run1-delivered.diff` | what opus-5 run 1 changed | after the run |
 | `armC-opus-run1-new-src-retry.js` | the `src/retry.js` opus-5 run 1 added | after the run |
 
+The **gated** sonnet-5 n=3 run, 2026-07-31 — the first with `lib/gate.mjs` wired (#64).
+Suite `2026-07-31.1`, so its figures are not comparable to the ungated rows above:
+
+| file | what it is | when written |
+|---|---|---|
+| `armC-gated-n3-score.md` | all three runs scored against #65's four pre-declared signals | after the run |
+| `armC-gated-n3-record.json` | the runner record, **verbatim, with the #66 pricing defect in it** | at run end |
+| `armC-gated-run{1,2,3}-delivered.diff` | what each run changed | after the run |
+
+**`armC-gated-n3-record.json`'s `usd` figures are wrong and are kept anyway.** Every one
+sums the gated run with the previous night's ungated run of the same index — the #66
+substring-match defect, fixed in `e320147`. The record says mean **$4.09 / REJECTED**; the
+corrected figures are mean **$1.89 / ACCEPTED**. Per §9's preserve-and-mark rule the file
+is not rewritten: the defect manufactured a rejection, and the same defect would have
+manufactured an *acceptance* for anyone who deleted the older project dirs first, so the
+wrong number is part of the provenance. The score sheet carries both columns and the
+reconciliation.
+
 **`armC1-record.json`'s `$1.974173` is superseded, and is kept anyway.** It was priced
 before #59 fixed the introductory-rate defect; the same run at the decided $3/$15 table is
 **$2.961259** (= 1.974173 × 1.5), which is the CLI's own `total_cost_usd`. Per §9's
