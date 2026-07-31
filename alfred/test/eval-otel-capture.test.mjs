@@ -19,6 +19,8 @@ import {
   staleSeatEnv,
   reconcile,
   modelIdsFromOtlp,
+  p1Verdict,
+  EXPECTED_P1_SOURCES,
 } from '../eval/otel-capture.mjs';
 
 // --- the content-flag refusal ---
@@ -227,6 +229,151 @@ test('a payload with no model attribute yields nothing rather than a default', (
   // failure shape as `seatModelFor` defaulting instead of throwing.
   assert.deepEqual(modelIdsFromOtlp({ resourceLogs: [{ scopeLogs: [{ logRecords: [] }] }] }, 'x'), []);
   assert.deepEqual(modelIdsFromOtlp({}, 'x'), []);
+});
+
+// --- P1's denominator ---
+//
+// The bug this closes: `distinct.length === 1` counted ids without ever counting SOURCES, so
+// agreement among the sources that happened to arrive read identically to agreement among all
+// four. That is the §2.8 shape — $1.072 judged against an $18 cap, a precise number whose
+// denominator was wrong.
+//
+// The gate has to be ASYMMETRIC, and run1 is why. Run1's listener crashed and captured zero
+// OTLP payloads, so only result.json survived — yet result.json alone yields TWO ids (the
+// modelUsage key `anthropic.claude-sonnet-5` and `canonicalModel` `claude-sonnet-5`), so run1
+// printed P1 FAILS off 1 of 4 sources. That verdict was CORRECT: adding sources can never
+// repair a disagreement, so a FAILS on a partial set is sound. A blanket "INCONCLUSIVE if
+// incomplete" would have thrown away a valid answer. Only HOLDS needs the full denominator.
+
+test('P1 cannot hold when a source is missing, and names which', () => {
+  // The exact starved shape: only result.json present, and — counterfactually — agreeing.
+  // Nothing here disagrees, so the OLD code would have printed HOLDS off one source.
+  const verdict = p1Verdict([
+    { kind: 'result.json modelUsage', where: 'key', model: 'claude-sonnet-5' },
+    { kind: 'result.json', where: 'canonicalModel', model: 'claude-sonnet-5' },
+  ]);
+  assert.equal(verdict.status, 'INCONCLUSIVE');
+  assert.equal(verdict.arrived, 1);
+  assert.equal(verdict.expected, 4);
+  assert.deepEqual(verdict.missing, ['cost.usage metric', 'token.usage metric', 'api_request log']);
+  assert.doesNotMatch(verdict.line, /HOLDS/, 'a starved set must not read as agreement');
+});
+
+test('P1 FAILS on a partial set, because a disagreement cannot be repaired by more sources', () => {
+  // Run1's actual sources, verbatim from its capture-record.json. 1 of 4 arrived, and the
+  // verdict is still a real answer. This is the asymmetry: silence cannot manufacture a
+  // disagreement, so FAILS needs no denominator.
+  const verdict = p1Verdict([
+    { kind: 'result.json modelUsage', where: 'key', model: 'anthropic.claude-sonnet-5' },
+    { kind: 'result.json', where: 'canonicalModel', model: 'claude-sonnet-5' },
+  ]);
+  assert.equal(verdict.status, 'FAILS');
+  assert.equal(verdict.arrived, 1);
+  assert.deepEqual(verdict.distinct.sort(), ['anthropic.claude-sonnet-5', 'claude-sonnet-5']);
+});
+
+test('P1 HOLDS only with all four sources agreeing', () => {
+  const verdict = p1Verdict([
+    { kind: 'result.json modelUsage', where: 'key', model: 'claude-sonnet-5' },
+    { kind: '/v1/metrics', where: 'claude_code.cost.usage', model: 'claude-sonnet-5' },
+    { kind: '/v1/metrics', where: 'claude_code.token.usage', model: 'claude-sonnet-5' },
+    { kind: '/v1/logs', where: 'api_request', model: 'claude-sonnet-5' },
+  ]);
+  assert.equal(verdict.status, 'HOLDS');
+  assert.equal(verdict.arrived, 4);
+  assert.deepEqual(verdict.missing, []);
+});
+
+test('total silence is INCONCLUSIVE, not agreement', () => {
+  const verdict = p1Verdict([]);
+  assert.equal(verdict.status, 'INCONCLUSIVE');
+  assert.equal(verdict.arrived, 0);
+  assert.equal(verdict.missing.length, 4);
+});
+
+test('the four expected sources are declared, not inferred from what arrived', () => {
+  // If the expected set were derived from the observed sources, `missing` would always be
+  // empty and the guard could not fire — the unfalsifiable shape. Freeze the list.
+  assert.equal(EXPECTED_P1_SOURCES.length, 4);
+  assert.deepEqual(
+    EXPECTED_P1_SOURCES.map((s) => s.label),
+    ['result.json', 'cost.usage metric', 'token.usage metric', 'api_request log'],
+  );
+});
+
+test("run2's real sources satisfy all four, so its P1 FAILS was a full-denominator verdict", () => {
+  // Verbatim from run2's capture-record.json, with the metric/log names the fixed extractor
+  // now preserves. This is the regression anchor for the run that actually happened: its
+  // verdict was FAILS, and it was reached with nothing missing.
+  const verdict = p1Verdict([
+    { kind: 'result.json modelUsage', where: 'key', model: 'anthropic.claude-sonnet-5' },
+    { kind: 'result.json', where: 'canonicalModel', model: 'claude-sonnet-5' },
+    { kind: '/v1/logs', where: 'api_request', model: 'claude-sonnet-5' },
+    { kind: '/v1/logs', where: 'assistant_response', model: 'claude-sonnet-5' },
+    { kind: '/v1/metrics', where: 'claude_code.cost.usage', model: 'anthropic.claude-sonnet-5' },
+    { kind: '/v1/metrics', where: 'claude_code.token.usage', model: 'anthropic.claude-sonnet-5' },
+  ]);
+  assert.equal(verdict.status, 'FAILS');
+  assert.deepEqual(verdict.missing, []);
+  assert.equal(verdict.arrived, 4);
+});
+
+// --- source identity ---
+//
+// A denominator needs to know WHICH source arrived, and run2 showed the extractor was throwing
+// that away: cost.usage and token.usage both reported `where: 'dataPoints'`, api_request
+// reported `where: 'logRecords'`. Indistinguishable sources cannot be counted.
+
+test('a metric attribute carries its metric name, not the container key', () => {
+  // Run2's real shape. Before this, `where` was 'dataPoints' and cost.usage could not be
+  // told apart from token.usage.
+  const payload = {
+    resourceMetrics: [
+      {
+        scopeMetrics: [
+          {
+            metrics: [
+              {
+                name: 'claude_code.cost.usage',
+                sum: {
+                  dataPoints: [
+                    { attributes: [{ key: 'model', value: { stringValue: 'anthropic.claude-sonnet-5' } }] },
+                  ],
+                },
+              },
+            ],
+          },
+        ],
+      },
+    ],
+  };
+  const [found] = modelIdsFromOtlp(payload, '/v1/metrics');
+  assert.equal(found.where, 'claude_code.cost.usage');
+});
+
+test('a log record carries its event.name, not the container key', () => {
+  // Same problem on the logs side: run2's api_request and assistant_response both reported
+  // 'logRecords', so the api_request source could not be confirmed present.
+  const payload = {
+    resourceLogs: [
+      {
+        scopeLogs: [
+          {
+            logRecords: [
+              {
+                attributes: [
+                  { key: 'event.name', value: { stringValue: 'api_request' } },
+                  { key: 'model', value: { stringValue: 'claude-sonnet-5' } },
+                ],
+              },
+            ],
+          },
+        ],
+      },
+    ],
+  };
+  const [found] = modelIdsFromOtlp(payload, '/v1/logs');
+  assert.equal(found.where, 'api_request');
 });
 
 test('non-string attribute values are preserved rather than dropped', () => {
