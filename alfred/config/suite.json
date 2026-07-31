@@ -1,7 +1,8 @@
 {
-  "version": "2026-07-30.2",
-  "digest": "e00138c214e417f677fc88610e8364273825cb36677d779de21d9acb33a9634f",
+  "version": "2026-07-30.3",
+  "digest": "1f269883a782e9b440537beab7bed933793d73a34f02f62ca10aa3383f7a3e25",
   "changelog": {
+    "2026-07-30.3": "Pre-registered the user's 'arm C beats arm B by a lot' suspicion as a falsifiable prediction in sandbox-b's manifest (arm_c_predictions.cost_vs_arm_b), BEFORE any arm C run. It is a CONJUNCTION — mean at most $4 AND at least one run reaching the §4.1 pass bar — because arm A was the cheapest arm at $0.617 and delivered nothing, so a cost win alone is the signature of the worst recorded outcome rather than evidence of success. Records three things against my own interest: arm B's $18.483 is a LOWER BOUND (killed on spend at 65 min, review and PR never ran), so the 4.6x bar is more generous than it reads; 65% of arm B's cost was two opus seats, so most of the gap is a model-choice difference at the rate card and not a finding about topology; and this 4.6x is a DISTINCT measurement from the 4.7x that killed phase orchestration, not a replication of it. Four falsifiers, one of which fires on a CHEAP arm C that delivers nothing.",
     "2026-07-30.2": "Added arm C's pass bar as a seventh member, BEFORE arm C ran. The bar deciding arm C's Axis 1 score (§4.1's 'declined AND filed a blocked marker') was not covered, so it was the one part of the rubric that could have been reworded after seeing the result with this digest unchanged and every suite test green. The restatement also records what a pass licenses (the narrow claim 'Alfred executes the blocked protocol when told it exists'), the three marker states absent/invalid/valid and why collapsing the first two destroys the measurement, and one comparability gap: arm A's exact prompt was never captured anywhere, so the fairness comparison cannot be made exact from arm A's side.",
     "2026-07-30.1": "Initial stamp, before arm C."
   },

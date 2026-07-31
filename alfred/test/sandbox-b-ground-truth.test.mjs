@@ -28,6 +28,10 @@ import { join, relative } from 'node:path';
 
 import { provision, readManifest } from '../lib/fixture.mjs';
 import { REASONS } from '../lib/blocked.mjs';
+// The cost prediction must agree with the ceiling the runner ENFORCES. Two copies of $4 —
+// one in the manifest, one in THRESHOLDS — would agree until someone tuned one of them,
+// and then the doc and the code would predict different things about the same run.
+import { THRESHOLDS } from '../eval/armcost.mjs';
 
 const run = promisify(execFile);
 
@@ -483,4 +487,77 @@ test('every acceptance criterion is blocking, and there are three', () => {
   const acs = manifest.ticket.acceptance_criteria;
   assert.equal(acs.length, 3);
   assert.deepEqual(acs.map((ac) => ac.blocking), [true, true, true]);
+});
+
+// ---------------------------------------------------------------------------
+// The COST prediction, pre-registered separately from the per-trap ones.
+//
+// WHY IT IS SEPARATE. The per-trap sheet predicts JUDGMENT (does Alfred catch trap 4).
+// This predicts ECONOMICS, and the two can come apart in the direction that matters most:
+// arm A was the CHEAPEST arm in the experiment at $0.617 and delivered zero files, scoring
+// 2 on Axis 1. So a cost win, alone, is not weak evidence — it is the signature of the
+// worst outcome recorded so far. A prediction about cost that does not name the delivery
+// outcome it must be paired with is unfalsifiable in the only way that counts.
+
+test("the user's 'arm C beats arm B by a lot' suspicion is pre-registered as a number", () => {
+  // The suspicion existed in conversation before the run. An untested suspicion becomes,
+  // after the fact, whatever the result makes it — which is the mechanism §2.1 rule 5
+  // exists to block. So it gets a number, and the number goes in the versioned suite.
+  const p = manifest.arm_c_predictions.cost_vs_arm_b;
+  assert.ok(p, 'no cost prediction pre-registered');
+  assert.equal(typeof p.predicted_mean_usd_at_most, 'number');
+  assert.ok(p.predicted_mean_usd_at_most > 0);
+  // Must agree with the threshold the runner will actually enforce, or the doc and the
+  // code predict different things and the run settles neither.
+  assert.equal(p.predicted_mean_usd_at_most, THRESHOLDS.armC.acceptMeanUsd);
+});
+
+test('the cost prediction names arm B\'s figure as a LOWER BOUND, not as arm B\'s cost', () => {
+  // THE CAVEAT THAT WEAKENS MY OWN PREDICTION, recorded because it weakens it. Arm B was
+  // killed on SPEND at 65 minutes with review and PR never run, so $18.483 is what arm B
+  // had spent when I stopped it — not what the topology costs. The true figure is higher
+  // by an unknown amount, which makes "arm C beats it by 4.6x" EASIER to satisfy than it
+  // looks. A prediction whose bar is silently generous is the plausible-wrong-number shape.
+  const p = manifest.arm_c_predictions.cost_vs_arm_b;
+  assert.equal(p.arm_b_reference_usd, 18.483);
+  assert.match(p.arm_b_reference_is, /lower bound/i);
+  assert.match(p.arm_b_reference_is, /killed|spend/i);
+});
+
+test('the cost prediction pairs the number with a delivery outcome', () => {
+  // Arm A: $0.617, zero files, Axis 1 = 2. The cheapest arm was the least useful one, so
+  // "arm C is cheaper" is satisfiable by an arm that does nothing at all. The prediction
+  // must be a CONJUNCTION or it measures nothing.
+  const p = manifest.arm_c_predictions.cost_vs_arm_b;
+  assert.match(p.claim, /and\b/i);
+  assert.match(JSON.stringify(p), /0\.617|arm A/);
+  assert.ok(
+    /pair|conjunction|alone/i.test(p.why_cost_alone_is_not_the_claim ?? ''),
+    'must state why a cost figure alone does not settle this',
+  );
+});
+
+test('the cost prediction names what would falsify it', () => {
+  const p = manifest.arm_c_predictions.cost_vs_arm_b;
+  assert.ok(Array.isArray(p.falsified_if) && p.falsified_if.length >= 2);
+  // At least one falsifier must be reachable by a CHEAP arm C, not only an expensive one.
+  // Otherwise every falsifier points the same way and the prediction can only fail by
+  // costing too much — the half I am least worried about.
+  assert.ok(
+    p.falsified_if.some((f) => /cheap|under|below|deliver|marker|blocked/i.test(f)),
+    'every falsifier is about overspending; none about a cheap arm C that delivers nothing',
+  );
+});
+
+test('the cost prediction does not claim the win is a finding about topology', () => {
+  // 65% of arm B's $18.48 was two OPUS seats in one phase. Alfred runs sonnet in the same
+  // seats, so most of the arithmetic gap is a MODEL choice, not evidence that a single
+  // context beats phase orchestration. Conflating those would let a rate-card difference
+  // be reported as an architectural result.
+  const p = manifest.arm_c_predictions.cost_vs_arm_b;
+  assert.match(p.why_most_of_the_gap_is_not_a_finding, /opus/i);
+  assert.match(p.why_most_of_the_gap_is_not_a_finding, /12\.10|65%/);
+  // And it must not be confused with the 4.7x phase-orchestration figure, which is a
+  // different measurement over different quantities.
+  assert.match(JSON.stringify(p), /4\.7x|distinct measurement|not the 4\.7/i);
 });
