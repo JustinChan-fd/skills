@@ -38,6 +38,7 @@ import {
   chmodSync,
   statSync,
 } from 'node:fs';
+import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
 import { THRESHOLDS, transcriptsFor } from '../eval/armcost.mjs';
@@ -65,6 +66,7 @@ import {
   spawnWorker,
   workerArgv,
   priceRun,
+  diffstatFor,
 } from '../eval/run-armc.mjs';
 import { MARKER_PATH, REASONS, readMarker } from '../lib/blocked.mjs';
 import { stampProblems } from '../lib/suite.mjs';
@@ -1943,4 +1945,175 @@ test('an UNREADABLE repo is not a decline — an empty diff must not be confused
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+// --- 19. #64: the gate had never graded a run --------------------------------------
+//
+// `lib/gate.mjs` is what PLAN.md §3/M4 calls the thesis — "harness-core's verifier produced a
+// false `verified` because it was an LLM grading with a score. This one is a function." It had
+// ZERO callers outside its own test file. `export const gate = () => import('../lib/gate.mjs')`
+// at the bottom of run-armc.mjs is a lazy importer nothing invokes, and `summarize` reads
+// `gate_pass: r.gate_pass ?? null` for a field `executeRun` never assigns — which is why
+// `"gate_pass": null` appears in both published arm C records. Property 3 of this file's own
+// header ("the gate and the report run EVEN WHEN THE WORKER IS KILLED") was not true.
+//
+// So the four measured runs were scored on cost and a marker, and nothing ever asked whether
+// the delivered diff was sound. All four rewrote the assertions in the two tests that encode
+// the harm and cited the resulting green; no rule in the gate could see it, and no caller
+// would have run the rule anyway.
+//
+// TWO SEPARATE DEFECTS, TESTED SEPARATELY BELOW, because fixing either alone leaves a gate
+// that does not grade: the rule (`evidence_weakened`, in test/gate.test.mjs) and the wiring.
+
+test('diffstatFor reports per-file added and deleted counts against the provisioned commit', async () => {
+  // The observable the evidence rule needs. `changedFiles` answers WHICH files moved; this
+  // answers how much each one LOST, and only the second fact distinguishes "a test was
+  // touched" from "three assertions were deleted from the test that could fail".
+  //
+  // Lives here and not in lib/score.mjs deliberately: score.mjs is suite member #1, so adding
+  // to it bumps config/suite.json's digest and invalidates every stamped comparison. The
+  // suite's own `not_members.gate` names that hazard — "the ruler would move with the
+  // subject." eval/run-armc.mjs is not a member.
+  const repo = mkdtempSync(join(tmpdir(), 'alfred-armc-numstat-'));
+  try {
+    // NODE_TEST_CONTEXT deleted for the same reason lib/score.mjs's childEnv deletes it, and
+    // an explicit identity because a bare `git commit` refuses without one on a clean machine.
+    const env = { ...process.env, NODE_TEST_CONTEXT: undefined,
+      GIT_AUTHOR_NAME: 'Arm', GIT_AUTHOR_EMAIL: 'arm@example.invalid',
+      GIT_COMMITTER_NAME: 'Arm', GIT_COMMITTER_EMAIL: 'arm@example.invalid' };
+    delete env.NODE_TEST_CONTEXT;
+    const git = (...a) => execFileSync('git', ['-C', repo, ...a], { encoding: 'utf8', env });
+    execFileSync('git', ['init', '-q', '-b', 'main', repo], { env });
+    mkdirSync(join(repo, 'test'), { recursive: true });
+    // Four assertion lines, so a deletion count is a number a reader can check by hand rather
+    // than a 1 that could come from anywhere.
+    writeFileSync(join(repo, 'test/channels.test.js'), 'a\nb\nc\nd\n');
+    writeFileSync(join(repo, 'src.js'), 'x\n');
+    git('add', '--all');
+    git('commit', '-q', '-m', 'initial');
+
+    // One file LOSES lines and one GAINS them, in the same diff. A fixture where everything
+    // only grew would let `deleted` be hardcoded to 0 with this test still green.
+    writeFileSync(join(repo, 'test/channels.test.js'), 'a\nd\n');
+    writeFileSync(join(repo, 'src.js'), 'x\ny\n');
+
+    const byFile = new Map((await diffstatFor(repo)).map((e) => [e.file, e]));
+    assert.deepEqual(byFile.get('test/channels.test.js'), { file: 'test/channels.test.js', added: 0, deleted: 2 });
+    assert.deepEqual(byFile.get('src.js'), { file: 'src.js', added: 1, deleted: 0 });
+  } finally {
+    rmSync(repo, { recursive: true, force: true });
+  }
+});
+
+test('diffstatFor returns null for a repo it cannot read, never an empty diff', async () => {
+  // #63's three-valued discipline, one level down and for the same reason: git's non-zero exit
+  // yields empty stdout, so "not a checkout" and "nothing changed" are indistinguishable
+  // unless the unobservable case is its own value. A caller handed `[]` would report "no
+  // evidence was weakened" off a measurement that never ran — the exact shape the rule this
+  // feeds exists to prevent. Verified against a path that does not exist, not reasoned about.
+  assert.equal(await diffstatFor(join(tmpdir(), 'alfred-no-such-repo-at-all-64')), null);
+});
+
+test('executeRun runs the gate and publishes its verdict, on a completed run and on a killed one', async () => {
+  // THE WIRING. Before this, `gate_pass` was read by summarize and assigned by nobody, so
+  // every record ever published carried null and no arm was ever graded. Both outcomes are
+  // asserted in one test because the property is a CONJUNCTION over them — a gate that ran
+  // only on success would make §6's `planPhases` promise false exactly when a run is most
+  // expensive, and that promise is already tested in isolation with no code behind it.
+  const root = mkdtempSync(join(tmpdir(), 'alfred-armc-gatewire-'));
+  const calls = [];
+  try {
+    mkdirSync(join(root, '.alfred'), { recursive: true });
+    for (const killed of [false, true]) {
+      const r = await executeRun(1, {
+        repoRoot: root,
+        spawn: () => ({ killed, sinceProgressMs: 0 }),
+        priceOf: async () => ({ usd: 1, transcripts: 1, unpriced: [] }),
+        at: '2026-07-31T00:00:00.000Z',
+        // `.alfred/blocked.json` IS IN THIS LIST ON PURPOSE, and it is the only reason the
+        // `touched` assertion below can fail. Mutation found this: passing `substantive`
+        // instead of the raw list left every test green, because the original fixture held no
+        // file §2.2 excludes, so the two lists were identical and the assertion asserted
+        // nothing. The scope rule must see every path the run wrote — an arm that edited an
+        // off-limits file and its own marker has still edited an off-limits file, and
+        // delivery-exclusion is a judgment about CREDIT, not about what happened.
+        deliveredFiles: () => ['src/channels/sms.js', 'test/channels.test.js', '.alfred/blocked.json'],
+        diffstatOf: () => [{ file: 'test/channels.test.js', added: 39, deleted: 3 }],
+        // Injected so this test asserts the WIRING and not the rule — the rule has its own
+        // 34 tests. The recorded runner still has to be CALLED with the run's real inputs,
+        // which is what `calls` checks below.
+        gateOf: async (args) => {
+          calls.push(args);
+          return { pass: false, findings: [{ rule: 'evidence_weakened' }], unverified: [], blocked_reason: null };
+        },
+      });
+      assert.equal(r.gate_pass, false, `gate_pass must be assigned on a ${killed ? 'killed' : 'completed'} run`);
+      assert.equal(r.gate_findings.length, 1, 'the findings travel with the verdict, not just the boolean');
+      assert.equal(r.gate_findings[0].rule, 'evidence_weakened');
+    }
+    assert.equal(calls.length, 2, 'the gate must run on both outcomes — §6 planPhases ignores the worker outcome');
+
+    // The gate was handed the RUN's observations, not defaults. Without this the test would
+    // also pass on a call site that invoked runGate({}) and got a vacuous pass.
+    const [first] = calls;
+    assert.deepEqual(first.touched, ['src/channels/sms.js', 'test/channels.test.js', '.alfred/blocked.json']);
+    assert.deepEqual(first.diffstat, [{ file: 'test/channels.test.js', added: 39, deleted: 3 }]);
+    assert.equal(first.repoRoot, root);
+    // The ticket's ACs reach it, or every AC is unmapped and the verdict says nothing about
+    // the work. Read from the fixture manifest, the same source composePrompt uses.
+    assert.deepEqual(first.acs.map((a) => a.id), ['AC1', 'AC2', 'AC3']);
+    assert.match(first.acs[0].text, /three channels/);
+    // And the config, so `off_limits` and `verify` are the fixture's rather than absent.
+    assert.ok(first.config?.verify?.test, 'the gate needs a declared check to run');
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('a gate that cannot run reports unobserved, never a pass', async () => {
+  // The failure mode this whole file is written against: a plausible wrong number. A gate
+  // whose commands throw, or whose diffstat could not be read, must publish `gate_pass: null`
+  // — and `null` must not be readable as a pass anywhere downstream. Recording `true` here
+  // would certify soundness off a measurement that never happened, which is #63's defect
+  // wearing the gate's name.
+  const root = mkdtempSync(join(tmpdir(), 'alfred-armc-gatefail-'));
+  try {
+    const r = await executeRun(1, {
+      repoRoot: root,
+      spawn: () => ({ killed: false, sinceProgressMs: 0 }),
+      priceOf: async () => ({ usd: 1, transcripts: 1, unpriced: [] }),
+      at: '2026-07-31T00:00:00.000Z',
+      deliveredFiles: () => ['src/channels/sms.js'],
+      diffstatOf: () => null,
+      gateOf: async (args) => {
+        // WHAT THE GATE RECEIVES WHEN THE DIFF COULD NOT BE READ, checked before the throw.
+        // `undefined` is unobserved and `checkEvidence` returns without a verdict; `[]` would
+        // be observed-and-clean and would assert "no evidence was weakened" off a measurement
+        // nobody took. Mutation found this hole: replacing `?? undefined` with `?? []` left
+        // every test green, because no test looked at the value — only at the record.
+        assert.equal('diffstat' in args, true, 'the key must be present so the shape is stable');
+        assert.equal(args.diffstat, undefined, 'an unreadable diff is unobserved, not clean');
+        throw new Error('git exploded');
+      },
+    });
+    assert.equal(r.gate_pass, null, 'an unrunnable gate must not report a verdict it does not have');
+    assert.equal(r.gate_observed, false);
+    assert.equal(r.usd, 1, 'and it must not discard the priced run — the money left the account');
+    assert.match(r.gate_problem, /git exploded/, 'the record must say why the gate could not run');
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("summarize's gate_pass column is fed by the record, not by a default that reads as a pass", async () => {
+  // `gate_pass: r.gate_pass ?? null` was correct code over a field nobody assigned, so the
+  // column existed and was always null — indistinguishable from "graded, no verdict". Now that
+  // it is assigned, the three states must survive the trip into the summary distinctly, or the
+  // sheet reports two different runs identically.
+  const s = summarize([
+    { index: 1, status: 'completed', usd: 1, gate_pass: false },
+    { index: 2, status: 'completed', usd: 1, gate_pass: true },
+    { index: 3, status: 'completed', usd: 1, gate_pass: null },
+  ]);
+  assert.deepEqual(s.runs.map((r) => r.gate_pass), [false, true, null]);
 });
