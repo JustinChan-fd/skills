@@ -1020,3 +1020,104 @@ test('ADDED: an ac_map command that runs the suite is enough on its own — no d
   assert.match(finding.evidence, /ac_map AC1 runs the suite/);
   assert.doesNotMatch(finding.evidence, /verify\.lint/);
 });
+
+// ---------------------------------------------------------------------------
+// ADDED 2026-07-31 (#69). The off_limits pattern form the fixtures actually ship.
+// ---------------------------------------------------------------------------
+//
+// MEASURED, not suspected. `matchesGlob('src/vendor/legacy.js', 'src/vendor/')` is FALSE.
+// So is `matchesGlob('src/vendor/legacy.js', 'src/vendor')`. Only the `**` form matches —
+// and `**` is the form THIS FILE's CONFIG uses, while both fixture manifests
+// (fixtures/sandbox-a, fixtures/sandbox-b) declare `off_limits: ["src/vendor/"]`.
+//
+// So every frozen and added off_limits test above passes against a pattern the real input
+// never carries. The rule is green on a form nobody writes and silent on the two forms an
+// operator writes by hand. That is #63 and #67's defect class again — a rule that cannot
+// fire on its actual input — and it fails in the PERMITTING direction.
+//
+// NOT retroactive. No delivered diff from any of the six measured arm C runs touched
+// `src/vendor/`, so no score sheet is wrong. This is latent, and it is what a real
+// repository would hit first.
+
+test('ADDED: a directory prefix off_limits catches files under it, in every form an operator writes', async () => {
+  // The three forms that mean "this directory is off limits". A gate that honours one and
+  // ignores the others makes the protection depend on a trailing character.
+  for (const pattern of ['src/vendor/', 'src/vendor', 'src/vendor/**']) {
+    const verdict = await runGate({
+      config: { verify: {}, off_limits: [pattern] },
+      repoRoot: tempRepo(),
+      touched: ['src/vendor/legacy.js'],
+      run: allGreen(),
+    });
+    assert.ok(
+      verdict.findings.some((f) => f.rule === GATE_RULES.off_limits),
+      `off_limits ${JSON.stringify(pattern)} did not catch src/vendor/legacy.js → ${JSON.stringify(findingRules(verdict))}`,
+    );
+  }
+});
+
+test('ADDED: a directory prefix reaches arbitrary depth, not just the immediate children', async () => {
+  // `src/vendor/*` matches one segment only. An operator writing `src/vendor/` means the
+  // subtree, and a rule reading it as one level deep protects the shallow files and permits
+  // the deep ones — worse than not protecting either, because it reads as protection.
+  const verdict = await runGate({
+    config: { verify: {}, off_limits: ['src/vendor/'] },
+    repoRoot: tempRepo(),
+    touched: ['src/vendor/dist/bundle/legacy.min.js'],
+    run: allGreen(),
+  });
+  assert.ok(verdict.findings.some((f) => f.rule === GATE_RULES.off_limits), JSON.stringify(findingRules(verdict)));
+});
+
+test('ADDED: a directory prefix does not catch a sibling whose name merely starts the same', async () => {
+  // The constraint that stops the fix from being "startsWith". `src/vendorish/` is a
+  // DIFFERENT directory, and failing a run for editing it would be a false positive in the
+  // one rule whose whole job is to be trusted when it fires.
+  const verdict = await runGate({
+    config: { verify: {}, off_limits: ['src/vendor'] },
+    repoRoot: tempRepo(),
+    touched: ['src/vendorish/x.js', 'src/vendor-utils.js'],
+    run: allGreen(),
+  });
+  assert.deepEqual(
+    findingRules(verdict).filter((r) => r === GATE_RULES.off_limits),
+    [],
+    'a same-prefix sibling must not be reported off limits',
+  );
+});
+
+test('ADDED: the evidence still names the pattern as the operator wrote it', async () => {
+  // Whatever the fix expands internally, the operator has to be able to find the line in
+  // their config that caused this. Reporting an expanded `src/vendor/**` against a config
+  // that says `src/vendor/` sends them grepping for a string that is not there.
+  const verdict = await runGate({
+    config: { verify: {}, off_limits: ['src/vendor/'] },
+    repoRoot: tempRepo(),
+    touched: ['src/vendor/legacy.js'],
+    run: allGreen(),
+  });
+  const finding = verdict.findings.find((f) => f.rule === GATE_RULES.off_limits);
+  assert.ok(finding, JSON.stringify(findingRules(verdict)));
+  assert.match(finding.evidence, /matched src\/vendor\/(?!\*)/);
+});
+
+test('ADDED: declaredScope is NOT widened by the same change — the two directions differ', async () => {
+  // THE ASYMMETRY, asserted so a later refactor cannot quietly unify them. Both rules call
+  // the same matcher, but broadening off_limits fails SAFE (more writes caught) while
+  // broadening declaredScope fails OPEN (more writes permitted). A scope declared as
+  // `src/retry.js` must not silently come to mean `src/retry.js/**` or anything else.
+  //
+  // A directory prefix in a declared scope SHOULD still admit its subtree — that is the
+  // same operator intent — so the assertion is on the narrow case: a declared FILE admits
+  // exactly that file.
+  const verdict = await runGate({
+    config: { verify: {} },
+    repoRoot: tempRepo(),
+    declaredScope: ['src/retry.js'],
+    touched: ['src/retry.js/nested.js', 'src/retryable.js'],
+    run: allGreen(),
+  });
+  assert.deepEqual(findingRules(verdict), [GATE_RULES.scope_violation]);
+  assert.match(verdict.findings[0].detail, /src\/retry\.js\/nested\.js/);
+  assert.match(verdict.findings[0].detail, /src\/retryable\.js/);
+});

@@ -31,7 +31,9 @@
 // at the top of an unattended tick.
 
 import { readFileSync } from 'node:fs';
-import { isAbsolute, join, matchesGlob, relative, sep } from 'node:path';
+import { isAbsolute, join, relative, sep } from 'node:path';
+
+import { matchesPathPattern } from './paths.mjs';
 
 export const CONFIG_RELATIVE_PATH = join('.alfred', 'config.json');
 
@@ -263,11 +265,21 @@ export function resolveBase(config, { epic = null } = {}) {
   return null;
 }
 
-// True when a repo-relative path matches any `off_limits` glob.
+// True when a repo-relative path is covered by any `off_limits` entry.
 //
 // Normalizes first because callers produce three shapes for one file — `git diff
 // --name-only` gives repo-relative, bookkeeping gives `./`-prefixed, and a tool gives
 // absolute. An unnormalized comparison reads "not off limits" and permits the write.
+//
+// The pattern side goes through `matchesPathPattern` rather than bare `matchesGlob` (#69):
+// `matchesGlob('src/vendor/legacy.js', 'src/vendor/')` is false, and that trailing-slash form
+// is what both fixture manifests ship. `bareNameIsSubtree` is set because this is a DENY
+// list — an operator naming a directory here means the subtree, and the failure direction of
+// reading it as one inode is silent permission. `lib/gate.mjs`'s `declaredScope` leaves the
+// same flag at its default for the opposite reason.
+//
+// The `..`-escape check below stays HERE and is deliberately not pushed into the shared
+// matcher: it needs `repoRoot` to mean anything, and the matcher has no repo.
 export function isOffLimits(config, filePath, repoRoot = null) {
   if (typeof filePath !== 'string' || filePath === '') return false;
 
@@ -280,5 +292,5 @@ export function isOffLimits(config, filePath, repoRoot = null) {
   }
   rel = rel.split(sep).join('/').replace(/^\.\//, '');
 
-  return (config?.off_limits ?? []).some((glob) => matchesGlob(rel, glob));
+  return (config?.off_limits ?? []).some((pattern) => matchesPathPattern(rel, pattern, { bareNameIsSubtree: true }));
 }

@@ -483,3 +483,41 @@ test('ADDED: the blocked_label default agrees with blocked.mjs BLOCKED_LABEL', (
   const overridden = loadConfig(repoWith({ ...VALID, loop: { blocked_label: 'wip:hold' } }));
   assert.equal(overridden.config.loop.blocked_label, 'wip:hold');
 });
+
+test('ADDED: a directory-prefix off_limits entry catches the files under it (#69)', () => {
+  // MEASURED DEFECT, not a hypothetical. `matchesGlob('src/vendor/legacy.js', 'src/vendor/')`
+  // is false, and both fixture manifests declare `off_limits: ["src/vendor/"]`. So did every
+  // config written by hand in the shape a human reaches for. The rule read as protection and
+  // permitted every write beneath the directory.
+  //
+  // Both spellings, because an operator writing a deny list means the subtree either way.
+  for (const pattern of ['src/vendor/', 'src/vendor', 'src/vendor/**']) {
+    const config = { off_limits: [pattern] };
+    assert.equal(isOffLimits(config, 'src/vendor/legacy.js'), true, `${pattern} → immediate child`);
+    assert.equal(isOffLimits(config, 'src/vendor/dist/deep/x.min.js'), true, `${pattern} → deep child`);
+  }
+});
+
+test('ADDED: the directory-prefix reading does not catch a same-prefix sibling', () => {
+  // The false positive the fix must not introduce. `src/vendorish/` is a different directory,
+  // and off_limits is the one rule whose value is being trusted when it fires — a rule that
+  // fails runs for editing unrelated code gets ignored, and an ignored rule protects nothing.
+  const config = { off_limits: ['src/vendor'] };
+  assert.equal(isOffLimits(config, 'src/vendorish/x.js'), false);
+  assert.equal(isOffLimits(config, 'src/vendor-utils.js'), false);
+});
+
+test('ADDED: the escape check survives the shared matcher (#69)', () => {
+  // The guard above proves `../**` cannot escape. That guard lives in `isOffLimits` and NOT
+  // in the shared matcher, so replacing the matcher could have moved the check out from under
+  // it silently — a glob form and a bare form both need to stay refused.
+  for (const pattern of ['../**', '../../secrets', '..']) {
+    assert.equal(
+      isOffLimits({ off_limits: [pattern] }, '/abs/other/x.js', '/abs/repo'),
+      false,
+      `${pattern} must not reach outside the root`,
+    );
+  }
+  // And a `..` inside a relative path still cannot be laundered into a match.
+  assert.equal(isOffLimits({ off_limits: ['src/../../etc'] }, '/abs/other/etc/passwd', '/abs/repo'), false);
+});

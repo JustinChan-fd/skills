@@ -37,9 +37,14 @@
 // does not mention the AC's subject is `mapping_implausible` rather than a pass, which
 // is what stops `biome check` from settling "no behavior changes."
 
-import { matchesGlob } from 'node:path';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
+
+// #69: `matchesGlob` is not called directly here any more. It read an operator's
+// `src/vendor/` as matching nothing, so the off-limits rule was silent on the exact form
+// both fixture manifests ship. `matchesPathPattern` states the deny/allow direction, which
+// bare glob matching cannot.
+import { matchesPathPattern } from './paths.mjs';
 
 const execFileAsync = promisify(execFile);
 
@@ -383,7 +388,10 @@ function checkScope({ config, declaredScope, touched, findings }) {
   const offLimits = [];
   for (const file of files) {
     for (const pattern of config?.off_limits ?? []) {
-      if (matchesGlob(file, pattern)) {
+      // DENY direction: a bare `src/vendor` in an off-limits list means the subtree. An
+      // operator naming a directory here is not naming one inode, and reading it as one
+      // permits every write beneath it.
+      if (matchesPathPattern(file, pattern, { bareNameIsSubtree: true })) {
         offLimits.push({ file, pattern });
         break;
       }
@@ -409,7 +417,13 @@ function checkScope({ config, declaredScope, touched, findings }) {
   const offLimitsFiles = new Set(offLimits.map((o) => o.file));
   const outside = files.filter(
     // An off-limits file is already reported; naming it twice reads as two problems.
-    (file) => !offLimitsFiles.has(file) && !declaredScope.some((pattern) => matchesGlob(file, normalize(pattern))),
+    // ALLOW direction, and the flag is left at its conservative default on purpose (#69).
+    // A declared `src/channels/` admits its subtree — the trailing slash says directory, and
+    // the old bare-glob compare failed a run for editing `src/channels/sms.js` under exactly
+    // that declaration, measured. But a declared `src/retry.js` admits that file and not
+    // `src/retry.js/nested.js`: reading a bare name as a prefix here would grant permission
+    // nobody wrote down, which is the opposite failure direction from off_limits above.
+    (file) => !offLimitsFiles.has(file) && !declaredScope.some((pattern) => matchesPathPattern(file, pattern)),
   );
   if (outside.length > 0) {
     findings.push(
