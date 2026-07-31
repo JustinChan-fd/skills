@@ -387,3 +387,34 @@ test('two provisions of the same fixture do not share a git directory', async ()
   assert.notEqual(await git(second.repo, 'rev-parse', 'HEAD'), first.head);
   assert.equal(await git(first.repo, 'rev-parse', 'HEAD'), first.head);
 });
+
+// origin/HEAD, and how its absence was found.
+//
+// NOT by reading this file. By running `node eval/run-armc.mjs --run 1 --dry-run` against a
+// provisioned clone: arm C's preflight reported "origin/HEAD is unset in the clone (control
+// 7)" and it was correct. `provision` builds the clone with `git init` + `remote add` +
+// `push`, and `refs/remotes/origin/HEAD` is written only by `git clone` — so control 7 could
+// never have passed on any fixture, on any arm, and the check would have fired on every
+// single invocation of the runner.
+//
+// WHY IT MATTERS BEYOND THE PREFLIGHT: Alfred's implement path resolves origin/HEAD when
+// base_branch is null. On a clone missing it, the branch cut fails — and that failure would
+// be scored as the topology's fault when it belongs to the fixture. A control that cannot
+// pass is worse than no control, because it teaches the operator to read refusals as noise.
+test('the provisioned clone has origin/HEAD set, so control 7 is satisfiable at all', async () => {
+  assert.equal(
+    await git(first.repo, 'symbolic-ref', 'refs/remotes/origin/HEAD'),
+    `refs/remotes/origin/${first.branch}`,
+  );
+});
+
+test('setting origin/HEAD does not move the commit or tree sha', async () => {
+  // The determinism this whole file exists to pin. origin/HEAD is a REF in the clone, not
+  // an object in the history, so writing it must leave head and tree byte-identical — and
+  // the manifest's expected_shas are what a later reader compares against. Measured rather
+  // than reasoned: these are the two values recorded before the fix.
+  assert.equal(first.head, 'fa052265902cc9acf3f7e370c4696a752c5f1100');
+  assert.equal(first.tree, 'a5b0d41ee1f4260417d946e9cbe17d8ca17e1704');
+  assert.equal(first.head, manifest.expected_shas.head);
+  assert.equal(first.tree, manifest.expected_shas.tree);
+});

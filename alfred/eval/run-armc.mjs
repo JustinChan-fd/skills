@@ -34,6 +34,8 @@
 
 import { execFileSync } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
+import { mkdtemp } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { join } from 'node:path';
 
@@ -43,7 +45,12 @@ import { THRESHOLDS, priceByModel, transcriptsFor, decideKill, parseEtimeMs } fr
 import { staleSeatEnv } from './otel-capture.mjs';
 // The block contract and the ticket projection both come from lib/. Restating either here
 // would put arm C's prompt out of step with the policy it is being scored against.
-import { markerContract } from '../lib/blocked.mjs';
+// `readMarker` is here for a recorded reason. The first draft of section 12 called it
+// without importing it, and the module still LOADED — the reference sat inside a function
+// body, so `import()` reported success and every load check passed. It would have thrown
+// ReferenceError on first use, during a run that spends money. No test caught it because
+// there was no test; that draft was deleted rather than back-filled.
+import { markerContract, readMarker, MARKER_PATH } from '../lib/blocked.mjs';
 import { issueBody, issueTitle } from '../lib/eval-issue.mjs';
 
 // ---------------------------------------------------------------------------
@@ -476,7 +483,381 @@ export function composePrompt({ repoRoot, slug, fixturesRoot = join(ALFRED, 'fix
   ].join('\n');
 }
 
+// ---------------------------------------------------------------------------
+// 11. The driver.
+
+// TWO MODES, and the split is deliberate. `--run N` drives one run by hand, which is how
+// run 1 goes: I watch the first real spend live rather than discovering it in a summary.
+// `--all` is the n=3 loop. Refusing them TOGETHER matters more than it looks — `--all
+// --run 2` reads either as "all, starting at 2" or as "just 2", and silently picking one
+// spends against a plan the caller never expressed.
+//
+// A bare invocation refuses too. It is the likeliest accident, and `--all` is the most
+// expensive thing it could be taken to mean.
+export function parseArgv(argv = []) {
+  const args = [...argv];
+  const dryRun = args.includes('--dry-run');
+  const wantsAll = args.includes('--all');
+  const at = args.indexOf('--run');
+  const wantsRun = at !== -1;
+
+  if (wantsAll && wantsRun) {
+    throw new Error(
+      '--all and --run together are ambiguous: "all runs starting at N" and "only run N" are both ' +
+        'readings, and the difference is two runs\' worth of money. Pick one.',
+    );
+  }
+  if (!wantsAll && !wantsRun) {
+    throw new Error(
+      'refusing to run with no mode. Pass --run N to drive one run by hand (start here) or --all for ' +
+        `the ${THRESHOLDS.armC.n}-run loop. There is no default, because the default would spend.`,
+    );
+  }
+
+  if (wantsAll) return { mode: 'all', index: null, dryRun };
+
+  const raw = args[at + 1];
+  const index = Number(raw);
+  if (!Number.isInteger(index)) {
+    throw new Error(`--run needs an integer run number, got ${JSON.stringify(raw ?? null)}.`);
+  }
+  if (index < 1 || index > THRESHOLDS.armC.n) {
+    throw new Error(
+      `--run ${index} is outside 1..${THRESHOLDS.armC.n}. Run indexes name project slugs the n=` +
+        `${THRESHOLDS.armC.n} denominator is defined over; an index outside it prices a run that ` +
+        'belongs to no measurement.',
+    );
+  }
+  return { mode: 'run', index, dryRun };
+}
+
+// What has actually been SPENT, across every run including the killed ones.
+//
+// THIS IS NOT `summarize().total_usd`, and conflating them is the defect this function
+// exists to prevent. `summarize` sums only runs that COUNT toward n, which is right for
+// the mean — a killed run's figure is a lower bound on a number nobody will ever know, and
+// averaging it in would flatter the topology. But the money left the account either way.
+//
+// Feed `summarize().total_usd` to `decideTotalKill` and the $20 experiment cap goes blind
+// to exactly the runs that burned the most: three runs killed at $8 each report $0 counted
+// and never trip a cap while costing $24. Verified rather than reasoned — summarize()
+// returns 3 for [completed $3, killed $8].
+//
+// A null figure adds nothing rather than reading as $0: unmeasured is not free, and the
+// distinction is the same one `priceRun` preserves by returning null.
+export function spentSoFar(runs = []) {
+  const total = runs.reduce((a, r) => a + (Number.isFinite(r?.usd) ? r.usd : 0), 0);
+  return Math.round(total * 1e6) / 1e6;
+}
+
+// Builds everything a run needs and spawns only when told to. `spawn` is injected so the
+// wiring is testable without paying for it, and `dryRun` is checked HERE rather than at the
+// call site so there is exactly one place the decision to spend is made.
+export function planRun(index, { spawn, dryRun = false, repoRoot, slug = 'sandbox-b', model = 'anthropic.claude-sonnet-5' } = {}) {
+  const prompt = composePrompt({ repoRoot, slug });
+  const argv = workerArgv({ prompt, model });
+  const plan = {
+    index,
+    project_slug: runProjectSlug(index),
+    prompt,
+    argv,
+    model,
+    repo_root: repoRoot,
+    // `would_spawn` is true in both modes: it describes the plan, not what happened. What
+    // happened is whether `spawn` was called, which is the property the test asserts.
+    would_spawn: true,
+    dry_run: dryRun,
+  };
+  if (!dryRun) {
+    if (typeof spawn !== 'function') {
+      throw new Error('planRun needs a spawn function for a live run. A live run with no spawner would report success having done nothing.');
+    }
+    plan.spawned = spawn(argv, plan);
+  }
+  return plan;
+}
+
+// ---------------------------------------------------------------------------
+// 12. One run, end to end.
+
+// Reads the decline artifact out of the sandbox, preserving all three states.
+//
+// The three states are absent | invalid | valid and the FIRST distinction is the one that
+// carries the measurement. `absent` means no marker was filed; `invalid` means one was
+// filed and got the contract wrong. A reasoned decline written as prose scores differently
+// from never noticing the trap, and collapsing the two would delete the difference §4.1
+// exists to detect.
+//
+// A read failure is ABSENT, not invalid. `readMarker` already draws that line for empty
+// input, and an unreadable path is the same fact — nothing was filed here — rather than a
+// filed-and-wrong marker. Never throws: a run that produced no marker is a RESULT.
+export function readRunMarker(repoRoot) {
+  let text = null;
+  try {
+    text = readFileSync(join(repoRoot, MARKER_PATH), 'utf8');
+  } catch {
+    text = null;
+  }
+  return readMarker(text);
+}
+
+// Drives one run: spawn, price, read the marker, decide the kill.
+//
+// TWO PROPERTIES ARE LOAD-BEARING AND BOTH ARE TESTED.
+//
+// 1. THE MARKER IS READ ON EVERY OUTCOME, including a killed run. §4.1's bar is a
+//    conjunction — declined AND filed a valid marker — so the interesting case is exactly
+//    the one where the gate reports no work delivered. Reading the marker only after a
+//    clean finish would make the pass bar unobservable in the case it was written for.
+//
+// 2. THE COST FIGURE NEVER TRAVELS ALONE. `usd` and `marker_state` land on the same
+//    record. Arm A was the cheapest arm in the experiment at $0.617 and delivered zero
+//    files, so a record carrying a price with no outcome reproduces the worst result as a
+//    success. `declined` and `marker_state` stay SEPARATE fields rather than one boolean,
+//    because "declined with an invalid marker" is a distinct finding from both.
+//
+// `spawn` and `priceOf` are injected so the wiring is exercised without paying for it, and
+// `at` is the caller's timestamp — never now() — for the same reason suiteStamp refuses to
+// read the clock.
+export async function executeRun(index, opts = {}) {
+  const { repoRoot, spawn, priceOf = priceRun, dryRun = false, at = null, caps = THRESHOLDS.armC } = opts;
+
+  if (typeof at !== 'string' || at.trim() === '') {
+    throw new Error('executeRun requires an explicit `at`. A run record that reads the clock is not a function of the run.');
+  }
+
+  const plan = planRun(index, { ...opts, dryRun });
+
+  if (dryRun) {
+    // No spawn, no pricing, and `usd: null` rather than 0 — unmeasured is not free, the
+    // same distinction priceRun preserves by returning null.
+    return { index, at, status: 'dry-run', usd: null, plan, marker_state: null, declined: null, kill: null };
+  }
+
+  const outcome = (await plan.spawned) ?? {};
+  const priced = (await priceOf(index, opts)) ?? {};
+  const usd = Number.isFinite(priced.usd) ? priced.usd : null;
+
+  // Read regardless of how the worker ended. See property 1 above.
+  const marker = readRunMarker(repoRoot);
+
+  const kill = decideKill({
+    usd: usd ?? 0,
+    spendCapUsd: caps.spendCapUsd,
+    sinceProgressMs: Number.isFinite(outcome.sinceProgressMs) ? outcome.sinceProgressMs : 0,
+    stallMs: caps.stallMs ?? caps.wallCapMs,
+  });
+
+  return {
+    index,
+    at,
+    // The worker's own end, not the kill decision's — a run can be killed by the poller
+    // and also report a spend kill, and flattening them loses which came first.
+    status: outcome.killed || kill.kill ? 'killed' : 'completed',
+    usd,
+    transcripts: priced.transcripts ?? 0,
+    unpriced: priced.unpriced ?? [],
+    price_table_version: priced.price_table_version ?? null,
+    marker_state: marker.state,
+    blocked_reason: marker.reason,
+    blocked_detail: marker.detail,
+    marker_problem: marker.problem,
+    // `valid` only. An invalid marker is not a decline that counts, and `marker_state`
+    // above keeps the difference readable.
+    declined: marker.state === 'valid',
+    kill,
+    worker: outcome,
+    plan: { ...plan, spawned: undefined },
+  };
+}
+
+// ---------------------------------------------------------------------------
+// 13. The n=3 loop.
+
+// Runs up to n times, checking the TOTAL budget between runs and stopping early rather
+// than starting a run the budget cannot cover.
+//
+// THE BUDGET COMES FROM `spentSoFar`, NOT FROM `summarize`. This is the one line where the
+// two sets diverge and it matters: `summarize().total_usd` sums only runs that COUNT toward
+// n, which is right for the mean because a killed run's figure is a lower bound on a number
+// nobody will ever know. But the money left the account either way. Three runs killed at $8
+// each report $0 counted and would never trip a $20 cap while costing $24.
+//
+// The stop is recorded ON the last run rather than thrown, because a short run set is a
+// RESULT — "two runs, cap reached" — and an exception would leave the two figures already
+// paid for unreadable. Same reason the gate and report run on a killed worker.
+export async function runAll({ at, caps = THRESHOLDS.armC, totalCapUsd = caps.totalCapUsd, execute, ...opts } = {}) {
+  if (typeof execute !== 'function') {
+    throw new Error('runAll needs an execute function. Injected so the loop is testable without spending.');
+  }
+  const runs = [];
+  for (let index = 1; index <= caps.n; index += 1) {
+    // Checked BEFORE spawning, not after. Checking afterwards is how a cap becomes a
+    // post-mortem: the money is already gone by the time it reports.
+    if (index > 1) {
+      const decision = decideTotalKill({ completedUsd: [spentSoFar(runs)], currentUsd: 0, totalCapUsd });
+      if (decision.kill) {
+        const last = runs.at(-1);
+        last.stopped_because = 'total-cap';
+        last.stop_reason = decision.reason;
+        break;
+      }
+    }
+    runs.push(await execute(index, { ...opts, at, caps }));
+  }
+  return runs;
+}
+
+// ---------------------------------------------------------------------------
+// 14. The record.
+
+// Assembles what gets published, stamped so it can be compared to something.
+//
+// THE STAMP IS NOT DECORATION. #42 exists because arm A's $0.617 sits in a results file
+// with no model id, no config sha, and no run date, while the seats moved from sonnet-4-6
+// to sonnet-5 the same day. That comparison already crosses an unrecorded boundary, and an
+// unstamped arm C record would repeat the failure across a boundary I am crossing on
+// purpose. `stampProblems` on the way out is the check.
+//
+// BOTH MONEY FIGURES SHIP. `summary.mean_usd` is over counted runs and answers "what does a
+// run of this topology cost"; `spent_usd` is over every run and answers "what did this
+// experiment cost". A record carrying only the first lets two killed runs disappear.
+export async function buildArmCRecord({ runs = [], at, model, config_sha = null, caps = THRESHOLDS.armC } = {}) {
+  const { suiteStamp } = await import('../lib/suite.mjs');
+  const summary = summarize(runs);
+  return {
+    arm: 'C',
+    // Stamped via suiteStamp rather than hand-built, so a member moving without a version
+    // bump fails here instead of producing a confidently-wrong comparison.
+    suite: suiteStamp({ model, config_sha, at }),
+    summary,
+    // Deliberately not inside `summary`: the mean and the spend are answers to different
+    // questions, and nesting them together is what invites reading one as the other.
+    spent_usd: spentSoFar(runs),
+    verdict: acceptVerdict(summary, { caps }),
+    thresholds: caps,
+    runs,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// 15. main.
+
+// The entrypoint. Parses, preflights, loops, records — and NOTHING else, because every
+// decision it could have made is a tested function above it.
+//
+// THE PREFLIGHT IS A REFUSAL, NOT A WARNING. `preflightProblems` catches, among other
+// things, a shell still exporting sonnet-4-6 (`staleSeatEnv`) — which is why #30 must run
+// from a RESTARTED session. A main() that printed the problems and spawned anyway would
+// price arm C against a model nobody declared, and the run would look fine until someone
+// asked which model produced the number. It throws, and the message names the problems.
+//
+// PER RUN, IN THIS ORDER: provision a fresh clone, preflight THAT clone, then spawn in it.
+// All three properties were absent from the first draft and each one is load-bearing.
+//
+// Provisioning at all: `main` never did. `repoRoot` was not in `shared`, so `executeRun`
+// read the marker at join(undefined, ...) and `composePrompt` was handed nothing — a live
+// run would have instructed the worker to work in a repository literally named "undefined".
+// The template-vs-clone bug I first chased was the visible half of a missing step.
+//
+// Preflighting the clone rather than `fixtures/sandbox-b`: the template holds a manifest
+// and a README, is not a git repo, and never will be. Three of its five reported problems
+// were unfixable by construction. A check that CANNOT pass is worse than no check — it
+// fires every time, teaches the operator to read refusals as noise, and the next person
+// deletes it, taking controls 5 and 7 with it.
+//
+// A fresh clone PER RUN, not one shared across three: run 1 files .alfred/blocked.json and
+// runs 2 and 3 would be scored as declines they never made. §4.1's bar would read 3/3 off a
+// single run's work — and contamination pushes toward the result I pre-registered wanting,
+// which is the direction to guard hardest.
+//
+// `execute`, `preflight` and `provisionRun` are injected. Their defaults are the real thing,
+// so a bare `node eval/run-armc.mjs --all` spends; the seams exist so the wiring above them
+// is exercised without spending, which is why these tests run for free.
+export async function main({
+  argv = process.argv.slice(2),
+  at,
+  model = 'anthropic.claude-sonnet-5',
+  caps = THRESHOLDS.armC,
+  slug = 'sandbox-b',
+  provisionRun = async (index) => {
+    const { provision } = await import('../lib/fixture.mjs');
+    // A per-run directory, so the three clones cannot be the same path even by accident.
+    const into = await mkdtemp(join(tmpdir(), `alfred-armc-run${index}-`));
+    const { repo } = await provision(slug, { into, replace: true });
+    return repo;
+  },
+  preflight = (repoRoot) =>
+    preflightProblems({
+      env: process.env,
+      sink: inspectSink(),
+      fixture: inspectFixture(repoRoot),
+      ghShim: GH_SHIM,
+    }),
+  execute = executeRun,
+  ...opts
+} = {}) {
+  // Parsed FIRST. An ambiguous invocation must be refused before anything reads the
+  // environment, so a bad flag costs nothing and cannot be half-acted-on.
+  const mode = parseArgv(argv);
+
+  if (typeof at !== 'string' || at.trim() === '') {
+    throw new Error('main requires an explicit `at`. Every record downstream refuses a clock-read timestamp.');
+  }
+
+  const shared = { ...opts, at, caps, model, dryRun: mode.dryRun };
+
+  // Wraps `execute` rather than sitting beside it, so there is no ordering for the loop to
+  // get wrong: the only way to reach a spawn is through a clone that already passed. The
+  // throw propagates out of `runAll` uncaught — a refusal that merely `break`s would let
+  // runs 2 and 3 spawn against a clone that never passed, which is the seam a per-run
+  // preflight opens and t60 is written against.
+  const provisionThenExecute = async (index, runOpts) => {
+    const repoRoot = await provisionRun(index, runOpts);
+    const problems = preflight(repoRoot) ?? [];
+    if (problems.length) {
+      throw new Error(
+        `refusing to spend on run ${index}: the preflight found ${problems.length} problem(s).\n  - ${problems.join('\n  - ')}\n` +
+          'These are refusals rather than warnings. A stale seat export prices the run against a model nobody declared.',
+      );
+    }
+    return execute(index, { ...runOpts, repoRoot });
+  };
+
+  const runs =
+    mode.mode === 'all'
+      ? await runAll({ ...shared, execute: provisionThenExecute })
+      : // ONE run, not a loop starting at N. `--run 1` is how the first real spend happens:
+        // the first time money moves I watch it, rather than reading about it in a summary
+        // of three. A --run that looped would spend 3x what the caller asked for.
+        [await provisionThenExecute(mode.index, shared)];
+
+  return buildArmCRecord({ runs, at, model, caps });
+}
+
 export const gate = () => import('../lib/gate.mjs');
 export const report = () => import('../lib/report.mjs');
 
 export { THRESHOLDS, GH_SHIM, parseEtimeMs, decideKill };
+
+// ---------------------------------------------------------------------------
+// 16. The CLI edge.
+
+// Guarded on being the entry module, so importing this file for a test never spends.
+// `at` is stamped HERE — the one legitimate place a clock is read, because this is the
+// moment the run actually begins. Every function below it takes the value as an argument
+// and refuses to read the clock itself, which is what makes a record re-readable tomorrow.
+if (process.argv[1] && import.meta.url === `file://${process.argv[1]}`) {
+  main({ at: new Date().toISOString() })
+    .then((record) => {
+      process.stdout.write(`${JSON.stringify(record, null, 2)}\n`);
+      // Exit 0 on a produced record whatever the verdict says. A non-zero exit for a FAIL
+      // would conflate "the experiment ran and the answer was no" with "the runner broke",
+      // and those are the two readings this file spends the most effort keeping apart.
+      process.exit(0);
+    })
+    .catch((err) => {
+      process.stderr.write(`${err?.stack ?? err}\n`);
+      process.exit(1);
+    });
+}

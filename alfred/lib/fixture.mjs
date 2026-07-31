@@ -249,6 +249,17 @@ export async function provision(slug, { into, replace = false } = {}) {
   }
 
   await git(repo, ['push', '--quiet', 'origin', branch], baseEnv);
+
+  // origin/HEAD, which `git init` + `remote add` + `push` never writes — only `git clone`
+  // does. Without it control 7 could not pass on any fixture: arm C's preflight reported
+  // "origin/HEAD is unset in the clone" on a freshly provisioned sandbox-b, and it was
+  // right. Alfred's implement path resolves origin/HEAD when base_branch is null, so the
+  // absence would break the branch cut and be scored as the topology's fault.
+  //
+  // Written as a REF, so head and tree are unchanged — test/fixture-provision.test.mjs pins
+  // both shas against the values measured before this line existed.
+  await git(repo, ['symbolic-ref', 'refs/remotes/origin/HEAD', `refs/remotes/origin/${branch}`], baseEnv);
+
   const head = await git(repo, ['rev-parse', 'HEAD'], baseEnv);
   const tree = await git(repo, ['rev-parse', 'HEAD^{tree}'], baseEnv);
 

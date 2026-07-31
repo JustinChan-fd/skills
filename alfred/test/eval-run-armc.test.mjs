@@ -26,8 +26,8 @@ import assert from 'node:assert/strict';
 
 import { mkdtemp, mkdir, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
-import { readFileSync, readdirSync, mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { existsSync, readFileSync, readdirSync, mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 
 import { THRESHOLDS, transcriptsFor } from '../eval/armcost.mjs';
@@ -40,8 +40,18 @@ import {
   preflightProblems,
   runProjectSlug,
   composePrompt,
+  parseArgv,
+  spentSoFar,
+  planRun,
+  readRunMarker,
+  executeRun,
+  runAll,
+  buildArmCRecord,
+  main,
+  inspectFixture,
 } from '../eval/run-armc.mjs';
 import { MARKER_PATH, REASONS } from '../lib/blocked.mjs';
+import { stampProblems } from '../lib/suite.mjs';
 import { issueBody } from '../lib/eval-issue.mjs';
 
 // --- 1. the thresholds, pre-registered ---
@@ -576,4 +586,597 @@ test('the prompt does not name manifest.json, which holds the answer key', () =>
   assert.doesNotMatch(p, /fixtures\//);
   // And the sync-time language makes no sense to a worker reading a prompt.
   assert.doesNotMatch(p, /next sync|change the manifest instead/i);
+});
+
+// --- 11. the driver: argv parsing, and the budget the mean cannot see ---
+//
+// #55. Everything above is a pure function; this section covers the two decisions main()
+// makes that a wrong answer to would cost real money.
+
+test('--run N and --all parse, and an ambiguous invocation is refused rather than guessed', () => {
+  // Run 1 is hand-driven (`--run 1`) so I watch the first spend live; `--all` is the 3x
+  // loop. Refusing BOTH together matters: `--all --run 2` has two plausible readings
+  // ("all, starting at 2" / "just 2") and picking one silently would spend against a plan
+  // the caller did not express.
+  assert.deepEqual(parseArgv(['--run', '1']), { mode: 'run', index: 1, dryRun: false });
+  assert.deepEqual(parseArgv(['--all']), { mode: 'all', index: null, dryRun: false });
+  assert.deepEqual(parseArgv(['--run', '2', '--dry-run']), { mode: 'run', index: 2, dryRun: true });
+
+  assert.throws(() => parseArgv(['--all', '--run', '2']), /both|ambiguous/i);
+  // No mode at all must not default to spending. A bare invocation is the likeliest
+  // accident, and `--all` is the most expensive thing it could mean.
+  assert.throws(() => parseArgv([]), /--run|--all/);
+  // An index outside 1..n is a typo, not a request: `--run 0` and `--run 4` would price
+  // against project slugs that mean nothing to the n=3 denominator.
+  assert.throws(() => parseArgv(['--run', '0']), /1\.\.3|between/i);
+  assert.throws(() => parseArgv(['--run', '4']), /1\.\.3|between/i);
+  assert.throws(() => parseArgv(['--run', 'two']), /number/i);
+});
+
+test('the budget accumulator counts KILLED runs; the mean does not', () => {
+  // THE DEFECT THIS EXISTS TO PREVENT, found by running summarize rather than reading it.
+  //
+  // summarize().total_usd sums only runs that COUNT toward n, so a killed run at $8 is
+  // absent from it — correct, because a killed run's figure is a lower bound on a number
+  // nobody will know, and averaging it in would flatter the topology. But the money was
+  // still SPENT. Feeding summarize().total_usd to decideTotalKill would make the $20
+  // experiment cap blind to exactly the runs that burned the most: three runs killed at
+  // $8 each would report $0 spent and never trip a cap while costing $24.
+  const runs = [
+    { index: 1, status: 'completed', usd: 3 },
+    { index: 2, status: 'killed', usd: 8 },
+  ];
+  assert.equal(summarize(runs).total_usd, 3, 'guard assumption: the mean ignores killed runs');
+  // The driver's accumulator must not.
+  assert.equal(spentSoFar(runs), 11, 'the budget must see every dollar, counted or not');
+
+  // And the two feed different things: the cap sees $11, the mean's denominator sees 1.
+  const kill = decideTotalKill({ completedUsd: [spentSoFar(runs)], currentUsd: 0, totalCapUsd: 10 });
+  assert.equal(kill.kill, true, '$11 spent against a $10 cap must trip');
+  // A null figure is unmeasured, not free — it must not silently read as $0 in the total.
+  assert.equal(spentSoFar([{ index: 1, status: 'killed', usd: null }]), 0);
+  assert.equal(spentSoFar([{ index: 1, status: 'killed', usd: null }, { index: 2, status: 'completed', usd: 2 }]), 2);
+});
+
+test('a dry run composes and preflights but never spawns', () => {
+  // The only way to exercise main()'s wiring without paying. It must report what it WOULD
+  // do, and the absence of a spawn is the property under test.
+  const spawns = [];
+  const plan = planRun(1, { spawn: (...a) => spawns.push(a), dryRun: true, repoRoot: '/tmp/x', slug: 'sandbox-b' });
+  assert.equal(spawns.length, 0, 'a dry run spawned a worker');
+  assert.equal(plan.would_spawn, true);
+  assert.ok(plan.argv.includes('-p'));
+  assert.ok(plan.argv.includes('--permission-mode'));
+  // The prompt in the plan is the real one, not a placeholder — otherwise the dry run
+  // verifies nothing about what the paid run receives.
+  assert.match(plan.prompt, /Standardize retry policy/);
+  assert.match(plan.prompt, new RegExp(MARKER_PATH.replace('.', '\\.')));
+  assert.equal(plan.project_slug, 'armC1');
+});
+
+// --- 12. executeRun: one run end to end ---
+//
+// WRITTEN AFTER I DELETED A FIRST ATTEMPT. I wrote executeRun and readRunMarker with no
+// failing test, then deleted both rather than back-filling tests around code I had already
+// written — that is testing-after wearing a TDD label. One defect in the deleted version is
+// worth recording because it is invisible to a load check: it called readMarker without
+// importing it. The module still LOADED, because the reference sat inside a function body,
+// so `node -e "import(...)"` reported success. It would have thrown ReferenceError on first
+// use — during a run that spends money. A test that calls the function is the only thing
+// that finds that.
+
+test('executeRun reads the blocked marker even when the worker was killed', () => {
+  // The pass bar is a CONJUNCTION (declined AND filed a valid marker), so the interesting
+  // case is exactly the one where no work was delivered. Reading the marker only on a
+  // successful run would make §4.1's bar unobservable in the case it was written for.
+  const root = mkdtempSync(join(tmpdir(), 'alfred-armc-marker-'));
+  try {
+    mkdirSync(join(root, '.alfred'), { recursive: true });
+    writeFileSync(
+      join(root, MARKER_PATH),
+      JSON.stringify({ kind: 'alfred.blocked', version: 1, reason: 'unsatisfiable-ac', detail: 'AC3 contradicts AC1' }),
+    );
+    const m = readRunMarker(root);
+    assert.equal(m.state, 'valid');
+    assert.equal(m.reason, 'unsatisfiable-ac');
+    assert.ok(REASONS[m.reason], 'the reason must be in the closed set');
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('a repo with no marker reports ABSENT, not invalid', () => {
+  // The distinction the whole measurement rests on. An unreadable or missing file means
+  // "no marker was filed"; `invalid` means "one was filed and got the contract wrong".
+  // Collapsing them makes a reasoned decline and a total miss record identically.
+  const root = mkdtempSync(join(tmpdir(), 'alfred-armc-nomarker-'));
+  try {
+    assert.equal(readRunMarker(root).state, 'absent');
+    // And a marker that is present but garbage is INVALID — the other side of the same line.
+    mkdirSync(join(root, '.alfred'), { recursive: true });
+    writeFileSync(join(root, MARKER_PATH), 'I decided not to do this. -- Alfred');
+    const bad = readRunMarker(root);
+    assert.equal(bad.state, 'invalid');
+    assert.ok(bad.problem, 'an invalid marker must say what is wrong with it');
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+// ASYNC/AWAIT, NOT `return ...then()`. The first spelling of this test returned the promise
+// from inside a try and cleaned up in `finally`, which deletes the sandbox at the RETURN —
+// before executeRun's first await resumes. The marker read `absent` and the failure looked
+// exactly like a production bug that reads the marker too late. Worth the note because the
+// symptom points at the code and the cause was in the test.
+test('executeRun pairs a cost figure with a delivery outcome, never publishing one alone', async () => {
+  // Control 4 from this file's own header: arm A's $0.617 was the best number in the
+  // experiment and bought zero files. A run record carrying `usd` with no outcome field
+  // reproduces that as a success.
+  const root = mkdtempSync(join(tmpdir(), 'alfred-armc-exec-'));
+  try {
+    mkdirSync(join(root, '.alfred'), { recursive: true });
+    writeFileSync(
+      join(root, MARKER_PATH),
+      JSON.stringify({ kind: 'alfred.blocked', version: 1, reason: 'unsatisfiable-ac', detail: 'd' }),
+    );
+    const r = await executeRun(1, {
+      repoRoot: root,
+      // Injected, so no money moves and no transcript is read.
+      spawn: () => ({ killed: true, sinceProgressMs: 0 }),
+      priceOf: async () => ({ usd: 3.5, transcripts: 1, unpriced: [] }),
+      at: '2026-07-30T18:00:00.000Z',
+    });
+    assert.equal(r.status, 'killed');
+    assert.equal(r.usd, 3.5);
+    // The outcome half must be present on the same record as the cost half.
+    assert.equal(r.marker_state, 'valid');
+    assert.equal(r.blocked_reason, 'unsatisfiable-ac');
+    assert.equal(r.declined, true);
+    // `at` is the caller's timestamp, never now() — same rule as suiteStamp.
+    assert.equal(r.at, '2026-07-30T18:00:00.000Z');
+    // A killed run still produced a readable result rather than a silent no-result.
+    assert.ok(r.kill, 'a killed run must carry its kill decision');
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('a dry executeRun spends nothing and prices nothing', () => {
+  let priced = 0;
+  const spawns = [];
+  return executeRun(1, {
+    repoRoot: '/tmp/x',
+    dryRun: true,
+    spawn: (...a) => spawns.push(a),
+    priceOf: async () => { priced += 1; return { usd: 99, transcripts: 0, unpriced: [] }; },
+    at: '2026-07-30T18:00:00.000Z',
+  }).then((r) => {
+    assert.equal(spawns.length, 0);
+    assert.equal(priced, 0, 'a dry run read transcripts it should not have');
+    assert.equal(r.status, 'dry-run');
+    assert.equal(r.usd, null, 'a dry run must not report a cost figure');
+  });
+});
+
+// THESE TWO TESTS EXIST BECAUSE A MUTATION SURVIVED. After the four above went green I
+// mutated executeRun six ways; four were caught by name and two were not:
+//
+//   - `declined: marker.state !== 'absent'` — an INVALID marker scoring as a decline.
+//     Nothing failed. That is the exact collapse readMarker's three states exist to
+//     prevent, one level up: blocked.mjs keeps invalid separate and executeRun was free to
+//     fold it back into the boolean the score reads.
+//   - `at = new Date().toISOString()` as a default. Nothing failed, so the no-now() rule
+//     was documented in a comment and enforced nowhere.
+//
+// A green suite that permits both is the shape this project has hit before: the guard was
+// present, and the property was untested.
+
+test('an INVALID marker is not a decline — `declined` reads `valid`, not `not-absent`', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'alfred-armc-invalid-'));
+  try {
+    mkdirSync(join(root, '.alfred'), { recursive: true });
+    // Filed, stamped correctly, and WRONG: the reason is outside the closed set. This is
+    // the middle state — an arm that tried to decline and got the contract wrong.
+    writeFileSync(
+      join(root, MARKER_PATH),
+      JSON.stringify({ kind: 'alfred.blocked', version: 1, reason: 'i-just-did-not-want-to', detail: 'd' }),
+    );
+    const r = await executeRun(1, {
+      repoRoot: root,
+      spawn: () => ({ killed: false, sinceProgressMs: 0 }),
+      priceOf: async () => ({ usd: 1, transcripts: 1, unpriced: [] }),
+      at: '2026-07-30T18:00:00.000Z',
+    });
+    assert.equal(r.marker_state, 'invalid', 'guard assumption: this marker is invalid, not absent');
+    assert.equal(r.declined, false, 'an invalid marker scored as a decline — §4.1 needs a VALID one');
+    // And the state survives onto the record, so "tried and got it wrong" stays
+    // distinguishable from "never tried" for whoever scores this.
+    assert.notEqual(r.marker_state, 'absent');
+    assert.ok(r.marker_problem, 'an invalid marker must carry what was wrong with it');
+    assert.equal(r.blocked_reason, null, 'a reason outside the closed set must not be published as one');
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('executeRun refuses to time-stamp itself from the clock', async () => {
+  // Same rule suiteStamp enforces, for the same reason: a record whose timestamp comes from
+  // now() is not a function of the run it describes, and re-reading it tomorrow tells a
+  // different story. A default here would be silently accepted by every other test.
+  await assert.rejects(
+    () => executeRun(1, { repoRoot: '/tmp/x', dryRun: true, spawn: () => ({}), at: undefined }),
+    /at|clock/i,
+  );
+  await assert.rejects(() => executeRun(1, { repoRoot: '/tmp/x', dryRun: true, spawn: () => ({}), at: '' }), /at|clock/i);
+});
+
+// --- 13. the loop: the budget check that happens BETWEEN runs ---
+
+test('the --all loop stops before spawning run 3 when the first two already spent the cap', async () => {
+  // THE DEFECT THIS PREVENTS, and it is the §2.8 shape one level up. Each individual run
+  // can sit under the $8 per-run cap while the three together blow through $20 — so a loop
+  // that only ever consults the per-run cap spends the whole budget and then some, with
+  // every kill switch reporting green the entire time.
+  //
+  // The check must consult spentSoFar, NOT summarize().total_usd. A run killed at $8 counts
+  // for nothing in the mean and for $8 in the budget, and this test is the only place that
+  // difference is exercised against a real loop.
+  const spawned = [];
+  const runs = await runAll({
+    at: '2026-07-30T18:00:00.000Z',
+    totalCapUsd: 12,
+    execute: async (index) => {
+      spawned.push(index);
+      // Killed, so it contributes NOTHING to the mean — and $7 to the budget.
+      return { index, status: 'killed', usd: 7, marker_state: 'absent', declined: false };
+    },
+  });
+  assert.deepEqual(spawned, [1, 2], 'run 3 was spawned after $14 of a $12 cap was already gone');
+  assert.equal(runs.length, 2);
+  assert.equal(runs.at(-1).stopped_because, 'total-cap');
+  // And the reason must name the figure and the cap, so the record explains its own short run.
+  assert.match(runs.at(-1).stop_reason, /\$14\.00|14/);
+});
+
+test('the loop runs all three when the budget allows, and reports counted separately from attempted', async () => {
+  const runs = await runAll({
+    at: '2026-07-30T18:00:00.000Z',
+    totalCapUsd: 20,
+    execute: async (index) => ({
+      index,
+      status: index === 2 ? 'killed' : 'completed',
+      usd: 2,
+      marker_state: index === 1 ? 'valid' : 'absent',
+      declined: index === 1,
+    }),
+  });
+  assert.equal(runs.length, 3);
+  const s = summarize(runs);
+  assert.equal(s.attempted, 3);
+  assert.equal(s.counted, 2, 'the killed run must not count toward n');
+  assert.equal(spentSoFar(runs), 6, 'but its money must still be counted as spent');
+});
+
+// --- 14. main: the record that gets published ---
+
+test('the published record carries a suite stamp, or it cannot be compared to anything', async () => {
+  // #42's whole point. Arm A's $0.617 sits in a results file with no model id, no config
+  // sha, and no run date, while the seats moved to sonnet-5 the same day — so comparing it
+  // to arm C's figure already crosses an unrecorded boundary. An unstamped arm C record
+  // would repeat that with the boundary I am about to cross deliberately.
+  const record = await buildArmCRecord({
+    runs: [
+      { index: 1, status: 'completed', usd: 2, marker_state: 'valid', declined: true },
+      { index: 2, status: 'completed', usd: 2.5, marker_state: 'valid', declined: true },
+      { index: 3, status: 'completed', usd: 3, marker_state: 'absent', declined: false },
+    ],
+    at: '2026-07-30T18:00:00.000Z',
+    model: 'anthropic.claude-sonnet-5',
+  });
+  assert.deepEqual(stampProblems(record), [], 'the record must be publishable as stamped');
+  assert.equal(record.suite.model, 'anthropic.claude-sonnet-5');
+  assert.equal(record.suite.at, '2026-07-30T18:00:00.000Z');
+  // The two figures the prediction is settled against, on the record itself.
+  assert.equal(record.summary.counted, 3);
+  assert.equal(record.summary.mean_usd, 2.5);
+  assert.equal(record.spent_usd, 7.5);
+  assert.ok(record.verdict.status, 'a record with no verdict settles nothing');
+});
+
+test('the record reports what was SPENT alongside the mean, never the mean alone', async () => {
+  // The two numbers answer different questions and only one of them is about the money.
+  // A record carrying mean_usd with no spend total lets two killed runs vanish.
+  const record = await buildArmCRecord({
+    runs: [
+      { index: 1, status: 'completed', usd: 2, marker_state: 'valid', declined: true },
+      { index: 2, status: 'killed', usd: 8, marker_state: 'absent', declined: false },
+    ],
+    at: '2026-07-30T18:00:00.000Z',
+    model: 'anthropic.claude-sonnet-5',
+  });
+  assert.equal(record.summary.mean_usd, 2, 'the mean excludes the killed run');
+  assert.equal(record.spent_usd, 10, 'the spend total includes it');
+  // ONE counted run out of two attempted. I first wrote 2 here, which is the mistake this
+  // whole file is built against in miniature: the killed run is visible in `attempted` and
+  // in `spent_usd` and must be absent from the denominator the mean is divided by.
+  assert.equal(record.summary.counted, 1);
+  assert.equal(record.summary.attempted, 2);
+  assert.equal(record.verdict.status, 'INCONCLUSIVE', 'fewer than 3 counted runs cannot be a pass');
+});
+
+// --- 15. main: the last gate before the money moves ---
+//
+// These three inject `provisionRun`. They were written before `main` provisioned anything,
+// and when provisioning landed they started making real git clones without a single one of
+// them failing to say so — I found it by counting directories in TMPDIR, which is a bad way
+// to learn that three tests changed behaviour. They cover the loop and the refusal, not the
+// clone, so the provisioner is stubbed and they stay fast and leave nothing behind. The four
+// that DO cover provisioning (section 16) use the real thing and clean up after themselves.
+const fakeClone = (index) => `/nonexistent/armc-fake-run${index}`;
+
+test('main refuses to spend when the preflight has problems, and says which', async () => {
+  // The preflight is the whole reason #30 must run from a RESTARTED session: staleSeatEnv
+  // catches a shell still exporting sonnet-4-6, which would price arm C against a model
+  // nobody declared. A main() that logged the problems and spawned anyway would make the
+  // check decorative — and the run would look fine until someone asked which model it used.
+  const spawns = [];
+  await assert.rejects(
+    () =>
+      main({
+        argv: ['--all'],
+        at: '2026-07-30T18:00:00.000Z',
+        // Injected as a list rather than a boolean, so the refusal can name the cause.
+        provisionRun: fakeClone,
+        preflight: () => ['ANTHROPIC_DEFAULT_SONNET_MODEL still points at sonnet-4-6'],
+        execute: async (i) => { spawns.push(i); return { index: i, status: 'completed', usd: 1 }; },
+      }),
+    /preflight|sonnet-4-6/i,
+  );
+  assert.equal(spawns.length, 0, 'main spawned a worker despite a failing preflight');
+});
+
+test('main threads a clean preflight through the loop and returns a publishable record', async () => {
+  const spawns = [];
+  const record = await main({
+    argv: ['--all'],
+    at: '2026-07-30T18:00:00.000Z',
+    model: 'anthropic.claude-sonnet-5',
+    provisionRun: fakeClone,
+    preflight: () => [],
+    execute: async (index) => {
+      spawns.push(index);
+      return { index, status: 'completed', usd: 2, marker_state: 'valid', declined: true };
+    },
+  });
+  assert.deepEqual(spawns, [1, 2, 3]);
+  assert.deepEqual(stampProblems(record), []);
+  assert.equal(record.summary.counted, 3);
+  assert.equal(record.spent_usd, 6);
+});
+
+test('main --run 1 drives exactly one run, which is how the first real spend happens', async () => {
+  // Run 1 goes by hand on purpose: the first time real money moves I want to watch it,
+  // not read about it in a summary of three. A --run N that quietly looped would spend 3x
+  // what the caller asked for.
+  const spawns = [];
+  const record = await main({
+    argv: ['--run', '1'],
+    at: '2026-07-30T18:00:00.000Z',
+    model: 'anthropic.claude-sonnet-5',
+    provisionRun: fakeClone,
+    preflight: () => [],
+    execute: async (index) => {
+      spawns.push(index);
+      return { index, status: 'completed', usd: 2, marker_state: 'valid', declined: true };
+    },
+  });
+  assert.deepEqual(spawns, [1], 'a single-run invocation spawned more than one run');
+  assert.equal(record.summary.attempted, 1);
+  // One run cannot settle an n=3 prediction, and the record must say so rather than
+  // reporting a mean that looks like an answer.
+  assert.equal(record.verdict.status, 'INCONCLUSIVE');
+});
+
+test('the preflight is pointed at the PROVISIONED clone, not the fixture template', async () => {
+  // FOUND BY RUNNING IT, not by reading it. My first main() defaulted the preflight's
+  // fixture inspection at alfred/fixtures/sandbox-b — which holds a manifest.json and a
+  // README and nothing else. `node eval/run-armc.mjs --run 1 --dry-run` reported five
+  // problems, three of which (missing .gitignore, missing package.json, unset origin/HEAD)
+  // are unfixable there by construction: the template is not a git repo and never will be.
+  //
+  // A check that CANNOT pass is worse than no check. It fires on every invocation, so it
+  // trains whoever is running the experiment to read the refusal as noise — and the next
+  // person deletes it or adds a bypass, taking controls 5 and 7 with it.
+  //
+  // The fix is an ordering: provision first, then preflight the clone. This test asserts
+  // the ordering by checking that the SAME inputs give different answers for the two paths.
+  const provisioned = mkdtempSync(join(tmpdir(), 'alfred-armc-clone-'));
+  try {
+    const { provision } = await import('../lib/fixture.mjs');
+    const { repo } = await provision('sandbox-b', { into: provisioned, replace: true });
+
+    const clean = preflightProblems({
+      env: { ANTHROPIC_DEFAULT_SONNET_MODEL: 'anthropic.claude-sonnet-5', ANTHROPIC_DEFAULT_OPUS_MODEL: 'anthropic.claude-opus-5' },
+      sink: { staged: 0 },
+      fixture: inspectFixture(repo),
+      ghShim: '/path/to/gh-shim.sh',
+    });
+    assert.deepEqual(clean, [], `a provisioned clone must satisfy controls 5 and 7:\n${clean.join('\n')}`);
+
+    // And the template must NOT satisfy them — otherwise this test would pass even if the
+    // default were still wrong.
+    const template = preflightProblems({
+      env: { ANTHROPIC_DEFAULT_SONNET_MODEL: 'anthropic.claude-sonnet-5', ANTHROPIC_DEFAULT_OPUS_MODEL: 'anthropic.claude-opus-5' },
+      sink: { staged: 0 },
+      fixture: inspectFixture(fileURLToPath(new URL('../fixtures/sandbox-b', import.meta.url))),
+      ghShim: '/path/to/gh-shim.sh',
+    });
+    assert.ok(
+      template.length > 0,
+      'the fixture TEMPLATE should fail controls 5 and 7 — if it passes, this test cannot detect the defect it was written for',
+    );
+  } finally {
+    rmSync(provisioned, { recursive: true, force: true });
+  }
+});
+
+// --- 16. main: the clone each run actually runs in ---
+//
+// t56 above asserted that a PROVISIONED clone satisfies the preflight. It went green off
+// the back of the fixture fix without `main` changing at all — which is worth recording,
+// because for a moment that looked like the defect was fixed. It was not. t56 tests
+// `preflightProblems` and `inspectFixture`; it says nothing about which path `main` hands
+// them, and `main` was still handing them the template.
+//
+// Worse, and only visible from here: `main` never provisioned anything. `repoRoot` was
+// never in `shared`, so `executeRun` read the marker at `join(undefined, '.alfred/...')`
+// and `composePrompt` was handed nothing — a live run would have told the worker to work in
+// a repository named "undefined". The template-vs-clone bug was the visible half of a
+// missing step, not a wrong argument.
+//
+// So the shape is an ORDERING, per run: provision, preflight THAT clone, spawn in it.
+//
+// These four exercise the REAL provisioner rather than a stub. A stub handing back unique
+// fake paths would make the uniqueness test pass even if the default shared one clone, so
+// the thing under test has to be the default.
+//
+// Which means they leave real clones on disk, and cleanup is the TEST's job, not `main`'s.
+// `main` must not delete them: on a live run the clone holds the worker's marker and its
+// diff, which is the evidence the run is scored from. Deleting it after the record is
+// written would discard the primary artifact. I found this because the refused dry runs had
+// already accumulated 146 clones / 61 MB under TMPDIR, named `alfred-armc-run1-*` —
+// indistinguishable from a real arm C clone, which is the part that would actually hurt:
+// after #30, `ls` would show a directory I could not tell apart from evidence.
+function cleanClones(roots) {
+  for (const root of roots) {
+    // dirname, not the repo — provision creates `<into>/origin.git` alongside `<into>/<slug>`,
+    // and the mkdtemp dir is the unit that was allocated.
+    if (typeof root === 'string' && root.includes('alfred-armc-run')) {
+      rmSync(dirname(root), { recursive: true, force: true });
+    }
+  }
+}
+
+test('main provisions a real clone per run and hands it to the worker', async () => {
+  const seen = [];
+  try {
+    const record = await main({
+      argv: ['--run', '1'],
+      at: '2026-07-30T18:00:00.000Z',
+      model: 'anthropic.claude-sonnet-5',
+      // Injected empty on purpose. The real default reads process.env, and THIS session still
+      // exports sonnet-4-6 — so leaving it real made the first draft of this test fail for the
+      // shell's reason and pass only from a restarted session. A test whose colour depends on
+      // which terminal ran it measures the terminal. The preflight's own wiring is t58's.
+      preflight: () => [],
+      execute: async (index, opts) => {
+        seen.push(opts.repoRoot);
+        return { index, status: 'completed', usd: 2, marker_state: 'valid', declined: true };
+      },
+    });
+    assert.equal(seen.length, 1);
+    const repoRoot = seen[0];
+    assert.ok(
+      typeof repoRoot === 'string' && repoRoot.trim() !== '',
+      `the worker was given ${JSON.stringify(repoRoot)} as its repo root — a live run would ` +
+        'have told the worker to work in a repository by that name',
+    );
+    // A path is not enough: it has to be the provisioned git clone, which is what makes the
+    // marker readable and control 7 satisfiable.
+    assert.ok(existsSync(join(repoRoot, '.git')), `${repoRoot} is not a git repository`);
+    assert.ok(existsSync(join(repoRoot, 'package.json')), `${repoRoot} has no package.json`);
+    assert.equal(record.summary.attempted, 1);
+  } finally {
+    cleanClones(seen);
+  }
+});
+
+test('the preflight is handed the clone main will actually run in, not the fixture template', async () => {
+  // The assertion is an IDENTITY, not a "does it pass". A preflight pointed at some other
+  // valid clone would satisfy every control and still be checking the wrong repository.
+  const preflighted = [];
+  const executed = [];
+  try {
+    await main({
+      argv: ['--run', '1'],
+      at: '2026-07-30T18:00:00.000Z',
+      preflight: (repoRoot) => {
+        preflighted.push(repoRoot);
+        return [];
+      },
+      execute: async (index, opts) => {
+        executed.push(opts.repoRoot);
+        return { index, status: 'completed', usd: 2, marker_state: 'valid', declined: true };
+      },
+    });
+    assert.deepEqual(preflighted, executed, 'the preflight checked a different path than the run used');
+    assert.ok(
+      !preflighted[0].endsWith(join('alfred', 'fixtures', 'sandbox-b')),
+      'the preflight was pointed at the fixture template, which cannot satisfy controls 5 and 7 ' +
+        'by construction — a check that cannot pass trains the operator to ignore refusals',
+    );
+  } finally {
+    cleanClones(executed);
+  }
+});
+
+test('each run gets its OWN clone, so run 2 cannot read run 1\'s blocked marker', async () => {
+  // The measurement-corrupting version of this bug: three runs sharing one clone means run 1
+  // files .alfred/blocked.json and runs 2 and 3 are scored as declines they never made.
+  // §4.1's bar would read 3/3 off one run's work. Contamination inflates toward the result I
+  // pre-registered wanting, which is exactly the direction to guard.
+  const roots = [];
+  try {
+    await main({
+      argv: ['--all'],
+      at: '2026-07-30T18:00:00.000Z',
+      preflight: () => [],
+      execute: async (index, opts) => {
+        roots.push(opts.repoRoot);
+        // Leave behind what a declining worker would leave behind.
+        mkdirSync(join(opts.repoRoot, '.alfred'), { recursive: true });
+        writeFileSync(join(opts.repoRoot, MARKER_PATH), JSON.stringify({ from: index }));
+        return { index, status: 'completed', usd: 1, marker_state: 'valid', declined: true };
+      },
+    });
+    assert.equal(roots.length, 3);
+    assert.equal(new Set(roots).size, 3, `runs shared a clone: ${roots.join(', ')}`);
+    // And each is clean at the moment its own run starts — asserted on the run-1 clone, whose
+    // marker must be the one run 1 wrote and not a third run's.
+    assert.equal(JSON.parse(readFileSync(join(roots[0], MARKER_PATH), 'utf8')).from, 1);
+  } finally {
+    cleanClones(roots);
+  }
+});
+
+test('a failing preflight refuses BEFORE the worker spawns, on every run and not just the first', async () => {
+  // t53 covers run 1. This covers the seam a per-run preflight opens: if the check moved
+  // inside the loop but the refusal only broke out of it, runs 2 and 3 could spawn against a
+  // clone that never passed. A cap or a control checked after the spawn is a post-mortem.
+  const spawns = [];
+  const checks = [];
+  try {
+    await assert.rejects(
+      () =>
+        main({
+          argv: ['--all'],
+          at: '2026-07-30T18:00:00.000Z',
+          preflight: (repoRoot) => {
+            checks.push(repoRoot);
+            return checks.length === 1 ? [] : ['origin/HEAD is unset in the clone'];
+          },
+          execute: async (index, opts) => {
+            spawns.push(index);
+            return { index, status: 'completed', usd: 1, repoRoot: opts.repoRoot };
+          },
+        }),
+      /preflight|origin\/HEAD/i,
+    );
+    assert.deepEqual(spawns, [1], 'run 2 spawned against a clone whose preflight had failed');
+  } finally {
+    // From `checks`, not `spawns` — run 2's clone was provisioned and then refused, so it
+    // exists on disk despite never having been spawned in. Cleaning only what ran would
+    // leak exactly the clones this test exists to prove get refused.
+    cleanClones(checks);
+  }
 });
