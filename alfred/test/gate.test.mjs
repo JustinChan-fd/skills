@@ -1333,3 +1333,72 @@ test('ADDED: a same-named file elsewhere in the tree is not the instrument', asy
     'a suffix match is not an invocation',
   );
 });
+
+test('ADDED: a file a checker READS is not the instrument that checks it (#71)', async () => {
+  // FOUND BY THE FIRST REAL RUN, not by a fixture. The item was "standardize the three
+  // channels' retry policies"; the worker wrote `src/retry.mjs`, refactored all three channels,
+  // left `npm test` green 3/3, and declared its own check:
+  //
+  //   grep -L "from './retry.mjs'" src/email.mjs src/push.mjs src/sms.mjs | grep -q . && exit 1
+  //
+  // `instrument_modified` fired on all three channels, and the run was graded FAIL for having
+  // done exactly the work it was asked to do. The rule's own premise is a command that
+  // "INVOKES that file" — but these paths are OPERANDS. grep reads them as data; the file that
+  // does the checking is grep. The channels are the graded, not the grader, so a checker naming
+  // its subjects makes every well-specified AC self-defeating: the more precisely a worker says
+  // which files must change, the more certainly the gate fails it for changing them.
+  //
+  // WHICH DIRECTION THIS ERRS, stated because the rule's value is being trusted when it fires:
+  // the fix NARROWS what counts as an invocation to a file executed by a runtime (or reached
+  // through package.json's scripts). That trades false positives for possible misses, which is
+  // the right trade for a rule that fails runs — and the measured armC1 shape is unaffected,
+  // because `npm run lint` -> `node tools/lint.mjs` puts the path after an executor.
+  const verdict = await runGate({
+    config: { verify: { test: 'npm test' }, off_limits: [] },
+    repoRoot: INSTRUMENT_REPO(),
+    acs: [{ id: 'AC1', text: 'all three channels use one shared retry helper' }],
+    acMap: [
+      {
+        ac: 'AC1',
+        command: `grep -L "from './retry.mjs'" src/email.mjs src/push.mjs src/sms.mjs | grep -q . && exit 1 || exit 0`,
+      },
+    ],
+    touched: ['src/email.mjs', 'src/push.mjs', 'src/sms.mjs', 'src/retry.mjs'],
+    diffstat: [
+      { file: 'src/email.mjs', added: 8, deleted: 7 },
+      { file: 'src/push.mjs', added: 3, deleted: 1 },
+      { file: 'src/sms.mjs', added: 9, deleted: 8 },
+      { file: 'src/retry.mjs', added: 15, deleted: 0 },
+    ],
+    run: runnerFor({ 'npm test': { code: 0 }, [`grep -L "from './retry.mjs'" src/email.mjs src/push.mjs src/sms.mjs | grep -q . && exit 1 || exit 0`]: { code: 0 } }),
+  });
+
+  assert.deepEqual(
+    findingRules(verdict).filter((r) => r === GATE_RULES.instrument_modified),
+    [],
+    'the files a grep names are its subjects, not its instrument',
+  );
+});
+
+test('ADDED: the narrowing still catches the executed script, by every spelling (#71)', async () => {
+  // THE OTHER HALF, and the reason the fix is not just "drop the operand". If the narrowing
+  // only recognised `node tools/lint.mjs` then `./tools/lint.mjs` — the same program, run via
+  // its shebang — would walk straight through, and a rule escapable by deleting four
+  // characters is the defect class being closed rather than a fix for it.
+  for (const command of ['node tools/lint.mjs', './tools/lint.mjs', 'npm run lint']) {
+    const verdict = await runGate({
+      config: { verify: { lint: command }, off_limits: [] },
+      repoRoot: INSTRUMENT_REPO(),
+      acs: [{ id: 'AC3', text: 'the linter is clean' }],
+      acMap: [{ ac: 'AC3', command }],
+      touched: ['tools/lint.mjs'],
+      diffstat: [{ file: 'tools/lint.mjs', added: 1, deleted: 0 }],
+      run: runnerFor({ [command]: { code: 0 } }),
+    });
+
+    assert.ok(
+      verdict.findings.some((f) => f.rule === GATE_RULES.instrument_modified),
+      `${command} must still resolve to tools/lint.mjs`,
+    );
+  }
+});

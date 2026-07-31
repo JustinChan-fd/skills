@@ -459,13 +459,39 @@ function filesInvokedBy(command, scripts, depth = 0, seen = new Set(), prefix = 
   const chain = [...prefix, text];
   const files = new Map();
 
-  // A path-shaped token with a source extension. Anchored on a separator or start so
-  // `lint.mjs` at the root is NOT read as `tools/lint.mjs` — a suffix match is not an
-  // invocation, and a false positive in a rule whose only value is being trusted when it
-  // fires is worse than a miss.
-  for (const match of text.matchAll(/(?:^|[\s='"(])(\.{0,2}\/?[\w.@-]+(?:\/[\w.@-]+)*\.[cm]?[jt]sx?)\b/g)) {
-    const rel = normalize(match[1]).replace(/^\.\//, '');
-    if (rel && !files.has(rel)) files.set(rel, chain);
+  // A path-shaped token with a source extension, IN AN EXECUTED POSITION. Anchored on a
+  // separator or start so `lint.mjs` at the root is NOT read as `tools/lint.mjs` — a suffix
+  // match is not an invocation, and a false positive in a rule whose only value is being
+  // trusted when it fires is worse than a miss.
+  //
+  // #71 IS WHY POSITION IS PART OF THE PATTERN. The first real run declared its own check as
+  // `grep -L "from './retry.mjs'" src/email.mjs src/push.mjs src/sms.mjs`, and every one of
+  // those paths is an OPERAND — grep reads them as data, and the program doing the checking is
+  // grep. Reading any path-shaped token as an invocation made the three refactored channels
+  // their own instrument and failed a run for doing precisely the work it was asked to do. The
+  // more precisely an AC names the files that must change, the more certainly it self-defeats.
+  //
+  // So a path counts when it is EXECUTED: preceded by a runtime, or run directly through its
+  // shebang. Both spellings, because `node tools/lint.mjs` and `./tools/lint.mjs` are the same
+  // program and a rule escapable by deleting four characters is the defect class being closed
+  // rather than a fix for it. This is deliberately a NARROWING — it trades false positives for
+  // misses, the right direction for a rule that fails runs — and the header's list of what the
+  // rule does not catch grows by one: a checker passed to an interpreter this pattern does not
+  // name.
+  const PATH = String.raw`(\.{0,2}\/?[\w.@-]+(?:\/[\w.@-]+)*\.[cm]?[jt]sx?)`;
+  const EXECUTORS = 'node|nodejs|npx|ts-node|tsx|deno|bun|python3?|sh|bash|zsh';
+  const invocations = [
+    // A runtime and its script. `--flags` between the two are ordinary (`node --test x.mjs`).
+    new RegExp(String.raw`(?:^|[\s;&|(])(?:${EXECUTORS})\s+(?:-[^\s]+\s+)*${PATH}\b`, 'g'),
+    // Run directly. `./tools/lint.mjs` — REQUIRING the leading `./` or `/`, because a bare
+    // `tools/lint.mjs` alone in a command is not something a shell executes.
+    new RegExp(String.raw`(?:^|[\s;&|(])(\.{0,2}\/[\w.@-]+(?:\/[\w.@-]+)*\.[cm]?[jt]sx?)\b`, 'g'),
+  ];
+  for (const pattern of invocations) {
+    for (const match of text.matchAll(pattern)) {
+      const rel = normalize(match[1]).replace(/^\.\//, '');
+      if (rel && !files.has(rel)) files.set(rel, chain);
+    }
   }
 
   // Script indirection. Matched on the whole run form so a bare word in a message cannot be
