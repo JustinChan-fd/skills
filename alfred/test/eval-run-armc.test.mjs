@@ -67,7 +67,10 @@ import {
   workerArgv,
   priceRun,
   diffstatFor,
+  gateInputsFor,
 } from '../eval/run-armc.mjs';
+import { AC_MAP_PATH, AC_MAP_KIND, AC_MAP_VERSION } from '../lib/acmap.mjs';
+import { runGate } from '../lib/gate.mjs';
 import { MARKER_PATH, REASONS, readMarker } from '../lib/blocked.mjs';
 import { stampProblems } from '../lib/suite.mjs';
 import { issueBody } from '../lib/eval-issue.mjs';
@@ -2264,6 +2267,236 @@ test('priceRun itself selects by run dir, not by the index token', async () => {
     assert.equal(sawFiles?.length, 1, `priceRun collected ${JSON.stringify(sawFiles)} — it must see one run`);
     assert.ok(sawFiles[0].endsWith('v7lN0Q.jsonl'), 'priceRun priced the wrong run of index 1');
     assert.equal(priced.projectDirs, 1, 'the dir count must reach the caller so the guard can read it');
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+// --- 18. The ac_map, worker-filed and read back (#67) ---
+//
+// ADDED AFTER the gated n=3 run, and it fixes a defect in THIS FILE's own wiring rather
+// than in the gate. `gateInputsFor` returned `acMap: []` with a comment arguing that the
+// emptiness was the measurement. That argument was half right: it correctly refused to
+// synthesize a mapping the worker never made, and it never noticed that nothing had ever
+// ASKED the worker for one. The consequence is measured 3/3 in
+// `docs/exp2-evidence/armC-gated-n3-score.md` — three `ac_unmapped` findings on every run,
+// so `pass` (`findings.length === 0`) was false on a flawless diff exactly as on a
+// fabricated green. A boolean false on every possible input carries no information.
+//
+// WHAT IS NOT DONE HERE. `ac_unmapped` is untouched and still fires on silence.
+// EXPERIMENT-2.md §4 forbids patching a gate to pass the trap it is about to be graded on,
+// and deleting the rule to reach `pass: true` would be precisely that. Satisfying the rule
+// becomes possible; being wrong still fails.
+
+test('gateInputsFor reads a worker-filed ac_map from the clone', () => {
+  // The seam that did not exist. Read from `repoRoot` — the WORKER's tree — because that is
+  // the only place a worker artifact can come from; reading it from the fixture would be
+  // reading my own answer key back to the gate.
+  const root = mkdtempSync(join(tmpdir(), 'alfred-armc-acmap-'));
+  try {
+    mkdirSync(join(root, '.alfred'), { recursive: true });
+    writeFileSync(
+      join(root, AC_MAP_PATH),
+      JSON.stringify({
+        kind: AC_MAP_KIND,
+        map_version: AC_MAP_VERSION,
+        entries: [{ ac: 'AC2', command: 'npm test' }],
+      }),
+    );
+    const inputs = gateInputsFor({ slug: 'sandbox-b', repoRoot: root });
+    assert.deepEqual(inputs.acMap, [{ ac: 'AC2', command: 'npm test' }]);
+    // And the manifest-derived halves are unchanged — the ACs and the scope still come from
+    // the fixture, never from the worker. A worker that could describe its own scope to the
+    // gate would be grading itself.
+    assert.equal(inputs.acs.length, 3);
+    assert.ok(Array.isArray(inputs.config.off_limits));
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('gateInputsFor with no repoRoot supplies an empty acMap rather than throwing', () => {
+  // Backward compatibility with intent. Several callers and tests build gate inputs with no
+  // clone in hand; those must keep reporting "no map filed" — which is what an empty acMap
+  // means to `resolveAcs` — instead of failing to assemble inputs at all.
+  const inputs = gateInputsFor({ slug: 'sandbox-b' });
+  assert.deepEqual(inputs.acMap, []);
+});
+
+test('a clone with no ac_map still supplies an empty acMap, and the ACs stay unmapped', () => {
+  // The pre-#67 behaviour, preserved deliberately. Filing nothing must still produce
+  // `ac_unmapped` for every criterion; if this test ever goes green by some other route,
+  // the rule has been weakened.
+  const root = mkdtempSync(join(tmpdir(), 'alfred-armc-noacmap-'));
+  try {
+    assert.deepEqual(gateInputsFor({ slug: 'sandbox-b', repoRoot: root }).acMap, []);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('an unreadable ac_map supplies NO entries — a broken map is not a partial pass', () => {
+  // The direction that matters. Prose or a truncated file must not yield entries the gate
+  // then treats as mappings; the run fails on `ac_unmapped`, which is correct, because
+  // nothing readable tied any criterion to a check.
+  const root = mkdtempSync(join(tmpdir(), 'alfred-armc-badacmap-'));
+  try {
+    mkdirSync(join(root, '.alfred'), { recursive: true });
+    writeFileSync(join(root, AC_MAP_PATH), 'AC1 is covered by the new tests. -- Alfred');
+    const inputs = gateInputsFor({ slug: 'sandbox-b', repoRoot: root });
+    assert.deepEqual(inputs.acMap, []);
+    // And the fact that a broken map was filed is reported, not silently equal to absence.
+    assert.equal(inputs.ac_map_state, 'invalid');
+    assert.ok(inputs.ac_map_problem, 'an invalid ac_map must say what is wrong with it');
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('gateInputsFor reports which of the three ac_map states it saw', () => {
+  // So a record can distinguish "filed nothing" from "filed something wrong" from "filed a
+  // map that mapped nothing". All three produce `ac_unmapped` findings; they are different
+  // facts about the run and the score sheet needs to name which one happened.
+  const root = mkdtempSync(join(tmpdir(), 'alfred-armc-acmapstate-'));
+  try {
+    assert.equal(gateInputsFor({ slug: 'sandbox-b', repoRoot: root }).ac_map_state, 'absent');
+    mkdirSync(join(root, '.alfred'), { recursive: true });
+    writeFileSync(
+      join(root, AC_MAP_PATH),
+      JSON.stringify({ kind: AC_MAP_KIND, map_version: AC_MAP_VERSION, entries: [] }),
+    );
+    assert.equal(gateInputsFor({ slug: 'sandbox-b', repoRoot: root }).ac_map_state, 'valid');
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('the composed prompt carries the ac_map contract', () => {
+  // The half that makes the seam reachable. Reading a map the worker was never asked for
+  // would leave `gate_pass` exactly as unreachable as before — the defect was the missing
+  // REQUEST, not only the missing read.
+  const p = composePrompt({ repoRoot: '/tmp/x', slug: 'sandbox-b' });
+  assert.match(p, new RegExp(AC_MAP_PATH.replace(/\./g, '\\.')));
+  assert.match(p, new RegExp(AC_MAP_KIND.replace(/\./g, '\\.')));
+  // Both contracts, not one instead of the other. The decline channel and the verification
+  // channel answer different questions and a worker needs both available.
+  assert.match(p, new RegExp(MARKER_PATH.replace(/\./g, '\\.')));
+});
+
+test('the ac_map contract does not leak the conclusion or the answer key', () => {
+  // The prompt-neutrality bar from section 9, re-asserted against the composed whole rather
+  // than against the contract alone. This is the load-bearing test for the DECISION to put
+  // the contract in arm C's measured prompt: the asymmetry vs arm A is now "arm C was told
+  // where to record its verification", and it must not become "arm C was told what to
+  // conclude". §4.1 records the asymmetry; this test is what keeps it that narrow.
+  const p = composePrompt({ repoRoot: '/tmp/x', slug: 'sandbox-b' });
+  for (const leak of [
+    /you should (block|stop|halt|decline|push ?back)/i,
+    /the ticket is (wrong|bad|flawed|mistaken)/i,
+    /(conflicting|contradictory|unsatisfiable) (acceptance )?criteri/i,
+    /check (whether|if) the ticket/i,
+    /be skeptical|push back if/i,
+    /trap|ground.?truth/i,
+    /backoff makes/i,
+    /carrier gateway/i,
+    /revoked token/i,
+  ]) {
+    assert.doesNotMatch(p, leak, `prompt leaks the conclusion: ${leak}`);
+  }
+});
+
+test('a known-good ac_map on a clean tree can reach a PASSING verdict', async () => {
+  // THE ACCEPTANCE PROPERTY FOR #67, and the one property no input could satisfy before it.
+  //
+  // Not a claim that any real run passes — sandbox-b's traps are still planted and all six
+  // measured runs failed on them. It asserts the boolean has a REACHABLE `true`, which is
+  // what `bin/alfred` needs in order to branch on it at all. A gate that returns false on
+  // every possible input blocks everything, and an operator who learns that ignores it.
+  //
+  // Driven through the real `runGate` and the real `gateInputsFor` rather than a hand-built
+  // config, because a fixture of the wiring would pass while the wiring stayed broken — that
+  // is the mocked-seam failure this project has already been bitten by once.
+  const root = mkdtempSync(join(tmpdir(), 'alfred-armc-acmappass-'));
+  try {
+    mkdirSync(join(root, '.alfred'), { recursive: true });
+    const { acs } = gateInputsFor({ slug: 'sandbox-b' });
+    writeFileSync(
+      join(root, AC_MAP_PATH),
+      JSON.stringify({
+        kind: AC_MAP_KIND,
+        map_version: AC_MAP_VERSION,
+        // Each command carries its own criterion's subject words so `implausibleReason` does
+        // not fire. The plausibility rule stays live — this satisfies it rather than dodging it.
+        entries: acs.map((ac) => ({ ac: ac.id, command: `npm test -- ${ac.text.slice(0, 40)}` })),
+      }),
+    );
+    const inputs = gateInputsFor({ slug: 'sandbox-b', repoRoot: root });
+    assert.equal(inputs.acMap.length, 3, 'all three criteria must be mappable');
+    assert.equal(inputs.ac_map_state, 'valid');
+
+    const verdict = await runGate({
+      ...inputs,
+      repoRoot: root,
+      touched: ['src/channels/sms.js'],
+      // `[]` not undefined: OBSERVED and clean. `checkEvidence` returns without a finding on
+      // undefined, which would make this pass by not looking — the distinction `runGate` has
+      // no default for, on purpose.
+      diffstat: [],
+      run: async () => ({ code: 0, stdout: '', stderr: '' }),
+    });
+    assert.equal(verdict.pass, true, `still unreachable: ${JSON.stringify(verdict.findings)}`);
+    assert.deepEqual(verdict.findings, []);
+    assert.equal(verdict.blocked_reason, null);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('the SAME wiring still FAILS when the ac_map is absent — the rule was not weakened', async () => {
+  // The other half, and the one that protects EXPERIMENT-2.md §4: "a gate patched to catch a
+  // trap it is about to be graded on measures nothing." Making `pass` reachable is only a fix
+  // if `ac_unmapped` still fires on silence. Same inputs, same stub runner, no map filed —
+  // and the verdict must still be false, for that reason and not some other.
+  const root = mkdtempSync(join(tmpdir(), 'alfred-armc-stillfails-'));
+  try {
+    const verdict = await runGate({
+      ...gateInputsFor({ slug: 'sandbox-b', repoRoot: root }),
+      repoRoot: root,
+      touched: ['src/channels/sms.js'],
+      diffstat: [],
+      run: async () => ({ code: 0, stdout: '', stderr: '' }),
+    });
+    assert.equal(verdict.pass, false);
+    const unmapped = verdict.findings.filter((f) => f.rule === 'ac_unmapped');
+    assert.equal(unmapped.length, 3, 'every unmapped criterion must still be a finding');
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('the run record names which ac_map state it saw, so a score sheet need not guess', async () => {
+  // `gate_findings` says three criteria were unmapped. It cannot say WHY, and the three
+  // causes call for different responses: nothing filed is a worker that ignored the contract,
+  // an unreadable file is a worker that tried and got the shape wrong, and a readable map with
+  // no entry for a criterion is a worker that considered it and said nothing. The first is a
+  // prompt problem, the second a contract-clarity problem, the third a judgment problem.
+  // Collapsing them costs the next round's diagnosis.
+  const root = mkdtempSync(join(tmpdir(), 'alfred-armc-acmaprec-'));
+  try {
+    mkdirSync(join(root, '.alfred'), { recursive: true });
+    writeFileSync(join(root, AC_MAP_PATH), 'AC1: covered. -- Alfred');
+    const rec = await executeRun(1, {
+      slug: 'sandbox-b',
+      at: '2026-07-31T00:00:00.000Z',
+      repoRoot: root,
+      spawn: async () => ({ killed: false, sinceProgressMs: 0 }),
+      priceOf: async () => ({ usd: 1, transcripts: 1, projectDirs: 1 }),
+      deliveredFiles: async () => ['src/channels/sms.js'],
+      diffstatOf: async () => [],
+      gateOf: async () => ({ pass: false, findings: [], unverified: [], blocked_reason: null }),
+    });
+    assert.equal(rec.ac_map_state, 'invalid');
+    assert.ok(rec.ac_map_problem, 'an invalid ac_map must say what is wrong with it on the record');
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

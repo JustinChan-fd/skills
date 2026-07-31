@@ -61,6 +61,7 @@ import { staleSeatEnv } from './otel-capture.mjs';
 // ReferenceError on first use, during a run that spends money. No test caught it because
 // there was no test; that draft was deleted rather than back-filled.
 import { markerContract, readMarker, MARKER_PATH } from '../lib/blocked.mjs';
+import { acMapContract, readAcMap, AC_MAP_PATH } from '../lib/acmap.mjs';
 import { issueBody, issueTitle } from '../lib/eval-issue.mjs';
 // §2.2's delivery observable, shared rather than copied (#63). The runner needs the same
 // answer the mechanical sheet gives — "did this arm change anything that bears on the
@@ -804,7 +805,18 @@ export function composePrompt({ repoRoot, slug, fixturesRoot = join(ALFRED, 'fix
     '',
     '---',
     '',
+    // BOTH contracts, and #67 added the second. They answer different questions — "I could
+    // not do this" versus "here is how you can check what I did" — and a worker handed only
+    // the first has no place to record its verification, so the gate reads silence and
+    // `ac_unmapped` fires no matter how good the work is.
+    //
+    // This is a DECLARED ASYMMETRY vs arm A, whose prompt carried neither, and §4.1 records
+    // it. The narrow form is what keeps the measurement honest: arm C is told where to write
+    // its verification down, never what to conclude about the ticket. Two tests hold that
+    // line — one over `acMapContract()` alone, one over this composed whole.
     markerContract(),
+    '',
+    acMapContract(),
   ].join('\n');
 }
 
@@ -1080,22 +1092,54 @@ const GATE_CHECKS = Object.freeze({ test: 'npm test', lint: 'npm run lint' });
 
 // Assembles what `runGate` grades, from the manifest rather than from anything the worker
 // wrote. A worker that could describe its own scope to the gate would be grading itself.
-export function gateInputsFor({ slug = 'sandbox-b', fixturesRoot = join(ALFRED, 'fixtures') } = {}) {
+export function gateInputsFor({
+  slug = 'sandbox-b',
+  fixturesRoot = join(ALFRED, 'fixtures'),
+  repoRoot = null,
+} = {}) {
   const manifest = JSON.parse(readFileSync(join(fixturesRoot, String(slug), 'manifest.json'), 'utf8'));
+
+  // The ac_map is the ONE input that comes from the worker's tree rather than the manifest,
+  // and the asymmetry is the point. The criteria and the scope are the ticket's — a worker
+  // that could restate either to the gate would be grading itself. The map is the worker's
+  // own claim about how its work is checked, which is the thing the gate exists to test.
+  //
+  // Until #67 this read `acMap: []` with a comment arguing that the emptiness WAS the
+  // measurement: synthesizing a mapping here would manufacture the evidence the gate demands
+  // and the resulting pass would mean nothing. That half is still true and is why nothing is
+  // synthesized below. What the comment missed is that nothing ever ASKED the worker for a
+  // map, so `ac_unmapped` fired on all three criteria in all six measured runs and
+  // `gate_pass` (`findings.length === 0`) was false on a flawless diff exactly as on a
+  // fabricated green. A boolean that is false on every possible input cannot discriminate.
+  // `composePrompt` now carries `acMapContract()`, and this reads back what that asks for.
+  //
+  // Three states are reported, not two, because they are different facts about a run that
+  // all produce the same findings: nothing filed, something filed that could not be read, and
+  // a readable map. Only the second says the contract was received and misunderstood.
+  const acMap = repoRoot ? readAcMap(readIfPresent(join(String(repoRoot), AC_MAP_PATH))) : readAcMap(null);
+
   return {
     config: { verify: { ...GATE_CHECKS }, off_limits: manifest.off_limits ?? [] },
     acs: (manifest.ticket?.acceptance_criteria ?? []).map((ac) => ({ id: ac.id, text: ac.text })),
-    // EMPTY, AND THAT IS THE MEASUREMENT — not a gap being papered over.
-    //
-    // An ac_map is a worker artifact: "AC1 is verified by THIS command." Arm C's worker
-    // produces none, so `resolveAcs` will emit `ac_unmapped` for all three ACs and
-    // `gate_pass` will be false for every run so far. That is true, and it is the honest
-    // report of a worker that never tied its claims to a check. Synthesizing a plausible
-    // mapping here would manufacture the very evidence the gate exists to demand, and the
-    // resulting pass would mean nothing. `gate_findings` travels with the verdict so a
-    // reader sees WHICH rules fired rather than one collapsed boolean.
-    acMap: [],
+    // Entries only when the envelope read clean. An unreadable map supplies NOTHING rather
+    // than whatever happened to parse — `ac_unmapped` then fires, the run fails, and that is
+    // correct, because nothing readable tied any criterion to a check.
+    acMap: acMap.entries,
+    ac_map_state: acMap.state,
+    ac_map_problem: acMap.problem,
   };
+}
+
+// Absent and unreadable collapse to the same `null` here on purpose: `readAcMap` is what
+// distinguishes them, and it reads `null` as ABSENT. A file that exists but cannot be read
+// off disk (permissions, a race with the worker's own write) is genuinely indistinguishable
+// from one that was never written, and claiming otherwise would invent a state.
+function readIfPresent(path) {
+  try {
+    return readFileSync(path, 'utf8');
+  } catch {
+    return null;
+  }
 }
 
 export async function executeRun(index, opts = {}) {
@@ -1137,6 +1181,11 @@ export async function executeRun(index, opts = {}) {
       gate_observed: false,
       gate_findings: null,
       gate_problem: null,
+      // null, not 'absent'. A dry run never looked in a clone, and 'absent' would be a claim
+      // about a worker artifact nobody read — the same three-valued rule `usd` and `delivered`
+      // follow two fields up.
+      ac_map_state: null,
+      ac_map_problem: null,
       kill: null,
     };
   }
@@ -1201,14 +1250,27 @@ export async function executeRun(index, opts = {}) {
   let gatePass = null;
   let gateFindings = null;
   let gateProblem = null;
+  // Declared OUTSIDE the try, so a gate that throws still reports what the worker filed. The
+  // two facts are independent: reading the map off disk happens before the gate runs, and
+  // losing "an unreadable map was filed" because a later check crashed would discard the more
+  // diagnostic of the two.
+  let acMapState = null;
+  let acMapProblem = null;
   let diffstat;
   try {
     diffstat = (await diffstatOf(repoRoot)) ?? undefined;
     // `touched` is the raw delivered list, not `substantive`: the scope rule must see every
     // file the run wrote, including the ones §2.2 excludes from DELIVERY. An arm that edited
     // an off-limits path and a .gitignore has still touched an off-limits path.
+    // `repoRoot` twice, and both are load-bearing. `gateInputsFor` needs it to READ the
+    // worker's ac_map out of the clone; `runGate` needs it as the cwd to RUN the mapped
+    // commands in. Passing it only to the second — which is what this call did before #67 —
+    // leaves the map unread and every criterion unmapped, with no error anywhere.
+    const gateInputs = gateInputsFor({ slug: opts.slug ?? 'sandbox-b', repoRoot });
+    acMapState = gateInputs.ac_map_state;
+    acMapProblem = gateInputs.ac_map_problem;
     const verdict = await gateOf({
-      ...gateInputsFor({ slug: opts.slug ?? 'sandbox-b' }),
+      ...gateInputs,
       repoRoot,
       touched: deliveryObserved ? changed : [],
       // undefined, not [], when the diff could not be read — `checkEvidence` returns without
@@ -1259,6 +1321,13 @@ export async function executeRun(index, opts = {}) {
     gate_observed: gateProblem === null,
     gate_findings: gateFindings,
     gate_problem: gateProblem,
+    // WHY the criteria resolved as they did, separately from the fact that they did (#67).
+    // `gate_findings` can say three criteria were unmapped; it cannot say whether the worker
+    // filed nothing, filed something unreadable, or filed a readable map that named none of
+    // them. Those are a prompt problem, a contract-clarity problem, and a judgment problem
+    // respectively, and only the third is about Alfred.
+    ac_map_state: acMapState,
+    ac_map_problem: acMapProblem,
     // §4.1's TWO clauses, measured separately. `valid` only for the marker: an invalid
     // marker is not a decline that counts, and `marker_state` above keeps that difference
     // readable. AND nothing substantive delivered: reporting 2 of 3 ACs "met in full" on a
