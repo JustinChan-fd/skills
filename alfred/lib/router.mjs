@@ -1,0 +1,180 @@
+// router — config in, argv array out. No spawn, no model call, no I/O.
+//
+// PLAN.md §6: "A table and two flags. Not a service, not a phase, not a model call." The table
+// is lib/models.mjs. This is the two flags, and the honest count is five.
+//
+// WHAT THE CLI ACTUALLY ENFORCES, measured against the live gateway rather than read off the
+// help text, because three of this project's last four defects were controls that could not
+// fire and encoding a flag's semantics on faith is how a fourth gets written:
+//
+//   --max-budget-usd    REAL. A $0.001 cap returned `is_error: true`,
+//                       `subtype: error_max_budget_usd`, `terminal_reason: budget_exhausted`.
+//                       Enforced POST-TURN, though: that run had already spent $0.0352 against
+//                       the $0.001 cap. So it bounds a runaway over several turns; it does not
+//                       bound the first one. Stated rather than glossed, because a ceiling
+//                       believed to be pre-flight is a ceiling trusted for the wrong thing.
+//   --agents `model`    REAL. Forced a delegation and `modelUsage` came back with two entries,
+//                       `anthropic.claude-sonnet-5` and `claude-haiku-4-5` — the subagent was
+//                       billed at the tier named here.
+//   --agents anything   IGNORED, SILENTLY. `{"probe":{...,"bogus_key_xyz":1}}` ran clean, and
+//   else                so did `maxTokens: 999999` — a value far above every published ceiling,
+//                       on a call where the subagent verifiably ran. An unknown key is not
+//                       rejected, not warned about, not forwarded.
+//
+// The consequence is the design: NO TOKEN CEILING IS WRITTEN INTO THE --agents PAYLOAD. Not
+// `maxTokens`, not `token_budget`. Either one would read in the config like a spend cap while
+// having no effect at all, which is worse than no cap — it makes the file look protected.
+// PLAN.md §M5 asks for "per-tier ceilings" in that payload; that is not a thing the CLI can do,
+// and the frozen test name is kept while what it asserts follows the measurement.
+//
+// So the $11.98 lesson (an unbounded subagent burning 3.9M tokens) rests on TWO separate things
+// and neither is that payload: `--max-budget-usd` for the dollar bound the CLI honours, and
+// SEATS[seat].token_budget as Alfred's own accounting, enforced by whoever is watching the
+// subagent — exported here as `seatBudgets` so it is available to be enforced rather than
+// implied. An unenforced budget in a flag and an unenforced budget in a variable are different:
+// the second does not pretend the vendor is checking it.
+
+import { SEATS, ceilingFor, normalizeModelId } from './models.mjs';
+
+// The subagent tiers, and the two omissions are the point. `worker`/`fallback` are the main
+// context rather than subagents. `adjudicator` is absent so that opus cannot be arrived at by
+// omission — PLAN.md §4: "models.agents has no opus entry by default. Escalation is explicit."
+export const AGENT_SEATS = Object.freeze(['scan', 'reason']);
+
+// THRESHOLDS.armC.spendCapUsd, which was pre-registered before arm C ran. Deliberately the KILL
+// number and not `acceptMeanUsd: 4`: armcost.mjs states that collapsing the two "would kill
+// every run that was about to produce the evidence that makes its own cost figure meaningful."
+// A run may legitimately cost $6, fail acceptance, and still be worth finishing.
+//
+// Copied rather than imported, because eval/ is experiment scaffolding and lib/ is the runtime;
+// test/router.test.mjs cross-checks this against the eval constant so the copy cannot drift
+// silently.
+const DEFAULT_BUDGET_USD = 8;
+
+// Each tier's brief. These reach the model, so they say what the seat is FOR — a description
+// that does not distinguish the tiers gives the delegating context no basis to pick one, and it
+// will default to whatever it read last.
+const AGENT_BRIEFS = Object.freeze({
+  scan: {
+    description:
+      'Mechanical reads with no judgement: list files, grep for a symbol, report what is on ' +
+      'disk. Use for lookups whose answer is a fact rather than an argument.',
+    prompt:
+      'You report what is in the repository, exactly as it is. Quote paths and line numbers. ' +
+      'If the answer is not in the files you read, say that instead of inferring it. You do ' +
+      'not judge whether the code is good and you do not propose changes.',
+  },
+  reason: {
+    description:
+      'Reads a diff, a ticket, or a body of code and judges it. Use when the question needs ' +
+      'an argument rather than a lookup.',
+    prompt:
+      'You judge what you are given and state the judgement plainly, with the evidence that ' +
+      'supports it. A false premise in a ticket is a finding to report, not an obstacle to ' +
+      'work around. Say what you are uncertain about rather than resolving it silently.',
+  },
+});
+
+export function budgetUsdFor(config) {
+  const stated = config?.budget_usd;
+  if (stated === undefined || stated === null) return DEFAULT_BUDGET_USD;
+  // Not coerced. `budget_usd: "lots"` becoming NaN and then reaching the flag as the string
+  // "NaN" is the kind of thing the CLI would accept and ignore, and then there is no cap.
+  if (typeof stated !== 'number' || !Number.isFinite(stated) || stated <= 0) {
+    throw new Error(
+      `budget_usd must be a positive finite number of dollars, got ${JSON.stringify(stated)}`,
+    );
+  }
+  return stated;
+}
+
+// Alfred's own per-seat accounting, which is NOT in the argv because the CLI does not enforce
+// it. Exported so a caller can enforce it by stopping the subagent; returning it from here
+// keeps one source for both halves of the routing decision.
+export function seatBudgets() {
+  return Object.fromEntries(AGENT_SEATS.map((name) => [name, SEATS[name].token_budget]));
+}
+
+export function agentsPayload(config) {
+  const overrides = config?.models?.agents ?? {};
+
+  // The CLI will not catch an operator's typo — measured: it accepted `bogus_key_xyz` without
+  // complaint. So `agnets: {...}` or `scna: {...}` would sit in the config file looking applied
+  // while the real seat ran on its default. This is the only place that can fail.
+  for (const name of Object.keys(overrides)) {
+    if (!AGENT_SEATS.includes(name)) {
+      throw new Error(
+        `unknown subagent seat '${name}': known seats are ${AGENT_SEATS.join(', ')}. ` +
+          'A misspelled seat is silently ignored by the CLI, so it is refused here.',
+      );
+    }
+  }
+
+  const payload = {};
+  for (const name of AGENT_SEATS) {
+    const model = overrides[name]?.model ?? SEATS[name].model;
+
+    // Throws on an unpublished id. Called for that effect: a typo should fail before anything
+    // spawns, not on the rejected request in the middle of an unattended tick.
+    ceilingFor(model);
+
+    // The $11.98 lesson as a refusal. A subagent tier may be retuned within its class, but
+    // routing one to opus is an escalation and escalation is explicit, logged, and adjudicated
+    // — never a line in a per-repo config file.
+    if (/opus/i.test(normalizeModelId(model))) {
+      throw new Error(
+        `subagent seat '${name}' is set to '${model}': no subagent tier may route to opus. ` +
+          'Opus is the adjudicator seat, reached by explicit escalation with a logged reason.',
+      );
+    }
+
+    // `description`, `prompt`, `model` — the three keys measured to have an effect. Nothing
+    // else, on purpose. See the header: an extra key here is inert and reads as a control.
+    payload[name] = { ...AGENT_BRIEFS[name], model };
+  }
+  return payload;
+}
+
+export function workerArgv({ config, prompt, appendSystemPrompt, maxTurns } = {}) {
+  // loadConfig's rule applied here: a router that invents its own defaults makes the config
+  // file decorative, and the config is what a human reads when the numbers look wrong.
+  if (!config) {
+    throw new Error('no config: refusing to build a worker invocation with unstated routing');
+  }
+  const text = typeof prompt === 'string' ? prompt : '';
+  if (!text.trim()) {
+    throw new Error('prompt is empty: refusing to spawn a worker with nothing to work on');
+  }
+
+  const worker = config.models?.worker ?? SEATS.worker.model;
+  const fallback = config.models?.fallback ?? SEATS.fallback.model;
+  ceilingFor(worker);
+  ceilingFor(fallback);
+
+  // An argv ARRAY, never a shell string. A ticket body reaches this function as `prompt`, and
+  // a body containing backticks or `$(...)` must arrive at the CLI as one argument that no
+  // shell re-parses. Pre-escaping would be worse than useless: the backslashes would reach the
+  // model as literal text in the prompt.
+  const argv = [
+    '-p', text,
+    '--model', worker,
+    // ALWAYS present, with no opt-out. §2.3's reason is a 3am capacity error producing a dead
+    // tick nobody is awake to notice. Its real semantics are narrow and worth knowing: it
+    // switches models when the primary is overloaded or unavailable, and retries the primary
+    // at the start of each user turn.
+    '--fallback-model', fallback,
+    '--permission-mode', 'bypassPermissions',
+    // Both load-bearing rather than conveniences: the run is priced from the transcript and the
+    // record is parsed from this payload.
+    '--output-format', 'json',
+    // The only ceiling the CLI honours. Post-turn, so it is a backstop on a runaway rather than
+    // a cap on a call — but a run without it has no dollar bound at all.
+    '--max-budget-usd', String(budgetUsdFor(config)),
+    '--agents', JSON.stringify(agentsPayload(config)),
+  ];
+
+  if (appendSystemPrompt) argv.push('--append-system-prompt', appendSystemPrompt);
+  if (maxTurns !== undefined && maxTurns !== null) argv.push('--max-turns', String(maxTurns));
+
+  return argv;
+}
