@@ -175,10 +175,30 @@ fires unconditionally. Do not delete that clone to tidy up.
 
 ## 6. Next, in order
 
-1. **#73** — fix the join (id **OR** tightly-normalized text), TDD, with a mutant proving the
-   text match can fail. Measured viable: lowercase / strip backticks / collapse whitespace /
-   drop trailing `.` matches 3/3 while rejecting `"retry stuff"` / `"tests are fine"` /
-   `"lint"` 0/3. It must not loosen `lib/gate.mjs:293` (*"a worker cannot satisfy AC1 by
-   declaring an entry named something else"*) — so no substring, no fuzzy match.
-2. Re-run the arm on the bumped suite, where `gate_pass` can finally discriminate.
+1. ~~**#73** — fix the join.~~ **DONE, `466e917`.** Id first, then whole-string equality after
+   lowercase / strip backticks / collapse whitespace / drop trailing `.`. Verified against the
+   three ac_maps on disk: `ac_unmapped` 3 → **0** on each, no other finding appearing, and the
+   paraphrases still rejected 3/3. Seven tests; five red before and green after. **Both
+   loosenings were written and run as mutants** — substring matching and token overlap each
+   fail exactly the two falsifier tests, so those two are discriminating rather than
+   decorative. §2's diagnosis holds, with one correction below.
+2. Re-run the arm, where `gate_pass` can finally discriminate. **No suite bump was taken** —
+   see the correction.
 3. `alfred loop`; delivery; a real github-sourced item.
+
+### Correction to §2, found while fixing it
+
+§2 says *"the ids are never shown to the worker."* That is true of **the arm C runner's
+prompt**, which is what these three runs read, and false of `lib/prompt.mjs` — the production
+path already renders `AC1: <text>` and names the ids as the keys. So the defect was narrower
+than §2 states: not a missing contract, but a **gate that only worked for the caller Alfred
+does not measure with**. The fix therefore adds a fallback and leaves the id lookup exact and
+primary; `lib/prompt.mjs` is unchanged.
+
+**And no suite bump, which is the declared rule and not an oversight.** `config/suite.json`
+lists `lib/gate.mjs` under `not_members`: *"the system under test must not version its own
+ruler."* The digest is still `88b12fd0…17e5c0d6`. Stated against my own interest: the next
+arm's record will carry a suite stamp **byte-identical** to this one while a different gate
+produced it, and nothing on a record distinguishes them (`config_sha` is the operator config,
+not the gate). This record stays as evidence and is not rebased. Anyone comparing a future
+`gate_pass` to the `false` in §2 must read the commit, because the stamp will not tell them.

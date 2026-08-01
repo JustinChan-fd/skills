@@ -4,6 +4,14 @@ Supporting artifacts for `../EXPERIMENT-2-RESULTS.md`. Nothing here is authored 
 scoring; the phase scores and the projection were frozen mid-run on purpose, so that a
 claim in the results doc can be checked against what was actually written at the time.
 
+**One exception, and it is marked in place rather than left for a reader to notice.**
+`armC-acmap-n3-score.md` gained a §6 amendment after scoring, when fixing #73 showed one of
+its own statements to be too broad (it said the AC ids are *never* shown to a worker; that is
+true of the arm C runner's prompt and false of `lib/prompt.mjs`). §2's original text is
+preserved verbatim and the amendment sits below the next-steps list, per §9's
+preserve-and-mark rule — a score sheet quietly edited to be right is no longer evidence of
+what was believed at scoring time. No figure, count, or verdict changed.
+
 | file | what it is | when written |
 |---|---|---|
 | `armA-score.md` | arm A's Axis 1 + mechanical sheet | after arm A exited, **before** arm B was read |
@@ -61,6 +69,7 @@ to the `.1` rows above:
 | `armC-acmap-n3-record.json` | the runner record, verbatim | at run end |
 | `armC-acmap-run{1,2,3}-delivered.diff` | what each run changed to **tracked** files | after the run |
 | `armC-acmap-run{1,2,3}-new-*` | the files each run **added** — `git diff` cannot see untracked files (#68's recorded gap), so a diff alone would omit the new retry module entirely | after the run |
+| `armC-acmap-run{1,2,3}-ac-map.json` | the ac_map each worker wrote — **the evidence for #73** | at run end |
 
 ⚠ **A worker's test file copied in here gets COLLECTED BY OUR OWN SUITE.** Measured: copying
 runs 2 and 3's new `*.test.js` verbatim took the repo from 1378/1378 to **1380 tests, 2
@@ -69,14 +78,22 @@ different depth than the sandbox it was written for. Nothing was wrong with Alfr
 *evidence* had joined the suite. Hence the `.test.js.txt` suffix on those two files: still
 readable as evidence, no longer a test. Anything ending `.test.js` under `alfred/` is a repo
 test regardless of which directory it is in.
-| `armC-acmap-run{1,2,3}-ac-map.json` | the ac_map each worker wrote — **the evidence for #73** | at run end |
 
 **The three ac_maps are kept because they are the defect's evidence, not because they are
 inputs.** All three are schema-valid with one entry per criterion, and all three drew
-`ac_unmapped` on every criterion anyway: the gate joins on AC **id** while the ticket prints
-only checkbox text (#73). Run 3's file is the one that matters most — it kept the markdown
-backticks (`` `npm test` passes. ``) where runs 1 and 2 stripped them, which is the measured
-proof that an exact-text fallback would still fail 2 of 3 and a normalizer is required.
+`ac_unmapped` on every criterion anyway: the gate joined on AC **id** while the arm C runner's
+prompt prints only checkbox text (#73). Run 3's file is the one that matters most — it kept the
+markdown backticks (`` `npm test` passes. ``) where runs 1 and 2 stripped them, which is the
+measured proof that an exact-text fallback would still fail 2 of 3 and a normalizer is
+required.
+
+**They are now also the fix's regression fixture.** #73 was closed in `466e917`, and
+`test/gate.test.mjs` carries these three keyings verbatim — including run 3's backticks. The
+fix was checked against these files directly, not only against the tests: `ac_unmapped` goes
+3 → **0** on each with no other finding appearing, while three on-topic paraphrases
+(`"retry stuff"`, `"tests are fine"`, `"lint"`) are still rejected 3/3. Do not "tidy" these
+into a single canonical map — the difference between run 3's and the other two is the whole
+reason the fix normalizes rather than compares raw text.
 
 **This record's `usd` figures are correct and independently corroborated.** Each run's
 price-table figure agrees with the CLI's own `total_cost_usd` to six decimal places
