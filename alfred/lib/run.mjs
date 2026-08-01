@@ -44,7 +44,7 @@
 
 import { spawn } from 'node:child_process';
 import { execFile } from 'node:child_process';
-import { closeSync, mkdirSync, openSync, readFileSync } from 'node:fs';
+import { closeSync, mkdirSync, openSync, readFileSync, writeFileSync } from 'node:fs';
 import { basename, dirname, join, resolve } from 'node:path';
 import { promisify } from 'node:util';
 
@@ -57,6 +57,10 @@ import { composeWorkerPrompt, standingRules } from './prompt.mjs';
 import { workerArgv } from './router.mjs';
 
 const execFileAsync = promisify(execFile);
+
+// The record's filename inside the run directory. A sibling of `source.json`: that file is what
+// the run was ASKED to do, this one is what it cost and how it was graded.
+export const RECORD_FILENAME = 'record.json';
 
 // 25 minutes, the same number THRESHOLDS.armC.wallCapMs carries, and for the same reason: arm B
 // ran 24.6 minutes and produced no PR, so a cap below that would kill runs before they can fail
@@ -447,6 +451,35 @@ export async function executeWork({
     recordError = String(err?.message ?? err);
   }
 
+  // Step 7b. AND ONTO DISK. Built-and-discarded is this project's recurring defect (#63, #69,
+  // #72, #73): `buildRecord` computes cost.by_model, peak_context, subagents[], gaps[] and the
+  // gate's findings, `reportRecord` prints four of those fields, and before this the rest reached
+  // nothing. A run dir held `source.json` and `worker.log` — what the run was asked to do and the
+  // worker's raw output — and nothing saying what it cost or how it was graded.
+  //
+  // SEPARATELY CAUGHT from the build above, and for a different failure: the reporter throwing
+  // means there is no record, an unwritable path means there IS one and it stayed in memory. Both
+  // are sidecar failures that must not fail a graded run, and a reader has to be able to tell
+  // which happened, so the two errors are joined rather than one overwriting the other.
+  // A SEPARATE FIELD, not appended to `record_error`. The first draft joined them and a mutant
+  // caught it: `reportRecord` early-returns on `recordError` with "FAILED to build", so a record
+  // that built perfectly and merely could not be written printed a false cause AND suppressed the
+  // cost line — the one figure an operator most needs. Two failures, two names:
+  //
+  //   record_error        the reporter threw. There is no record.
+  //   record_write_error  there IS a record; it stayed in memory.
+  let recordPath = null;
+  let recordWriteError = null;
+  if (record) {
+    try {
+      const path = join(runDir, RECORD_FILENAME);
+      writeFileSync(path, `${JSON.stringify(record, null, 2)}\n`);
+      recordPath = path;
+    } catch (err) {
+      recordWriteError = `could not write ${RECORD_FILENAME}: ${String(err?.message ?? err)}`;
+    }
+  }
+
   return {
     ok: true,
     error: null,
@@ -455,6 +488,10 @@ export async function executeWork({
     worker,
     gate,
     record,
+    // Where it landed, or null. A caller that printed a path it had not written would send an
+    // operator to a file that is not there.
+    record_path: recordPath,
+    record_write_error: recordWriteError,
     // Named rather than swallowed. A record that is absent for a reason nobody wrote down is
     // indistinguishable from a run nobody asked to report on.
     record_error: recordError,

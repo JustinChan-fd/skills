@@ -39,7 +39,7 @@ import { join } from 'node:path';
 import { after, test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 
-import { EXIT, parseArgv, reportVerdict, usage } from '../lib/cli.mjs';
+import { EXIT, parseArgv, reportRecord, reportVerdict, usage } from '../lib/cli.mjs';
 import { SOURCE_FILENAME } from '../lib/item.mjs';
 import { DEFAULT_WALL_CAP_MS } from '../lib/run.mjs';
 
@@ -446,4 +446,49 @@ test('a priced record prints the figure, and prints the vendor figure beside it'
   assert.match(result.stdout, /\$1\.5/, `our cost is missing or wrong: ${result.stdout}`);
   // And the vendor's own, carried beside it rather than instead of it.
   assert.match(result.stdout, /vendor \$0\.5/, `the vendor figure is missing: ${result.stdout}`);
+});
+
+test('the record says where it landed, so an operator can go read it', () => {
+  // The other half of #10. Persisting the record is worth nothing if the run's output does not
+  // name the file: the whole defect was that everything except four printed fields reached
+  // nothing, and an artifact an operator cannot find is the same audit gap one directory over.
+  //
+  // NOT asserted as "some line mentions the run dir" — the run dir is already printed. The path
+  // to the record itself is the new information.
+  const printed = [];
+  reportRecord(
+    { ok: true, error: null, gaps: [], cost: { total_usd: 1.5, vendor_usd: 1.5 } },
+    { out: (line) => printed.push(line), recordPath: '/runs/20260801T090000Z-fix-the-thing/record.json' },
+  );
+
+  assert.match(printed.join('\n'), /\/runs\/20260801T090000Z-fix-the-thing\/record\.json/);
+});
+
+test('a record that could not be written says so AND still prints the cost', () => {
+  // The falsifier for the line above, and it caught a defect in the first draft of this feature.
+  //
+  // A writer that printed the path it INTENDED to write would send an operator to a file that is
+  // not there. But the first fix routed the write failure through `recordError`, which
+  // early-returns with "FAILED to build" — so a record that built perfectly and merely could not
+  // reach disk printed a false cause and SUPPRESSED THE COST LINE. That is the worst possible
+  // response: an unwritten record makes the console the only surviving copy of the figures.
+  //
+  // A mutant found this, not this test. `out(\`saved to ${recordPath ?? 'record.json'}\`)` — the
+  // unconditional print — survived, because the early return meant neither branch was reached.
+  const printed = [];
+  reportRecord(
+    { ok: true, error: null, gaps: [], cost: { total_usd: 1.5, vendor_usd: 1.5 } },
+    {
+      out: (line) => printed.push(line),
+      recordPath: null,
+      recordWriteError: 'could not write record.json: ENOTDIR',
+    },
+  );
+
+  const lines = printed.join('\n');
+  assert.doesNotMatch(lines, /saved to/i, 'sent an operator to a file that was never written');
+  assert.match(lines, /NOT SAVED — could not write record\.json/);
+  // The load-bearing half: the figures survive the write failure.
+  assert.match(lines, /\$1\.500000/, 'a failed write suppressed the only surviving copy of the cost');
+  assert.doesNotMatch(lines, /FAILED to build/, 'blamed the reporter for a filesystem failure');
 });

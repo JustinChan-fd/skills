@@ -40,6 +40,7 @@ import { after, test } from 'node:test';
 
 import { SEATS, normalizeModelId } from '../lib/models.mjs';
 import { SOURCE_FILENAME } from '../lib/item.mjs';
+import { RECORD_FILENAME } from '../lib/run.mjs';
 import {
   SEAT_ENV_VARS,
   executeWork,
@@ -694,4 +695,112 @@ test('reporting cannot fail the run: a reporter that throws is caught and named'
   assert.equal(result.ok, true, 'a broken reporter failed the run it was reporting on');
   assert.equal(result.record, null);
   assert.match(result.record_error, /the reporter exploded/);
+});
+
+// --- step 7b: the record REACHES DISK ---
+//
+// The fifth instance of this project's recurring defect family (#63, #69, #72, #73): an
+// instrument built whose output nobody reads. `buildRecord` computes `cost.by_model`,
+// `tokens.peak_context`, `subagents[]`, `gaps[]`, `gate.findings[]` and the suite stamp on every
+// production run; `executeWork` returned it in memory, `bin/alfred` printed two lines of it, and
+// the process exited. Measured before the fix: a real run dir held `source.json` and
+// `worker.log` and nothing else, while the eval path's records — the ones that made #70..#73
+// findable at all — are hand-written by the arm C runner and do not exist for `alfred work`.
+//
+// THREE SEPARATE PROPOSITIONS, deliberately not one. §"unfalsifiable conjunct": a single
+// assertion over a written file would pass on a writer that persisted an empty object, and a
+// single pass boolean cannot say which half held.
+
+test('the record is written to the run directory, not just returned', async () => {
+  const repo = repoWithCommit();
+  const runRoot = mktemp('runs');
+
+  const result = await executeWork({
+    ref: 'persist the record',
+    config: CONFIG,
+    repoRoot: repo,
+    runRoot,
+    stamp: '20260801T090000Z',
+    spawn: stubSpawn((argv, opts) => ({
+      exit: 0, killed: false, signal: null, wall_ms: 1, log: opts.logPath,
+    })),
+    report: () => ({ ok: true, error: null, gaps: [], cost: { total_usd: 1.25 } }),
+  });
+
+  assert.ok(result.ok, result.error);
+  const path = join(result.run_dir, RECORD_FILENAME);
+  const onDisk = JSON.parse(readFileSync(path, 'utf8'));
+  assert.equal(onDisk.cost.total_usd, 1.25, 'the file exists but does not carry the record');
+  assert.equal(result.record_path, path, 'the run does not say where it wrote the record');
+});
+
+test('what reaches disk is the WHOLE record, not a summary of it', async () => {
+  // The defect was not "no file" — it was that the only surviving channel was
+  // `reportRecord`'s two console lines, which keep `total_usd`, `vendor_usd`, `ok` and the gap
+  // codes and drop everything else. A writer that persisted the printed subset would leave the
+  // audit gap exactly where it was, so this asserts on the fields the console throws away.
+  const repo = repoWithCommit();
+
+  const full = {
+    ok: true,
+    error: null,
+    gaps: [{ code: 'single-context', detail: 'no subagents' }],
+    tokens: { by_model: { 'anthropic.claude-sonnet-5': { input: 10 } }, peak_context: 4242 },
+    subagents: [{ agent_id: 'a1', by_model: {} }],
+    cost: { total_usd: 2.5, vendor_usd: 2.5, by_model: { 'anthropic.claude-sonnet-5': 2.5 } },
+    gate: { pass: false, findings: [{ rule: 'evidence_weakened' }], unverified: [] },
+    suite: { suite_version: '2026-08-01.1', suite_digest: 'abc' },
+  };
+
+  const result = await executeWork({
+    ref: 'persist all of it',
+    config: CONFIG,
+    repoRoot: repo,
+    runRoot: mktemp('runs'),
+    stamp: '20260801T090100Z',
+    spawn: stubSpawn((argv, opts) => ({
+      exit: 0, killed: false, signal: null, wall_ms: 1, log: opts.logPath,
+    })),
+    report: () => full,
+  });
+
+  const onDisk = JSON.parse(readFileSync(join(result.run_dir, RECORD_FILENAME), 'utf8'));
+  assert.equal(onDisk.tokens.peak_context, 4242, 'peak_context was dropped');
+  assert.deepEqual(onDisk.gate.findings, [{ rule: 'evidence_weakened' }], 'the findings were dropped');
+  assert.deepEqual(onDisk.gaps, [{ code: 'single-context', detail: 'no subagents' }], 'the gaps were dropped');
+  assert.equal(onDisk.suite.suite_digest, 'abc', 'the suite stamp was dropped');
+  assert.equal(onDisk.subagents.length, 1, 'the subagents were dropped');
+});
+
+test('a record that cannot be written does not fail the run it was recording', async () => {
+  // The same sidecar rule the reporter already obeys, at the new seam. A run that landed and
+  // was graded must not become exit 2 — which a scheduler retries at full price — because the
+  // accounting could not reach disk. Provoked by making the path unwritable: the run dir is
+  // replaced with a FILE, so `writeFileSync` into it raises ENOTDIR.
+  const repo = repoWithCommit();
+  const runRoot = mktemp('runs');
+
+  const result = await executeWork({
+    ref: 'unwritable',
+    config: CONFIG,
+    repoRoot: repo,
+    runRoot,
+    stamp: '20260801T090200Z',
+    spawn: stubSpawn((argv, opts) => {
+      // After source.json is written and the worker "ran", make the directory un-writable by
+      // turning it into a file. Nothing later in the run needs to write there except the record.
+      rmSync(opts.runDir, { recursive: true, force: true });
+      writeFileSync(opts.runDir, 'not a directory\n');
+      return { exit: 0, killed: false, signal: null, wall_ms: 1, log: null };
+    }),
+    report: () => ({ ok: true, error: null, gaps: [], cost: { total_usd: 3 } }),
+  });
+
+  assert.equal(result.ok, true, 'an unwritable record failed the run it was recording');
+  assert.ok(result.record, 'the record was discarded because it could not be written');
+  assert.equal(result.record_path, null, 'claimed a path it did not write');
+  // ITS OWN FIELD. Joining this onto `record_error` made `reportRecord` print "FAILED to build"
+  // for a record that built fine and suppress the cost line with it — see the cli test.
+  assert.match(result.record_write_error, /ENOTDIR|not a directory|could not write/i);
+  assert.equal(result.record_error, null, 'blamed the reporter for a filesystem failure');
 });

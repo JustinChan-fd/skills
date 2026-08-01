@@ -178,7 +178,7 @@ export function parseArgv(argv = []) {
 //
 // A NULL COST IS A SENTENCE, NOT A BLANK. `total_usd: null` means we could not read the spend —
 // printed as such, because a missing line reads as "cheap" and `$0.00` reads as "free".
-export function reportRecord(record, { out, recordError = null }) {
+export function reportRecord(record, { out, recordError = null, recordPath = null, recordWriteError = null }) {
   if (recordError) {
     // The reporter itself threw. Said out loud and NOT fatal: the record is a sidecar, and a
     // scheduler that reads a failed report as a failed run retries a succeeded one at full price.
@@ -200,6 +200,18 @@ export function reportRecord(record, { out, recordError = null }) {
   if (!record.ok && record.error) out(`  reason: ${record.error}`);
   // A gap does not condemn the record — it says which part of a record worth reading is missing.
   for (const gap of record.gaps ?? []) out(`  gap ${gap.code}: ${gap.detail ?? ''}`.trimEnd());
+
+  // WHERE IT LANDED, and only when it actually did. The console keeps four fields; the file keeps
+  // cost.by_model, peak_context, subagents[], gaps[] and the gate's findings. An operator who is
+  // not told the path has the same audit gap one directory over.
+  //
+  // Printed from what the writer RETURNED, never composed here: a path this function built would
+  // be right about where the record belongs and silent about whether it arrived.
+  if (recordPath) out(`  saved to ${recordPath}`);
+  // AFTER the cost lines, not instead of them. A write failure means the figures above are the
+  // only surviving copy, which makes suppressing them the exact wrong response — the first draft
+  // of this routed the write error through `recordError` and did precisely that.
+  else if (recordWriteError) out(`  NOT SAVED — ${recordWriteError}`);
 }
 
 // The verdict, printed for whoever reads the tick's output. Findings first: an operator reading
@@ -327,7 +339,12 @@ export async function main(
     err(`tree not observed: ${result.observed_error} — the evidence rules could not run`);
   }
 
-  reportRecord(result.record ?? null, { out, recordError: result.record_error ?? null });
+  reportRecord(result.record ?? null, {
+    out,
+    recordError: result.record_error ?? null,
+    recordPath: result.record_path ?? null,
+    recordWriteError: result.record_write_error ?? null,
+  });
   reportVerdict(result.gate ?? { pass: false, findings: [] }, { out });
 
   return result.gate?.pass ? EXIT.pass : EXIT.gate_failed;
