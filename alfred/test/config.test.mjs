@@ -559,3 +559,146 @@ test('ADDED: budget_usd is a settable key, because lib/router.mjs already reads 
     assert.match(nonPositive.error, /budget_usd/);
   }
 });
+
+// ---------------------------------------------------------------------------
+// #21 — epics as URLs, statuses as a gate, and array ELEMENTS validated.
+//
+// WHY URLS AND NOT KEYS. The operator's instruction was "setting a list of epics as
+// urls ... if alfred can just call to those every n minutes, we can simplify and not
+// have to do mental gymnastics." A browse URL carries the host AND the key in one
+// string the operator can paste from a browser, so `cloud` stops being a second field
+// that can disagree with the thing it describes.
+//
+// WHY ELEMENT VALIDATION IS PART OF THE SAME TASK. MEASURED before writing any of this:
+// `source.github.labels: [1, 2, 3]` and `labels: [{}]` BOTH loaded ok. `typeOf` reports
+// `array` and the walk never looks inside, so every array in the schema — `off_limits`
+// and `base.rules` excepted, which have their own semantic loops — accepts any contents
+// at all. Adding two more array keys without fixing that would trade one silent setting
+// for three.
+// ---------------------------------------------------------------------------
+
+const EPIC_URL = 'https://fandango.atlassian.net/browse/TARS-1350';
+
+const jiraSource = (jira) => ({ source: { kind: 'jira', jira } });
+
+test('#21: source.jira.epics takes browse URLs, and the key and host are parsed out of each', () => {
+  const result = loadConfig(repoWith({ ...VALID, ...jiraSource({ epics: [EPIC_URL] }) }));
+  assert.equal(result.ok, true, result.error);
+
+  // The raw string is preserved — it is what the operator wrote and what a record should
+  // show — and the parse is exposed alongside it rather than replacing it.
+  assert.deepEqual(result.config.source.jira.epics, [EPIC_URL]);
+  assert.deepEqual(result.config.source.jira.epic_keys, ['TARS-1350']);
+  assert.equal(result.config.source.jira.host, 'fandango.atlassian.net');
+});
+
+test('#21: a URL that is not an epic browse URL is refused, and the refusal names it', () => {
+  // ANCHORED, because a half-match is the failure that looks like success: a string with
+  // a browse URL inside it resolves to the wrong key or to a key with trailing junk, and
+  // then every fetch 404s at 3am against a ticket nobody named.
+  for (const bad of [
+    'TARS-1350',                                            // a bare key: no host, so nothing to fetch from
+    'https://fandango.atlassian.net/browse/TARS-1350/extra', // trailing path
+    'https://fandango.atlassian.net/jira/software/c/TARS',   // a board, not an epic
+    'see https://fandango.atlassian.net/browse/TARS-1350',   // prose around a URL
+    'http://fandango.atlassian.net/browse/TARS-1350',        // plaintext: a token would go over the wire
+    '',
+  ]) {
+    const r = loadConfig(repoWith({ ...VALID, ...jiraSource({ epics: [bad] }) }));
+    assert.equal(r.ok, false, `accepted a bad epic URL: ${JSON.stringify(bad)}`);
+    assert.match(r.error, /source\.jira\.epics\[0\]/, `refusal did not name the element: ${r.error}`);
+  }
+});
+
+test('#21: epics on DIFFERENT hosts are refused — one config authenticates against one site', () => {
+  // A single credential is resolved per run. Two hosts in one list reads as supported and
+  // is not: whichever host is not the authenticated one returns 401 for every ticket, and
+  // an auth failure at poll time is indistinguishable from an empty backlog.
+  const r = loadConfig(
+    repoWith({
+      ...VALID,
+      ...jiraSource({ epics: [EPIC_URL, 'https://other.atlassian.net/browse/AB-1'] }),
+    }),
+  );
+  assert.equal(r.ok, false);
+  assert.match(r.error, /host/);
+});
+
+test('#21: source.jira.cloud must agree with the epic URLs when both are given', () => {
+  // Two fields naming the same site is the drift shape this project keeps meeting. The
+  // fix is not to pick a winner silently — it is to refuse, because whichever one loses
+  // was written by an operator who believes it applies.
+  const r = loadConfig(
+    repoWith({ ...VALID, ...jiraSource({ cloud: 'elsewhere.atlassian.net', epics: [EPIC_URL] }) }),
+  );
+  assert.equal(r.ok, false);
+  assert.match(r.error, /cloud/);
+
+  // Agreeing is fine, and the parse still comes from the URL.
+  const ok = loadConfig(
+    repoWith({ ...VALID, ...jiraSource({ cloud: 'fandango.atlassian.net', epics: [EPIC_URL] }) }),
+  );
+  assert.equal(ok.ok, true, ok.error);
+  assert.equal(ok.config.source.jira.host, 'fandango.atlassian.net');
+});
+
+test('#21: statuses declares which statuses are workable, and defaults to nothing invented', () => {
+  const r = loadConfig(repoWith({ ...VALID, ...jiraSource({ epics: [EPIC_URL], statuses: ['To Do'] }) }));
+  assert.equal(r.ok, true, r.error);
+  assert.deepEqual(r.config.source.jira.statuses, ['To Do']);
+
+  // ABSENT IS NOT "ALL". A poll that treats a missing `statuses` as every status picks up
+  // In Progress and Done tickets and re-does work someone already shipped. There is no
+  // default, so the absence is visible to the poller rather than filled in here.
+  const none = loadConfig(repoWith({ ...VALID, ...jiraSource({ epics: [EPIC_URL] }) }));
+  assert.equal(none.ok, true, none.error);
+  assert.equal(none.config.source.jira.statuses, undefined);
+
+  // An empty list is refused rather than read as "all" or as "none": one means a poll that
+  // never works anything, the other a poll that works everything, and the operator who
+  // typed `[]` cannot be assumed to have meant either.
+  const empty = loadConfig(repoWith({ ...VALID, ...jiraSource({ epics: [EPIC_URL], statuses: [] }) }));
+  assert.equal(empty.ok, false);
+  assert.match(empty.error, /statuses/);
+});
+
+test('#21: jql is gone — a config carrying one is refused rather than silently ignored', () => {
+  // MEASURED: `jql` loaded fine before this. It was in the §4 sketch and nothing ever read
+  // it, which is the worst state for a config key — an operator writes a query, the file
+  // validates, and the poll uses the epic list instead. Removing the key turns that into
+  // an error naming the line to delete.
+  const r = loadConfig(repoWith({ ...VALID, ...jiraSource({ epics: [EPIC_URL], jql: 'project = TARS' }) }));
+  assert.equal(r.ok, false);
+  assert.match(r.error, /jql/);
+});
+
+test('#21: array ELEMENTS are type-checked — labels: [1,2,3] was accepted before this', () => {
+  // The probe that motivated this, run against the pre-change loader: both of these
+  // returned ok: true. `typeOf` reports `array` and the recursive walk descends into
+  // objects only, so array contents were never looked at.
+  for (const labels of [[1, 2, 3], [{}], ['ok', 2]]) {
+    const r = loadConfig(
+      repoWith({ ...VALID, source: { kind: 'github', github: { owner: 'a', repo: 'b', labels } } }),
+    );
+    assert.equal(r.ok, false, `accepted labels: ${JSON.stringify(labels)}`);
+    assert.match(r.error, /source\.github\.labels\[\d\]/, r.error);
+  }
+
+  // And the valid form still loads — the falsifier for the three above, which a loader
+  // that refused every array would also satisfy.
+  const ok = loadConfig(
+    repoWith({ ...VALID, source: { kind: 'github', github: { owner: 'a', repo: 'b', labels: ['ready'] } } }),
+  );
+  assert.equal(ok.ok, true, ok.error);
+  assert.deepEqual(ok.config.source.github.labels, ['ready']);
+});
+
+test('#21: a jira config still needs SOMETHING to poll — epic or epics, not neither', () => {
+  // `source.kind: jira` with an empty jira block validated before, because every field in
+  // it was optional. That is a config that declares a source and names nothing to fetch
+  // from, and the poll it produces is an empty loop that reports no work rather than a
+  // misconfiguration.
+  const r = loadConfig(repoWith({ ...VALID, ...jiraSource({ project: 'TARS' }) }));
+  assert.equal(r.ok, false);
+  assert.match(r.error, /epic/);
+});

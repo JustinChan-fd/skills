@@ -47,6 +47,19 @@ export const DEFAULT_POLL_INTERVAL_MINUTES = 30;
 const SOURCE_KINDS = ['jira', 'github'];
 const DELIVERY_MODES = ['pr', 'push'];
 
+// An epic BROWSE URL, anchored at both ends. #21.
+//
+// WHY A URL RATHER THAN A KEY. The operator's framing: "setting a list of epics as urls ...
+// we can simplify and not have to do mental gymnastics." One pasteable string carries both
+// the site and the key, so `cloud` stops being a second field that can disagree with the
+// thing it names.
+//
+// ANCHORED for the reason `item.mjs`'s URL_ONLY is: a half-match is the failure that reads
+// as success. `/browse/TARS-1350/extra` yields the right key from a URL pointing somewhere
+// else, and prose around a URL is an operator note that would silently become the epic.
+// HTTPS ONLY — a token travels on this host, and http:// would put it on the wire in clear.
+const EPIC_URL = /^https:\/\/([a-z0-9][a-z0-9.-]*\.atlassian\.net)\/browse\/([A-Z][A-Z0-9_]*-\d+)$/;
+
 // The permitted shape, by path. `type` is checked, so a string "1" from a hand-edited
 // file or a templating step is refused — it is truthy, so every presence check passes
 // and only a type check catches it.
@@ -58,8 +71,21 @@ const SCHEMA = {
     required: true,
     keys: {
       kind: { type: 'string', required: true, oneOf: SOURCE_KINDS },
-      jira: { type: 'object', keys: { cloud: { type: 'string' }, project: { type: 'string' }, epic: { type: 'string' }, jql: { type: 'string' } } },
-      github: { type: 'object', keys: { owner: { type: 'string' }, repo: { type: 'string' }, labels: { type: 'array' } } },
+      // `jql` IS DELETED, not deprecated (#21). It was in the §4 sketch and nothing ever
+      // read it, which is the worst state a config key can be in: the operator writes a
+      // query, the file validates, and the poll uses the epic list instead. Absent from
+      // this table, the unknown-key rule turns that silence into an error naming the line.
+      jira: {
+        type: 'object',
+        keys: {
+          cloud: { type: 'string' },
+          project: { type: 'string' },
+          epic: { type: 'string' },
+          epics: { type: 'array', of: 'string' },
+          statuses: { type: 'array', of: 'string' },
+        },
+      },
+      github: { type: 'object', keys: { owner: { type: 'string' }, repo: { type: 'string' }, labels: { type: 'array', of: 'string' } } },
     },
   },
   loop: {
@@ -120,6 +146,18 @@ function validateBlock(value, schema, path) {
     if (rule.oneOf && !rule.oneOf.includes(sub)) {
       return `${at} must be one of ${rule.oneOf.join(', ')} — got ${JSON.stringify(sub)}`;
     }
+    // ELEMENTS, not just the container (#21). MEASURED before this existed:
+    // `source.github.labels: [1, 2, 3]` and `labels: [{}]` both loaded ok, because
+    // `typeOf` reports `array` and the walk below descends into objects only. Every
+    // array in the schema was therefore accepting arbitrary contents — a deny list of
+    // numbers matches nothing, and a label list of objects matches no issue, both
+    // silently. The error names the INDEX because "labels is wrong" does not locate it.
+    if (rule.of) {
+      for (const [i, element] of sub.entries()) {
+        const et = typeOf(element);
+        if (et !== rule.of) return `${at}[${i}] must be ${rule.of}, got ${et}`;
+      }
+    }
     if (rule.keys) {
       const nested = validateBlock(sub, rule.keys, at);
       if (nested) return nested;
@@ -154,6 +192,55 @@ function validateSemantics(raw) {
   // a half-finished edit whose every read comes back undefined, failing far from here.
   if (nullish(raw.source[raw.source.kind])) {
     return `source.kind is ${raw.source.kind} but no source.${raw.source.kind} block is present`;
+  }
+
+  // The jira source's own semantics (#21). Everything here is about a poll that would
+  // otherwise run and report "no work" when the truth is "misconfigured" — the two are
+  // indistinguishable in a log, and the first is what an unattended loop does forever.
+  if (raw.source.kind === 'jira') {
+    const jira = raw.source.jira;
+    const epics = jira.epics ?? null;
+
+    // SOMETHING TO POLL. Every field in the jira block is individually optional, so an
+    // empty block validated before this: a config that declares a source and names
+    // nothing to fetch from.
+    if (nullish(epics) && nullish(jira.epic)) {
+      return 'source.jira must declare epics (browse URLs) or epic — a jira source with neither names nothing to poll';
+    }
+
+    if (!nullish(epics)) {
+      if (epics.length === 0) return 'source.jira.epics must list at least one epic URL';
+      const hosts = new Set();
+      for (const [i, url] of epics.entries()) {
+        const m = EPIC_URL.exec(url);
+        if (!m) {
+          return (
+            `source.jira.epics[${i}] must be an https epic browse URL like ` +
+            `https://your-site.atlassian.net/browse/TARS-1350 — got ${JSON.stringify(url)}`
+          );
+        }
+        hosts.add(m[1]);
+      }
+      // ONE CONFIG, ONE SITE. A single credential is resolved per run, so the host that is
+      // not the authenticated one returns 401 for every ticket under it — and at poll time
+      // an auth failure looks exactly like an empty backlog.
+      if (hosts.size > 1) {
+        return `source.jira.epics span more than one host (${[...hosts].sort().join(', ')}) — one config authenticates against one site`;
+      }
+      // And if `cloud` is also given it must AGREE. Refused rather than resolved in favour
+      // of either: whichever field loses was written by an operator who believes it applies.
+      const host = [...hosts][0];
+      if (!nullish(jira.cloud) && jira.cloud !== host) {
+        return `source.jira.cloud is ${JSON.stringify(jira.cloud)} but source.jira.epics are on ${host} — refusing rather than picking one`;
+      }
+    }
+
+    // Present-but-empty is refused rather than read as "all" or "none". One means a poll
+    // that never works anything, the other a poll that works everything, and `[]` does not
+    // say which the operator meant. ABSENT is left absent — see the loop's own default.
+    if (!nullish(jira.statuses) && jira.statuses.length === 0) {
+      return 'source.jira.statuses must name at least one workable status, or be absent';
+    }
   }
 
   if (raw.base.rules.length === 0) return 'base.rules must declare at least one rule';
@@ -253,10 +340,27 @@ export function loadConfig(repoRoot) {
   const semantic = validateSemantics(raw);
   if (semantic) return refuse(semantic);
 
+  // The epic URLs, parsed ONCE here so no caller re-implements the regex (#21). The raw
+  // strings are kept: they are what the operator wrote and what a record should show, and
+  // a derived field replacing its own source is how an artifact stops being replayable.
+  //
+  // Derived AFTER validation, so these exist only on a config already known to have a
+  // single host and well-formed URLs — the poller does not re-check.
+  const jiraDerived = {};
+  if (raw.source.kind === 'jira' && !nullish(raw.source.jira?.epics)) {
+    const parsed = raw.source.jira.epics.map((u) => EPIC_URL.exec(u));
+    jiraDerived.jira = {
+      ...raw.source.jira,
+      epic_keys: parsed.map((m) => m[2]),
+      host: parsed[0][1],
+    };
+  }
+
   // The one default, applied after validation so an explicit bad value is refused
   // rather than replaced.
   const config = deepFreeze({
     ...raw,
+    source: { ...raw.source, ...jiraDerived },
     loop: {
       blocked_label: 'alfred:blocked',
       ...(raw.loop ?? {}),
