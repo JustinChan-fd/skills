@@ -1,0 +1,54 @@
+diff --git a/alfred/SKILL.md b/alfred/SKILL.md
+index 6ef61a5..7c7e5ca 100644
+--- a/alfred/SKILL.md
++++ b/alfred/SKILL.md
+@@ -31,7 +31,8 @@ project is correcting.
+ ## What to run
+ 
+ ```
+-alfred/bin/alfred work <ref> [--repo <path>] [--dry-run]
++alfred/bin/alfred work <ref> [--repo <path>] [--run-root <path>] [--max-turns <n>]
++                              [--wall-cap-minutes <n>] [--worker-bin <path>] [--dry-run]
+ ```
+ 
+ From this repo that is `./alfred/bin/alfred`; installed as a skill it is
+@@ -45,6 +46,17 @@ it gets **no acceptance criteria, and none are invented**, because the gate
+ raises `ac_unmapped` once per criterion and a fabricated criterion is a bar
+ nobody set.
+ 
++Flags (`alfred work --help` prints the authoritative list):
++
++| flag | meaning |
++|---|---|
++| `--repo <path>` | repository to work in (default: cwd) |
++| `--run-root <path>` | where run artifacts go (default: a sibling of the repo, never inside it — the gate scores the working tree) |
++| `--max-turns <n>` | hand `--max-turns` to the worker |
++| `--wall-cap-minutes <n>` | kill the worker after n minutes (default: 25) — this is the cap referred to below when a worker is killed mid-run |
++| `--worker-bin <path>` | the binary to spawn (default: `claude`) |
++| `--dry-run` | compose everything, spawn nothing, print the argv |
++
+ `--dry-run` composes the prompt and the argv, fetches and persists the ticket,
+ spawns nothing, and prints what it would have run. Use it when you want to check
+ the flags or the prompt without spending.
+@@ -78,9 +90,10 @@ named a ticket without a repo, ask rather than guessing which one.
+ **After:** relay the verdict as it came out. Specifically:
+ 
+ - Report the findings **verbatim**, by rule name. `check_failed`,
+-  `scope_violation`, `ac_unmapped`, `evidence_weakened` and
+-  `instrument_modified` mean different things and the operator acts on which one
+-  fired.
++  `scope_violation`, `ac_unmapped`, `ac_failed`, `ac_unsatisfiable`,
++  `unverifiable_no_reason`, `mapping_implausible`, `unbacked_claim`,
++  `off_limits`, `evidence_weakened` and `instrument_modified` mean different
++  things and the operator acts on which one fired.
+ - Report `unverified` entries too. They do **not** fail the run — the gate's
+   verdict is a conjunction over findings only — but a criterion nobody could
+   check is exactly what a human most needs to see. Swallowing it is how
+@@ -118,6 +131,7 @@ outward-facing**, and note that Alfred's own config carries
+ | the measurements behind it | `alfred/docs/HANDOFF.md` |
+ | the gate's checklist | `PLAN.md` §5, `lib/gate.mjs` |
+ | run artifacts | printed as `run dir:` — outside the repo, deliberately |
++| the audit record | `record.json`, written beside `source.json` in the run dir — cost by model, the suite stamp, the gate's full findings (including complete command output), and `gaps[]` |
+ 
+ The run directory is **outside** the repository on purpose: the gate scores the
+ working-tree diff, so a `source.json` written under the repo root would be
