@@ -29,9 +29,13 @@
 // problem and is not fully solved there either.
 
 import { execFile } from 'node:child_process';
-import { mkdirSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
+
+import { fetchArgv, extractPayload, issueToItem } from './jira.mjs';
+import { transcriptPathFor } from './transcript.mjs';
 
 const execFileAsync = promisify(execFile);
 
@@ -47,6 +51,45 @@ const VIEW_FIELDS = 'number,title,body,state,labels,url,author,createdAt,updated
 export async function realGh(args) {
   const { stdout } = await execFileAsync('gh', args, { maxBuffer: 8 * 1024 * 1024 });
   return stdout;
+}
+
+// The real jira fetch. Spawns `claude -p` to reach the Atlassian MCP, then reads the payload out of
+// the session TRANSCRIPT rather than out of the model's answer.
+//
+// WHY THE TRANSCRIPT. The criteria on these tickets end in shell commands that lib/gate.mjs runs
+// byte-for-byte. A model relaying a payload through its own output tokens is free to normalise a
+// quote or drop a `$`, and the result is a check that fails for a reason no worker caused — or one
+// that passes because it no longer checks anything. `extractPayload` reads the `tool_result`, which
+// is the bytes the MCP returned. The model's own text is discarded; the prompt asks it to say only
+// `DONE` precisely so there is nothing there worth reading.
+//
+// Injected in tests, like `realGh`, so nothing in the suite touches the network.
+export async function realJiraFetch({ config, key, model, cwd = tmpdir() } = {}) {
+  const argv = fetchArgv({ config, key, model });
+  // `cwd` decides where the transcript lands (transcriptPathFor mirrors claude's own projects-dir
+  // layout), and it defaults OUTSIDE the repository. A transcript written under the repo root would
+  // be counted as delivered work by the gate's working-tree diff — the same reason the run dir is
+  // outside the repo.
+  const { stdout } = await execFileAsync('claude', argv, { cwd, maxBuffer: 16 * 1024 * 1024 });
+
+  let meta;
+  try {
+    meta = JSON.parse(stdout);
+  } catch (err) {
+    throw new Error(`could not parse the fetch envelope as json: ${err.message}`);
+  }
+  if (!meta?.session_id) {
+    throw new Error('the fetch produced no session_id, so its transcript cannot be located');
+  }
+
+  const path = transcriptPathFor({ cwd, sessionId: meta.session_id });
+  let text;
+  try {
+    text = readFileSync(path, 'utf8');
+  } catch (err) {
+    throw new Error(`could not read the fetch transcript at ${path}: ${err.message}`);
+  }
+  return extractPayload(text);
 }
 
 // A bare URL, `owner/repo#N`, or `#N` — and nothing else. Anchored at both ends with only
@@ -164,7 +207,12 @@ export function writeSource({ runDir, ref, item }) {
 // "the operator asked for something that isn't there" — and throwing would turn that reading
 // into a crash inside whatever is scoring or looping over the run. Same reasoning as
 // readMarker/readAcMap.
-export async function resolveItem({ ref, config, runDir, gh = realGh }) {
+// A jira key, anchored. `TARS-1353` and nothing else — the project part is compared against the
+// config below rather than accepted from the string, so a jira-shaped ref for another product is
+// refused instead of fetched.
+const JIRA_KEY_ONLY = /^\s*([A-Z][A-Z0-9_]*)-(\d+)\s*$/;
+
+export async function resolveItem({ ref, config, runDir, gh = realGh, jiraFetch = realJiraFetch }) {
   const text = typeof ref === 'string' ? ref.trim() : '';
   if (!text) return { ok: false, item: null, error: 'nothing to work on: the ref is empty' };
   if (!config) return { ok: false, item: null, error: 'no config: cannot resolve a work item against an unstated repository' };
@@ -186,6 +234,78 @@ export async function resolveItem({ ref, config, runDir, gh = realGh }) {
   // pasted a github URL into a jira-tracked repo, the other is waiting on a source that is not
   // built. Neither should be told to add a `source.github` block to a config that is correct.
   const kind = config.source?.kind;
+
+  // JIRA. Implemented via lib/jira.mjs — an MCP fetch through a `claude -p` spawn, whose payload is
+  // read from the session transcript rather than from the model's prose. See that file for why.
+  //
+  // THE REFUSALS BELOW ARE NARROWER THAN THE ONE THEY REPLACED but protect the same thing. The old
+  // blanket refusal existed because MEASURED, `TARS-1351` fell past `looksLikeIssueRef` (which
+  // knows three github shapes and nothing else) into the prompt path and returned `ok: true`,
+  // `source: "prompt"`, `acceptance_criteria: []` — a run that spends and cannot be graded, since
+  // the gate's verdict is a conjunction over findings and no criteria means nothing objected. Only
+  // an anchored jira key now escapes that refusal, and it escapes into a real fetch.
+  if (kind === 'jira') {
+    const key = JIRA_KEY_ONLY.exec(text);
+    if (!key) {
+      const detail = looksLikeIssueRef(text)
+        ? `ref "${text}" is a github issue reference but config declares source.kind "jira"`
+        : `ref "${text}" is not a jira issue key like TARS-1353, and config declares source.kind ` +
+          `"jira" — refusing rather than treating it as a prompt with no acceptance criteria, ` +
+          `which would spend on a run the gate cannot grade`;
+      return { ok: false, item: null, error: detail };
+    }
+
+    // The PROJECT is checked against the config, not taken from the ref. `PROJ-1` is jira-shaped
+    // and belongs to someone else's product; fetching it would work this repository's tree against
+    // a foreign ticket, and resolveBase would pick a base from a rule that never matched. Checked
+    // BEFORE the fetch so a foreign key costs nothing.
+    const project = config.source.jira?.project ?? null;
+    if (project && key[1] !== project) {
+      return {
+        ok: false,
+        item: null,
+        error: `ref "${text}" is in project ${key[1]} but config declares project ${project}; ` +
+          'refusing to resolve a ticket outside the configured project',
+      };
+    }
+
+    const wanted = `${key[1]}-${key[2]}`;
+    let issue;
+    try {
+      issue = await jiraFetch({ config, key: wanted });
+    } catch (err) {
+      // A failed fetch is a refusal, not a thin item — same rule as the gh path. Handing back a
+      // shell with an empty body would put a worker to work on a ticket nobody read.
+      return { ok: false, item: null, error: `could not fetch ${wanted}: ${err.message}` };
+    }
+
+    // THE FETCH IS MODEL-MEDIATED, so the key that came back is verified against the key that was
+    // asked for. Trusting the ref while holding another ticket's body would grade the run against
+    // criteria for an issue the operator never named.
+    if (issue?.key !== wanted) {
+      return {
+        ok: false,
+        item: null,
+        error: `asked for ${wanted} but the fetch returned ${issue?.key ?? 'no key'}; refusing to ` +
+          'grade a run against another ticket’s acceptance criteria',
+      };
+    }
+
+    let item;
+    try {
+      item = issueToItem({ issue, config });
+    } catch (err) {
+      return { ok: false, item: null, error: `could not read ${wanted}: ${err.message}` };
+    }
+
+    try {
+      writeSource({ runDir, ref: text, item });
+    } catch (err) {
+      return { ok: false, item: null, error: `could not write ${SOURCE_FILENAME}: ${err.message}` };
+    }
+    return { ok: true, item, error: null };
+  }
+
   if (kind !== 'github') {
     const detail = looksLikeIssueRef(text)
       ? `ref "${text}" is a github issue reference but config declares source.kind "${kind}"`

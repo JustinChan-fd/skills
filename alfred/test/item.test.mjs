@@ -19,6 +19,7 @@ import { mkdtempSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
+import { fileURLToPath } from 'node:url';
 
 import {
   SOURCE_FILENAME,
@@ -395,47 +396,190 @@ test('resolveItem refuses a github ref when the config declares a jira source', 
   assert.match(out.error, /jira/i);
 });
 
-// THE SAME REFUSAL FROM THE OTHER SIDE, AND IT IS THE ONE THAT WAS MISSING. The test above
-// proves a jira config refuses a GITHUB-shaped ref. It says nothing about a JIRA-shaped one,
-// and that is the ref a jira-configured operator will actually type.
+// THE JIRA PATH, NOW BUILT — and the invariant these tests were originally written to protect is
+// unchanged: a jira ticket key must never become a prompt-sourced item.
 //
-// MEASURED before writing this: `resolveItem({ref:'TARS-1351', config: <a jira config that
-// validates>, runDir})` returned `ok: true`, `source: "prompt"`, `acceptance_criteria: []`,
-// `ac_problem: "prompt-sourced work item: no acceptance criteria were given, and none were
-// invented"`. `looksLikeIssueRef` only knows github shapes, so `TARS-1351` falls past every
-// branch and lands in the prompt path — where a ticket key becomes its own body.
+// WHAT THEY USED TO ASSERT, and why it changed. Until lib/jira.mjs existed, every ref under a jira
+// config was refused, because MEASURED, `resolveItem({ref:'TARS-1351', config: <a jira config that
+// validates>})` returned `ok: true`, `source: "prompt"`, `acceptance_criteria: []` — a run that
+// spends money and cannot be graded, since the gate's verdict is a conjunction over findings and
+// zero criteria means nothing objected. The refusal was honest while the source was unbuilt. Now
+// the key RESOLVES, and the thing to prove is that it resolves to a real ticket with real criteria
+// rather than to prose. The prompt-degradation assertion survives below, inverted: `source` must
+// be `jira`, never `prompt`.
 //
-// That is a run that spends money and cannot be graded: the gate's verdict is a conjunction
-// over findings, so zero criteria means nothing to map, nothing to check, and a PR that reads
-// verified because nothing objected. Refusing costs nothing and is honest — the source kind is
-// declared and unimplemented, so there is no ref a jira config can currently resolve.
-test('resolveItem refuses a jira-shaped ref instead of degrading it to a prompt', async () => {
+// NO NETWORK. `jiraFetch` is injected for the same reason `gh` is. What it returns here is the
+// REAL TARS-1353 markdown, so the criteria under test are the strings the gate will execute.
+const JIRA_CONFIG = {
+  repo: 'x',
+  source: {
+    kind: 'jira',
+    jira: {
+      project: 'TARS',
+      epics: ['https://fandango.atlassian.net/browse/TARS-1350'],
+      epic_keys: ['TARS-1350'],
+      host: 'fandango.atlassian.net',
+      statuses: ['To Do'],
+    },
+  },
+};
+
+const JIRA_MARKDOWN = readFileSync(
+  fileURLToPath(new URL('./fixtures/jira-tars-1353.md', import.meta.url)),
+  'utf8',
+);
+
+const jiraReturning = (issue) => async () => issue;
+
+const JIRA_ISSUE = {
+  key: 'TARS-1353',
+  fields: {
+    summary: 'Module runbook: Discovery Hash ID Tool',
+    description: JIRA_MARKDOWN,
+    status: { name: 'To Do' },
+    parent: { key: 'TARS-1350' },
+    labels: [],
+  },
+};
+
+test('resolveItem resolves a jira key to a jira item — never to a prompt', async () => {
   const out = await resolveItem({
-    ref: 'TARS-1351',
-    config: { repo: 'x', source: { kind: 'jira', jira: { project: 'TARS' } } },
+    ref: 'TARS-1353',
+    config: JIRA_CONFIG,
     runDir: tmp(),
-    gh: ghReturning(ISSUE),
+    jiraFetch: jiraReturning(JIRA_ISSUE),
   });
-  assert.equal(out.ok, false, 'a jira ticket key must not resolve to a prompt-sourced item');
-  assert.match(out.error, /jira/i);
-  // Names the unimplemented source, not the ref's shape. An operator reading "not a github
-  // ref" would go add a github block to a config that correctly declares jira.
-  assert.match(out.error, /not (yet )?implemented|unimplemented|cannot be resolved/i);
+  assert.equal(out.error, null);
+  assert.equal(out.ok, true);
+  // The assertion the old refusal existed to guarantee, kept and inverted. `prompt` here would
+  // mean a ticket key became its own body and the run is ungradeable.
+  assert.equal(out.item.source, 'jira');
+  assert.notEqual(out.item.source, 'prompt');
+  assert.equal(out.item.id, 'TARS-1353');
+  assert.equal(out.item.epic, 'TARS-1350');
+  // Real criteria, and the executable string intact — this is what the gate runs.
+  assert.equal(out.item.acceptance_criteria.length, 5);
+  assert.equal(out.item.ac_problem, null);
+  assert.ok(out.item.acceptance_criteria[0].text.includes('grep -q "^## Client Routes" docs/modules/hasher.md'));
 });
 
-// AND THE REFUSAL IS ABOUT THE SOURCE, NOT THE STRING. Every ref is unresolvable under a jira
-// config today, so gating the refusal on "does it look like a jira key" would leave the exact
-// hole this pair closes: a quoted sentence under a jira config still becomes a prompt item, and
-// the operator learns nothing about the source being unbuilt until the gate has nothing to say.
-test('resolveItem refuses ANY ref under a jira config, including a quoted sentence', async () => {
+test('a jira resolution writes source.json with the whole payload', async () => {
+  // Same replayability rule as the github path: the record is the raw payload, not an excerpt.
+  const dir = tmp();
+  await resolveItem({ ref: 'TARS-1353', config: JIRA_CONFIG, runDir: dir, jiraFetch: jiraReturning(JIRA_ISSUE) });
+  const record = JSON.parse(readFileSync(join(dir, SOURCE_FILENAME), 'utf8'));
+  assert.equal(record.source, 'jira');
+  assert.equal(record.id, 'TARS-1353');
+  assert.equal(record.raw.fields.description, JIRA_MARKDOWN);
+});
+
+test('a failed jira fetch is a refusal, not a thin item', async () => {
+  // The failure this prevents is the expensive one: handing back a shell with an empty body puts a
+  // worker to work on a ticket nobody read, and the gate has no criteria to grade it against.
   const out = await resolveItem({
-    ref: 'update the placements runbook',
-    config: { repo: 'x', source: { kind: 'jira', jira: { project: 'TARS' } } },
+    ref: 'TARS-1353',
+    config: JIRA_CONFIG,
+    runDir: tmp(),
+    jiraFetch: async () => { throw new Error('no tool_result in the transcript'); },
+  });
+  assert.equal(out.ok, false);
+  assert.equal(out.item, null);
+  assert.match(out.error, /TARS-1353/);
+  assert.match(out.error, /tool_result/);
+});
+
+// A GITHUB-SHAPED REF UNDER A JIRA CONFIG IS STILL REFUSED, and this is not the same test as the
+// one above it. `#4` is resolvable in principle — just not here. Fetching it would work this
+// repository's tree against another tracker's ticket.
+test('resolveItem refuses a github-shaped ref under a jira config even now that jira works', async () => {
+  const out = await resolveItem({
+    ref: 'acme/other#4',
+    config: JIRA_CONFIG,
     runDir: tmp(),
     gh: ghReturning(ISSUE),
+    jiraFetch: jiraReturning(JIRA_ISSUE),
   });
   assert.equal(out.ok, false);
   assert.match(out.error, /jira/i);
+});
+
+// AND A SENTENCE UNDER A JIRA CONFIG IS STILL REFUSED. This is the hole the original pair closed
+// and it must not reopen: an operator who types prose at a jira-tracked repo gets a run with no
+// acceptance criteria, which is the ungradeable-spend case. Refusing names the mismatch instead.
+test('resolveItem refuses a quoted sentence under a jira config — no criteria means no grade', async () => {
+  const out = await resolveItem({
+    ref: 'update the placements runbook',
+    config: JIRA_CONFIG,
+    runDir: tmp(),
+    jiraFetch: jiraReturning(JIRA_ISSUE),
+  });
+  assert.equal(out.ok, false);
+  // THE DISTINGUISHING PROSE, not /jira/i. Every refusal on this path contains the word "jira",
+  // so a loose pattern would be satisfied by the github-shaped branch, the foreign-project
+  // branch, or a failed fetch — it would pass while the guard under test was deleted.
+  assert.match(out.error, /is not a jira issue key/);
+  // It must NOT have silently fetched something. A refusal that still called the fetcher would
+  // mean the ref was ignored and some default ticket resolved.
+  assert.equal(out.item, null);
+});
+
+// A SENTENCE THAT CONTAINS A KEY, which is the case the test above cannot see: its ref has no key
+// in it, so an unanchored JIRA_KEY_ONLY would still refuse it and the anchors would go unexercised.
+// MUTATION-CHECKED — dropping `^\s*` and `\s*$` from the regex survived the whole file until this
+// test existed. Unanchored, this ref resolves to the bare key and Alfred works the ENTIRE ticket
+// while the operator asked for one slice of it: a scope expansion that looks like obedience, on a
+// run nobody is watching. The narrower ask is not expressible as a key, so the answer is refusal.
+// BOTH SHAPES, because each anchor is a separate mutant. A ref with the key in the MIDDLE is
+// rejected by `^\s*` alone, so it cannot see a deleted `\s*$` — and the trailing-junk shape is the
+// likelier thing an operator types: pasting the key and then adding the qualifier after it.
+test('a sentence that MENTIONS a jira key is not a jira key — the ref must be the key alone', async () => {
+  for (const ref of [
+    'do what TARS-1353 says but only the docs part', // key in the middle — kills a dropped `^\s*`
+    'TARS-1353 but only the docs part',              // key first    — kills a dropped `\s*$`
+  ]) {
+    let called = false;
+    const out = await resolveItem({
+      ref,
+      config: JIRA_CONFIG,
+      runDir: tmp(),
+      jiraFetch: async (args) => { called = true; return jiraReturning(JIRA_ISSUE)(args); },
+    });
+    assert.equal(out.ok, false, `expected a refusal for ${JSON.stringify(ref)}`);
+    assert.match(out.error, /is not a jira issue key/);
+    assert.equal(out.item, null);
+    assert.equal(called, false, `a sentence mentioning a key must not fetch it: ${JSON.stringify(ref)}`);
+  }
+});
+
+test('the jira ref must match the configured project — a foreign key is refused, not fetched', async () => {
+  // `PROJ-1` is jira-shaped but belongs to another project. Fetching it would work webtarsthree's
+  // tree against a ticket from a different product, and `resolveBase` would pick a base branch
+  // from a rule that never matched.
+  let called = false;
+  const out = await resolveItem({
+    ref: 'PROJ-1',
+    config: JIRA_CONFIG,
+    runDir: tmp(),
+    jiraFetch: async () => { called = true; return JIRA_ISSUE; },
+  });
+  assert.equal(out.ok, false);
+  assert.equal(called, false, 'a foreign project key was fetched anyway');
+  assert.match(out.error, /PROJ-1|project/);
+});
+
+test('a fetched issue whose key DISAGREES with the ref is refused', async () => {
+  // The fetcher is injected and the MCP is a model-mediated call; a resolution that trusted the
+  // ref while returning another ticket's body would grade the run against criteria from an issue
+  // the operator never asked for.
+  const out = await resolveItem({
+    ref: 'TARS-1353',
+    config: JIRA_CONFIG,
+    runDir: tmp(),
+    jiraFetch: jiraReturning({ ...JIRA_ISSUE, key: 'TARS-9999' }),
+  });
+  assert.equal(out.ok, false);
+  assert.match(out.error, /TARS-9999/);
+  assert.match(out.error, /TARS-1353/);
 });
 
 // The falsifier for the two above: github must be UNAFFECTED. A refusal written as "refuse
