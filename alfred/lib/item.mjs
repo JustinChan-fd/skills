@@ -169,19 +169,30 @@ export async function resolveItem({ ref, config, runDir, gh = realGh }) {
   if (!text) return { ok: false, item: null, error: 'nothing to work on: the ref is empty' };
   if (!config) return { ok: false, item: null, error: 'no config: cannot resolve a work item against an unstated repository' };
 
-  // Diagnosed in this order deliberately: "is it ticket-shaped" -> "does the config track
-  // tickets there" -> "which repository". The middle question needs no owner, so a
-  // jira-configured repo handed `#4` is told its source kind is jira instead of being told to
-  // add a github owner it should not add.
-  if (looksLikeIssueRef(text)) {
-    const kind = config.source?.kind;
-    if (kind !== 'github') {
-      return {
-        ok: false,
-        item: null,
-        error: `ref "${text}" is a github issue reference but config declares source.kind "${kind}"`,
-      };
-    }
+  // ONE PLACE ANSWERS "IS THIS SOURCE SUPPORTED", and it answers before the ref's shape is
+  // resolved. `github` is the only implemented kind, so under any other kind there is no ref
+  // that CAN be resolved — which makes this a property of the config, not of the string.
+  //
+  // WHY THE BLANKET REFUSAL RATHER THAN A SHAPE CHECK. Until this, only github-SHAPED refs were
+  // caught here. A jira key fell past `looksLikeIssueRef` (which knows three github shapes and
+  // nothing else) into the prompt path, and MEASURED, `resolveItem({ref:'TARS-1351', config:
+  // <a jira config that validates>})` returned `ok: true`, `source: "prompt"`,
+  // `acceptance_criteria: []`. The run then spends money and the gate has nothing to grade: its
+  // verdict is a conjunction over findings, so zero criteria means zero objections means a PR
+  // that reads verified because nobody could check it. A config that declares an unimplemented
+  // source must refuse EVERY ref, not silently reinterpret the operator's ticket key as prose.
+  //
+  // The message still splits on shape, because the two operators need different next steps: one
+  // pasted a github URL into a jira-tracked repo, the other is waiting on a source that is not
+  // built. Neither should be told to add a `source.github` block to a config that is correct.
+  const kind = config.source?.kind;
+  if (kind !== 'github') {
+    const detail = looksLikeIssueRef(text)
+      ? `ref "${text}" is a github issue reference but config declares source.kind "${kind}"`
+      : `config declares source.kind "${kind}", which is not yet implemented, so no ref can be ` +
+        `resolved against it — refusing rather than treating "${text}" as a prompt with no ` +
+        `acceptance criteria, which would spend on a run the gate cannot grade`;
+    return { ok: false, item: null, error: detail };
   }
 
   let classified;
@@ -211,10 +222,11 @@ export async function resolveItem({ ref, config, runDir, gh = realGh }) {
     return { ok: true, item, error: null };
   }
 
-  // `source.kind` was checked above, before the owner was resolved, so by here the config is
-  // known to declare github. There is no second check: `jira` is in the config schema's closed
-  // set and is not implemented, and two places answering "is this source supported" is how
-  // they come to disagree.
+  // `source.kind` was checked above, before the owner was resolved and before the ref's shape
+  // was classified, so by here the config is known to declare github. There is no second check:
+  // two places answering "is this source supported" is how they come to disagree, and the
+  // disagreement showed up exactly as predicted — the shape-gated version let a jira config
+  // through to the prompt path.
 
   // The config's declared repository is the only one in scope. An operator who genuinely
   // tracks issues elsewhere says so in the config; a pasted URL must not be able to point the

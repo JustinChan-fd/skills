@@ -395,6 +395,63 @@ test('resolveItem refuses a github ref when the config declares a jira source', 
   assert.match(out.error, /jira/i);
 });
 
+// THE SAME REFUSAL FROM THE OTHER SIDE, AND IT IS THE ONE THAT WAS MISSING. The test above
+// proves a jira config refuses a GITHUB-shaped ref. It says nothing about a JIRA-shaped one,
+// and that is the ref a jira-configured operator will actually type.
+//
+// MEASURED before writing this: `resolveItem({ref:'TARS-1351', config: <a jira config that
+// validates>, runDir})` returned `ok: true`, `source: "prompt"`, `acceptance_criteria: []`,
+// `ac_problem: "prompt-sourced work item: no acceptance criteria were given, and none were
+// invented"`. `looksLikeIssueRef` only knows github shapes, so `TARS-1351` falls past every
+// branch and lands in the prompt path — where a ticket key becomes its own body.
+//
+// That is a run that spends money and cannot be graded: the gate's verdict is a conjunction
+// over findings, so zero criteria means nothing to map, nothing to check, and a PR that reads
+// verified because nothing objected. Refusing costs nothing and is honest — the source kind is
+// declared and unimplemented, so there is no ref a jira config can currently resolve.
+test('resolveItem refuses a jira-shaped ref instead of degrading it to a prompt', async () => {
+  const out = await resolveItem({
+    ref: 'TARS-1351',
+    config: { repo: 'x', source: { kind: 'jira', jira: { project: 'TARS' } } },
+    runDir: tmp(),
+    gh: ghReturning(ISSUE),
+  });
+  assert.equal(out.ok, false, 'a jira ticket key must not resolve to a prompt-sourced item');
+  assert.match(out.error, /jira/i);
+  // Names the unimplemented source, not the ref's shape. An operator reading "not a github
+  // ref" would go add a github block to a config that correctly declares jira.
+  assert.match(out.error, /not (yet )?implemented|unimplemented|cannot be resolved/i);
+});
+
+// AND THE REFUSAL IS ABOUT THE SOURCE, NOT THE STRING. Every ref is unresolvable under a jira
+// config today, so gating the refusal on "does it look like a jira key" would leave the exact
+// hole this pair closes: a quoted sentence under a jira config still becomes a prompt item, and
+// the operator learns nothing about the source being unbuilt until the gate has nothing to say.
+test('resolveItem refuses ANY ref under a jira config, including a quoted sentence', async () => {
+  const out = await resolveItem({
+    ref: 'update the placements runbook',
+    config: { repo: 'x', source: { kind: 'jira', jira: { project: 'TARS' } } },
+    runDir: tmp(),
+    gh: ghReturning(ISSUE),
+  });
+  assert.equal(out.ok, false);
+  assert.match(out.error, /jira/i);
+});
+
+// The falsifier for the two above: github must be UNAFFECTED. A refusal written as "refuse
+// unless the kind is github" is easy to write as "refuse everything", and the suite would still
+// be green on the jira tests while the working path is dead.
+test('resolveItem still resolves a prompt under a github config', async () => {
+  const out = await resolveItem({
+    ref: 'update the placements runbook',
+    config: CONFIG,
+    runDir: tmp(),
+    gh: ghReturning(ISSUE),
+  });
+  assert.equal(out.ok, true);
+  assert.equal(out.item.source, 'prompt');
+});
+
 // Two resolutions of the same inputs must agree. `item` feeds the prompt, the gate's criteria
 // and the run record, so a field that varies between calls varies the grade.
 test('resolveItem is deterministic over the same inputs', async () => {
