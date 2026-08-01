@@ -25,7 +25,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -220,11 +220,38 @@ test('the per-run markers are gitignored in webtarsthree — a run cannot inheri
   assert.ok(gitCheckIgnore(MARKER_PATH), `${MARKER_PATH} is committable in webtarsthree`);
 });
 
-test('the CONFIG is not ignored — the file alfred work refuses without must stay committable', (t) => {
+// AMENDED 2026-08-01. This test asserted `gitCheckIgnore('.alfred/config.json') === false` — that
+// the config must stay committable — and it FAILED when the operator deliberately gitignored it,
+// having decided webtarsthree's config stays local for now. The assertion was wrong in kind: whether
+// this particular repo commits its config is the operator's call about their repository, not a
+// property of Alfred that a test here should pin.
+//
+// WHAT IS NOT NEGOTIABLE IS THE FALSIFIER IT WAS CARRYING, and that survives unchanged: the ignore
+// rules must name FILES, never bare `.alfred/`. The tempting one-liner sweeps in every future file
+// under that directory, and because git keeps honouring an already-tracked path, the breakage stays
+// invisible locally and lands on a FRESH CLONE where the config is absent and Alfred refuses to run.
+// A local-by-choice config is fine; a directory-wide rule that silently captures the next file
+// someone adds is not.
+//
+// The consequence the operator accepted is stated rather than tested, because it is true either way:
+// a fresh clone of webtarsthree has no config, so `alfred work` there exits 2 until one is written.
+test('the ignore rules name FILES, not the .alfred directory — a fresh clone must not lose future files', (t) => {
   if (skipIfAbsent(t)) return;
-  // The falsifier for the test above, and the reason the ignore rules name two files
-  // instead of `.alfred/`. That tempting one-liner ignores `config.json` too; git keeps
-  // honouring an already-tracked file, so every test here stays green and the breakage
-  // lands on a FRESH CLONE, where the config is absent and Alfred refuses to run at all.
-  assert.equal(gitCheckIgnore('.alfred/config.json'), false, 'the config became unignorable');
+  const gitignore = readFileSync(join(TARGET, '.gitignore'), 'utf8');
+  const rules = gitignore
+    .split('\n')
+    .map((l) => l.trim())
+    .filter((l) => l && !l.startsWith('#') && l.includes('.alfred'));
+
+  // The extraction is asserted before it is trusted: zero matched rules would make the loop below
+  // vacuous, passing on a .gitignore that says nothing about .alfred at all.
+  assert.ok(rules.length > 0, `no .alfred rules found in webtarsthree/.gitignore: ${gitignore}`);
+
+  for (const rule of rules) {
+    assert.ok(
+      /\.alfred\/.+/.test(rule),
+      `"${rule}" ignores the whole .alfred directory; name the file instead, or a future ` +
+        'per-run artifact is silently ignored and a fresh clone loses it',
+    );
+  }
 });

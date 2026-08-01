@@ -348,6 +348,48 @@ test('ADDED #14: every flag the parser accepts is in usage AND in SKILL.md', () 
   }
 });
 
+// SKILL.md's REF TABLE IS EXECUTED, not merely read. Same reasoning as the flag test above and the
+// same measured cause: SKILL.md said "anything else is a prompt-sourced item" for a full commit
+// after the jira path landed, which is precisely backwards under a jira config — there is no prompt
+// path there, and following the doc would predict `ok: true` on a run the gate cannot grade.
+//
+// So every ref shape the doc ADVERTISES is resolved here, and every shape it says is REFUSED is
+// refused. The fetcher is a stub: this asserts the parse, not the network.
+test('ADDED: every ref shape SKILL.md advertises resolves, and every one it refuses is refused', async () => {
+  const { resolveItem } = await import('../lib/item.mjs');
+  const skill = readFileSync(fileURLToPath(new URL('../SKILL.md', import.meta.url)), 'utf8');
+
+  // The doc must still be making these claims — otherwise this test passes by describing a file
+  // that no longer says any of it, which is the vacuous-green shape the flag test warns about.
+  assert.match(skill, /browse\/TARS-1353/, 'SKILL.md no longer documents the browse-URL shape');
+  assert.match(skill, /but only the docs part/, 'SKILL.md no longer documents the ref-alone refusal');
+
+  const config = {
+    source: { kind: 'jira', jira: { project: 'TARS', host: 'fandango.atlassian.net' } },
+  };
+  const issue = {
+    key: 'TARS-1353',
+    fields: { summary: 'Module runbook', description: '## Acceptance Criteria\n\n* it works\n' },
+  };
+  const runDir = mkdtempSync(join(tmpdir(), 'alfred-refdoc-'));
+  const jiraFetch = async () => issue;
+
+  for (const ref of ['TARS-1353', 'https://fandango.atlassian.net/browse/TARS-1353']) {
+    const out = await resolveItem({ ref, config, runDir, jiraFetch });
+    assert.equal(out.ok, true, `SKILL.md advertises ${JSON.stringify(ref)} but it was refused: ${out.error}`);
+    assert.equal(out.item.id, 'TARS-1353');
+  }
+
+  for (const ref of [
+    'TARS-1353 but only the docs part',
+    'https://fandango.atlassian.net/browse/TARS-1353 but only the docs part',
+    'https://someoneelse.atlassian.net/browse/TARS-1353',
+  ]) {
+    const out = await resolveItem({ ref, config, runDir, jiraFetch });
+    assert.equal(out.ok, false, `SKILL.md says ${JSON.stringify(ref)} is refused, but it resolved`);
+  }
+});
+
 // --- what the operator gets back ---
 
 test('the run directory is printed, and it is outside the repository the gate scores', () => {

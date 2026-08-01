@@ -4,9 +4,11 @@ description: >-
   Run one work item to a deterministic verdict via Alfred, the standalone
   agentic harness. Use when the user says "alfred", "run alfred", "alfred
   work <ref>", or names a work item and asks for Alfred specifically ("have
-  alfred do jarvis#4", "alfred this ticket"). Takes a GitHub issue reference
-  (acme/jarvis#4, #4, an issue URL) or a quoted sentence, which becomes a
-  prompt-sourced item with no acceptance criteria and none invented. Alfred
+  alfred do jarvis#4", "alfred this ticket"). Takes a jira key or browse URL
+  (TARS-1353, https://site.atlassian.net/browse/TARS-1353), a GitHub issue
+  reference (acme/jarvis#4, #4, an issue URL), or — under a github config
+  only — a quoted sentence, which becomes a prompt-sourced item with no
+  acceptance criteria and none invented. Alfred
   is a Node CLI: this skill's whole job is to run it and read what it says.
   Do NOT use for general implementation work — that is ordinary work, and
   wrapping it in Alfred adds a spawn and a gate for nothing.
@@ -40,12 +42,46 @@ From this repo that is `./alfred/bin/alfred`; installed as a skill it is
 `~/.claude/skills/alfred/bin/alfred`. It needs `node` (v22+) and, for a real
 run, `claude` on PATH. Zero dependencies otherwise.
 
-`<ref>` is one argument. A github issue reference — `acme/jarvis#4`, `#4`, or an
-issue URL — is fetched via `gh` and its acceptance criteria are extracted from a
-heading that says *acceptance criteria*. Anything else is a prompt-sourced item:
-it gets **no acceptance criteria, and none are invented**, because the gate
-raises `ac_unmapped` once per criterion and a fabricated criterion is a bar
-nobody set.
+`<ref>` is one argument, and **which refs are legal depends on the repo's
+`source.kind`** — not on the shape you happen to type.
+
+| `source.kind` | legal refs | fetched by |
+|---|---|---|
+| `github` | `acme/jarvis#4`, `#4`, an issue URL | `gh` |
+| `jira` | `TARS-1353`, or a browse URL `https://<site>.atlassian.net/browse/TARS-1353` | the Atlassian MCP, via a `claude -p` spawn |
+
+Under either kind, acceptance criteria are extracted by **one shared parser**
+from a heading that says *acceptance criteria*. There is deliberately no
+jira-specific reader: two parsers of the same tickets would grade github and
+jira work by different rules.
+
+**A ref of the wrong shape for the configured kind is refused (exit 2), not
+reinterpreted.** A jira key under a jira config used to fall through to the
+prompt path and return `ok: true` with zero criteria — a run that spends and
+cannot be graded, since the gate's verdict is a conjunction over findings and no
+criteria means nothing objected. Under a `jira` config there is no prompt path.
+
+Two refusals worth knowing, because both look like pedantry until you hit them:
+
+- **The ref must be the ticket alone.** `TARS-1353 but only the docs part` and
+  `<url> but only the docs part` are both refused. Accepting them would resolve
+  to the bare key and work the **entire** ticket while you asked for one slice —
+  a scope expansion that looks like obedience, on a run nobody is watching. A
+  narrower ask is not expressible as a ref; put it in the ticket.
+- **A browse URL from another Atlassian site is refused** before any fetch. The
+  configured host is derived from the epic URLs in `.alfred/config.json`, and the
+  same key can exist on someone else's tenant.
+
+Under a `github` config, anything that is not an issue reference is a
+prompt-sourced item: it gets **no acceptance criteria, and none are invented**,
+because the gate raises `ac_unmapped` once per criterion and a fabricated
+criterion is a bar nobody set.
+
+**Alfred never creates or switches a branch.** It works whatever is checked out,
+in place, and the gate scores that tree — so check out the branch you want the
+work on *before* invoking. It also refuses a dirty tree (exit 2) unless
+`--allow-dirty`, because nothing on the observe→gate path asks *when* a change
+arrived: a pre-existing edit is scored as the worker's, in both directions.
 
 Flags (`alfred work --help` prints the authoritative list):
 
@@ -104,7 +140,32 @@ would have opened a PR against the wrong tree at 3am with nobody watching.
 ## Your job around the invocation
 
 **Before:** confirm the repo and the ref, and that a config exists. If the user
-named a ticket without a repo, ask rather than guessing which one.
+named a ticket without a repo, ask rather than guessing which one — `--repo`
+defaults to **cwd**, silently, so an invocation from the wrong directory grades a
+tree nobody meant to touch.
+
+Then run this pre-flight. It is short, it is all deterministic, and every item on
+it is a refusal Alfred would otherwise hand back *after* the operator waited:
+
+1. **`--dry-run` first.** It fetches and persists the ticket, spawns nothing, and
+   prints the argv. Confirm the item resolved with criteria and
+   `ac_problem: null` — a ticket whose criteria did not parse is a run the gate
+   cannot grade, and that is cheaper to learn now.
+2. **Confirm `--strict-mcp-config` is in the printed argv.** Without it the
+   worker inherits the operator's MCP servers and, under `bypassPermissions`,
+   holds **write** access to the very ticket it is graded against. The gate cannot
+   see that: it scores the working-tree diff, and a Jira edit leaves no diff.
+3. **Check the tree is clean the way Alfred checks it**, not with `git status` —
+   the two disagree on ignored files by design:
+   `node -e "import('./lib/run.mjs').then(async m => console.log(await m.treeIsDirty({repoRoot:'<repo>'})))"`.
+   Expect `[]`. A stray temp file is enough to exit 2.
+4. **Check the branch.** Alfred works what is checked out; it creates nothing.
+5. **Check the telemetry sink has nothing staged**, and that the seat env is set
+   by Alfred rather than inherited — this shell has `ANTHROPIC_DEFAULT_*` set
+   ambiently, and an inherited seat is untestable and silently wrong.
+
+Do **not** paste any of that back to the user as a checklist to run themselves.
+It is your job, and the point of a program is that the operator types the ticket.
 
 **After:** relay the verdict as it came out. Specifically:
 

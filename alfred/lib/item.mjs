@@ -212,6 +212,23 @@ export function writeSource({ runDir, ref, item }) {
 // refused instead of fetched.
 const JIRA_KEY_ONLY = /^\s*([A-Z][A-Z0-9_]*)-(\d+)\s*$/;
 
+// A jira BROWSE URL, which is the ref an operator actually holds: it is what the Jira UI puts on
+// the clipboard, and the github path has accepted an issue URL from the start. Refusing it meant
+// the one shape you have in hand was the one shape that exited 2, so every invocation had to be
+// retyped into a bare key by hand.
+//
+// STILL ANCHORED, and still a key alone. A browse URL carries exactly one issue and no room for a
+// qualifier, so accepting it does not reopen the scope-expansion hole JIRA_KEY_ONLY closes —
+// `.../browse/TARS-1353 but only the docs part` is not a URL and is still refused. The `?query` is
+// dropped because a URL copied from a focused comment or a board carries one, and the scheme is
+// optional because a pasted host-only URL is the same ticket.
+//
+// THE HOST IS CAPTURED, NOT IGNORED, and checked against the config below. A URL from another
+// Atlassian site is either a typo or a different product's ticket; fetching it would work this
+// repository's tree against a foreign specification.
+const JIRA_BROWSE_URL =
+  /^\s*(?:https?:\/\/)?([a-z0-9.-]+\.atlassian\.net)\/browse\/([A-Z][A-Z0-9_]*)-(\d+)(?:[?#]\S*)?\s*$/i;
+
 export async function resolveItem({ ref, config, runDir, gh = realGh, jiraFetch = realJiraFetch }) {
   const text = typeof ref === 'string' ? ref.trim() : '';
   if (!text) return { ok: false, item: null, error: 'nothing to work on: the ref is empty' };
@@ -245,7 +262,26 @@ export async function resolveItem({ ref, config, runDir, gh = realGh, jiraFetch 
   // the gate's verdict is a conjunction over findings and no criteria means nothing objected. Only
   // an anchored jira key now escapes that refusal, and it escapes into a real fetch.
   if (kind === 'jira') {
-    const key = JIRA_KEY_ONLY.exec(text);
+    // A BROWSE URL FIRST, and its host is checked before its key. A foreign site is refused here
+    // rather than falling through to the project check, because the project can match on a site
+    // that is not ours — `TARS-1353` may well exist on someone else's Atlassian tenant, and the
+    // diagnostic an operator needs names the host they pasted, not the project.
+    const url = JIRA_BROWSE_URL.exec(text);
+    let key = null;
+    if (url) {
+      const host = config.source.jira?.host ?? config.source.jira?.cloud ?? null;
+      if (host && url[1].toLowerCase() !== String(host).toLowerCase()) {
+        return {
+          ok: false,
+          item: null,
+          error: `ref "${text}" is on ${url[1]} but this config's jira host is ${host}; ` +
+            'refusing to resolve a ticket from a different Atlassian site',
+        };
+      }
+      key = [url[0], url[2], url[3]];
+    } else {
+      key = JIRA_KEY_ONLY.exec(text);
+    }
     if (!key) {
       const detail = looksLikeIssueRef(text)
         ? `ref "${text}" is a github issue reference but config declares source.kind "jira"`

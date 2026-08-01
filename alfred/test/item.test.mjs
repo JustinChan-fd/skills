@@ -551,6 +551,75 @@ test('a sentence that MENTIONS a jira key is not a jira key — the ref must be 
   }
 });
 
+// THE BROWSER URL IS THE REF AN OPERATOR ACTUALLY HAS. Measured: pasting the URL an operator copies
+// out of Jira exited 2 with "is not a jira issue key", while the github path has accepted an issue
+// URL from the start. That asymmetry is the whole defect — the shape you hold in your hand is the
+// one shape that was refused, so every real invocation had to be retyped by hand into a bare key.
+//
+// Note what is NOT relaxed: the URL must still resolve to a KEY ALONE. A browse URL carries exactly
+// one issue and no room for a qualifier, so accepting it does not reopen the scope-expansion hole
+// the test above pins — `.../browse/TARS-1353 but only the docs part` is still not a URL.
+test('a browse URL is a jira ref — it is the shape an operator copies out of Jira', async () => {
+  for (const ref of [
+    'https://fandango.atlassian.net/browse/TARS-1353',
+    'https://fandango.atlassian.net/browse/TARS-1353?focusedCommentId=1', // query stripped
+    '  https://fandango.atlassian.net/browse/TARS-1353  ',                 // paste whitespace
+    'fandango.atlassian.net/browse/TARS-1353',                             // no scheme
+  ]) {
+    let askedFor = null;
+    const out = await resolveItem({
+      ref,
+      config: JIRA_CONFIG,
+      runDir: tmp(),
+      jiraFetch: async (args) => { askedFor = args.key; return jiraReturning(JIRA_ISSUE)(args); },
+    });
+    assert.equal(out.ok, true, `expected ${JSON.stringify(ref)} to resolve: ${out.error}`);
+    // THE KEY, not the URL. The fetcher must receive `TARS-1353` — passing a URL as issueIdOrKey
+    // would send the MCP something it cannot look up, and the failure would surface as a fetch
+    // error blamed on the network rather than on this parse.
+    assert.equal(askedFor, 'TARS-1353');
+    assert.equal(out.item.id, 'TARS-1353');
+    assert.equal(out.item.source, 'jira');
+  }
+});
+
+// THE SCOPE-EXPANSION HOLE, on the URL path this time. The comment beside JIRA_BROWSE_URL claims
+// accepting a URL does not reopen it — and that claim was UNTESTED until this: dropping `\s*$` from
+// the URL regex survived every test above, and under that mutant
+// `.../browse/TARS-1353 but only the docs part` resolves to the bare key and Alfred works the whole
+// ticket. Same harm as the bare-key case, reached through a shape the operator is far likelier to
+// type, since appending a qualifier to a pasted URL is the natural way to ask for a slice.
+test('a browse URL with a qualifier appended is not a jira ref — the URL must stand alone', async () => {
+  let called = false;
+  const out = await resolveItem({
+    ref: 'https://fandango.atlassian.net/browse/TARS-1353 but only the docs part',
+    config: JIRA_CONFIG,
+    runDir: tmp(),
+    jiraFetch: async (args) => { called = true; return jiraReturning(JIRA_ISSUE)(args); },
+  });
+  assert.equal(out.ok, false);
+  assert.match(out.error, /is not a jira issue key/);
+  assert.equal(called, false, 'a URL with trailing prose must not fetch the key inside it');
+});
+
+// A URL FROM ANOTHER SITE IS NOT THIS SITE'S TICKET. The config's host is derived from the epic
+// URLs the operator pasted; a foreign host means either a typo or a ticket from a different
+// Atlassian site, and fetching it would work this repository's tree against a foreign spec. Refused
+// BEFORE the fetch, for the same reason the foreign-project check is: it costs nothing to refuse.
+test('a browse URL on a different Atlassian host is refused, not fetched', async () => {
+  let called = false;
+  const out = await resolveItem({
+    ref: 'https://someoneelse.atlassian.net/browse/TARS-1353',
+    config: JIRA_CONFIG,
+    runDir: tmp(),
+    jiraFetch: async (args) => { called = true; return jiraReturning(JIRA_ISSUE)(args); },
+  });
+  assert.equal(out.ok, false);
+  assert.match(out.error, /someoneelse\.atlassian\.net/);
+  assert.match(out.error, /fandango\.atlassian\.net/);
+  assert.equal(called, false, 'a foreign host must not be fetched');
+});
+
 test('the jira ref must match the configured project — a foreign key is refused, not fetched', async () => {
   // `PROJ-1` is jira-shaped but belongs to another project. Fetching it would work webtarsthree's
   // tree against a ticket from a different product, and `resolveBase` would pick a base branch
