@@ -1,0 +1,83 @@
+diff --git a/alfred/SKILL.md b/alfred/SKILL.md
+index 6ef61a5..475eed0 100644
+--- a/alfred/SKILL.md
++++ b/alfred/SKILL.md
+@@ -31,7 +31,8 @@ project is correcting.
+ ## What to run
+ 
+ ```
+-alfred/bin/alfred work <ref> [--repo <path>] [--dry-run]
++alfred/bin/alfred work <ref> [--repo <path>] [--run-root <path>] [--max-turns <n>]
++                             [--wall-cap-minutes <n>] [--worker-bin <path>] [--dry-run]
+ ```
+ 
+ From this repo that is `./alfred/bin/alfred`; installed as a skill it is
+@@ -45,9 +46,18 @@ it gets **no acceptance criteria, and none are invented**, because the gate
+ raises `ac_unmapped` once per criterion and a fabricated criterion is a bar
+ nobody set.
+ 
+-`--dry-run` composes the prompt and the argv, fetches and persists the ticket,
+-spawns nothing, and prints what it would have run. Use it when you want to check
+-the flags or the prompt without spending.
++The flags, per `alfred work --help`:
++
++| flag | meaning |
++|---|---|
++| `--repo <path>` | repository to work in (default: cwd) |
++| `--run-root <path>` | where run artifacts go (default: a sibling of the repo, never inside it — the gate scores the working tree) |
++| `--max-turns <n>` | hand `--max-turns` to the worker |
++| `--wall-cap-minutes <n>` | kill the worker after n minutes (default: 25) — this is the cap referred to below when a worker is killed mid-run |
++| `--worker-bin <path>` | the binary to spawn (default: `claude`) |
++| `--dry-run` | compose the prompt and the argv, fetch and persist the ticket, spawn nothing, print what it would have run. Use it when you want to check the flags or the prompt without spending |
++
++`--help` prints all of the above and exits 0.
+ 
+ ## Read the exit code, and do not collapse 1 and 2
+ 
+@@ -77,10 +87,26 @@ named a ticket without a repo, ask rather than guessing which one.
+ 
+ **After:** relay the verdict as it came out. Specifically:
+ 
+-- Report the findings **verbatim**, by rule name. `check_failed`,
+-  `scope_violation`, `ac_unmapped`, `evidence_weakened` and
+-  `instrument_modified` mean different things and the operator acts on which one
+-  fired.
++- Report the findings **verbatim**, by rule name. The eleven rules in
++  `GATE_RULES` (`lib/gate.mjs`) mean different things and the operator acts on
++  which one fired:
++  - `check_failed` — a declared check command exited non-zero (or the worker
++    was killed at the wall cap; see below).
++  - `ac_unmapped` — an acceptance criterion has no `ac_map` entry and no
++    unverifiable marker.
++  - `ac_failed` — an `ac_map` entry's command exited non-zero.
++  - `ac_unsatisfiable` — the worker declared the criterion itself cannot be
++    satisfied, with evidence.
++  - `unverifiable_no_reason` — a criterion was marked unverifiable with no
++    reason given.
++  - `mapping_implausible` — an `ac_map` entry's command doesn't plausibly test
++    the criterion it claims to.
++  - `unbacked_claim` — a claim of success with no command backing it.
++  - `scope_violation` — the diff touches a path outside what the ticket
++    permitted.
++  - `off_limits` — the diff touches a path the config declared off limits.
++  - `evidence_weakened` — a check went green by removing what it looks at.
++  - `instrument_modified` — a check went green by editing the checker itself.
+ - Report `unverified` entries too. They do **not** fail the run — the gate's
+   verdict is a conjunction over findings only — but a criterion nobody could
+   check is exactly what a human most needs to see. Swallowing it is how
+@@ -118,8 +144,15 @@ outward-facing**, and note that Alfred's own config carries
+ | the measurements behind it | `alfred/docs/HANDOFF.md` |
+ | the gate's checklist | `PLAN.md` §5, `lib/gate.mjs` |
+ | run artifacts | printed as `run dir:` — outside the repo, deliberately |
++| the audit record | `record.json`, written beside `source.json` in the run dir |
+ 
+ The run directory is **outside** the repository on purpose: the gate scores the
+ working-tree diff, so a `source.json` written under the repo root would be
+ counted as delivered work and raise `scope_violation` on a run that did nothing
+ wrong.
++
++`record.json` is the full audit record for the run: the cost breakdown by
++model, the suite stamp, the gate's complete findings (including full command
++output), and `gaps[]`. It is written to the run directory printed as `run
++dir:` — the same place as `source.json` and `worker.log`, never inside the
++repo.
