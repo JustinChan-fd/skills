@@ -1977,3 +1977,125 @@ test('ADDED #21: acLabel only accepts a LABEL — an arbitrary string ending in 
   assert.equal(unmapped.length, 1, `AC2 should be unmapped: ${JSON.stringify(findingRules(verdict))}`);
   assert.match(unmapped[0].detail, /^AC2 /);
 });
+
+// ---------------------------------------------------------------------------
+// GRADED WITHOUT CRITERIA (#13). A pass that means "nothing objected".
+// ---------------------------------------------------------------------------
+//
+// Measured on committed code: `acs: []` returns `pass: true`, `findings: []`,
+// `unverified: []`. Identical to a run that satisfied four real criteria — no field
+// distinguishes them. A prompt-sourced item, or a ticket whose acceptance criteria are
+// a paragraph rather than a list, therefore passes MORE easily than one with criteria,
+// because the AC half of the gate silently switches off.
+//
+// `item.mjs` already knows: it sets `ac_problem` and `prompt.mjs` tells the worker.
+// The gate is the one place that never hears about it, and the gate is what writes the
+// verdict an operator reads. This is #63's shape — a clause that cannot fail — moved
+// from a rule to a whole half of the checklist.
+//
+// NOT A FINDING. The gate's pass is a conjunction over findings, and a ticket with no
+// criteria has broken no rule; failing it would refuse honest prompt-sourced work.
+// The verdict must DISCLOSE the condition instead, which is what `unverified` exists
+// for per SKILL.md: "a criterion nobody could check is exactly what a human most needs
+// to see. Swallowing it is how 'verified' comes to mean 'nothing objected'."
+
+test('ADDED #13: zero criteria is disclosed on the verdict, not silently passed', async () => {
+  const verdict = await runGate({
+    config: { verify: {}, off_limits: [] },
+    repoRoot: tempRepo(),
+    acs: [],
+    acMap: [],
+    touched: ['alfred/SKILL.md'],
+    diffstat: [{ file: 'alfred/SKILL.md', added: 3, deleted: 0 }],
+    run: allGreen,
+  });
+
+  assert.equal(verdict.pass, true, 'no criteria breaks no rule; this must not become a finding');
+  assert.equal(verdict.graded_criteria, 0, 'the verdict must say how many criteria it graded');
+  assert.ok(
+    verdict.ungraded_reason,
+    'a run graded against nothing must carry a reason saying so',
+  );
+});
+
+test('ADDED #13: the disclosure is absent when criteria WERE graded', async () => {
+  // THE OTHER DIRECTION. A field that is always set discloses nothing — the #63 trap in
+  // reverse. Asserting only the zero case would leave a constant field passing that test.
+  const verdict = await runGate({
+    config: { verify: {}, off_limits: [] },
+    repoRoot: tempRepo(),
+    acs: [{ id: 'AC1', text: 'every gate rule is documented.' }],
+    acMap: [{ ac: 'AC1', command: 'grep -c "gate rule documented" x.md' }],
+    touched: ['alfred/SKILL.md'],
+    diffstat: [{ file: 'alfred/SKILL.md', added: 3, deleted: 0 }],
+    run: runnerFor({ 'grep -c "gate rule documented" x.md': { code: 0 } }),
+  });
+
+  assert.equal(verdict.pass, true, JSON.stringify(verdict.findings));
+  assert.equal(verdict.graded_criteria, 1, 'one criterion was graded');
+  assert.equal(verdict.ungraded_reason, null, 'nothing to disclose when criteria were graded');
+});
+
+test('ADDED #13: a worker-declared check does not count as a graded criterion', async () => {
+  // THE DANGEROUS CASE, and the reason `graded_criteria` counts CRITERIA and not commands.
+  // A prompt-sourced item whose worker volunteered a passing check produces a green run
+  // with commands in the log — the most convincing possible shape for a verdict that
+  // graded nothing an operator asked for. Counting executed commands would report 1 here
+  // and hide exactly the case worth disclosing: worker_declared evidence is the worker
+  // grading its own homework, which is why `runDeclaredChecks` labels it.
+  const log = [];
+  const verdict = await runGate({
+    config: { verify: {}, off_limits: [] },
+    repoRoot: tempRepo(),
+    acs: [],
+    acMap: [{ ac: 'my own check', command: 'grep -c "gate rule documented" mine.md' }],
+    touched: ['alfred/SKILL.md'],
+    diffstat: [{ file: 'alfred/SKILL.md', added: 3, deleted: 0 }],
+    // The volunteered check must PASS. A failing one draws `ac_failed` via
+    // `runDeclaredChecks` (#72) and the run fails for that reason instead, which would make
+    // this test observe the declared-check rule rather than the disclosure.
+    run: runnerFor({ 'grep -c "gate rule documented" mine.md': { code: 0 } }, log),
+  });
+
+  assert.equal(verdict.pass, true, JSON.stringify(verdict.findings));
+  // The command DID run — this is the convincing-shape case, not a case where nothing
+  // happened. The disclosure has to survive evidence being present.
+  assert.ok(
+    log.includes('grep -c "gate rule documented" mine.md'),
+    `the volunteered check never ran, so this is not the intended fixture: ${JSON.stringify(log)}`,
+  );
+  assert.equal(verdict.graded_criteria, 0, 'a volunteered check is not a criterion');
+  assert.ok(verdict.ungraded_reason, 'still graded against nothing the operator declared');
+});
+
+test('ADDED #13: a criterion with no id is not counted as graded, and says so accurately', async () => {
+  // WRITTEN BECAUSE A MUTANT SURVIVED. Counting `acs.length` instead of the criteria that
+  // carry an id passed all three tests above: none of them supplies a malformed criterion,
+  // so the `ac?.id != null` filter was doing unobserved work.
+  //
+  // `item.mjs` always mints `AC1..ACn`, so an id-less criterion only reaches the gate from a
+  // caller that built the list itself. That is exactly when a verdict must not overstate what
+  // it saw: the criterion IS declared, so `ungraded_reason` cannot claim none were, and it is
+  // NOT gradeable — `resolveAcs` raises `ac_unmapped` against the id `null` — so it cannot be
+  // counted as graded either. Both halves are asserted because one field cannot carry two
+  // propositions.
+  const verdict = await runGate({
+    config: { verify: {}, off_limits: [] },
+    repoRoot: tempRepo(),
+    acs: [{ text: 'a criterion whose id the caller never minted.' }],
+    acMap: [],
+    touched: ['alfred/SKILL.md'],
+    diffstat: [{ file: 'alfred/SKILL.md', added: 3, deleted: 0 }],
+    run: allGreen,
+  });
+
+  // The run fails on its own terms: an ungradeable criterion is `ac_unmapped`, as for any
+  // criterion nothing answers. That is pre-existing behaviour and not what this test adds.
+  assert.equal(verdict.pass, false, 'an ungradeable criterion must not pass');
+  assert.equal(verdict.graded_criteria, 0, 'an id-less criterion was not graded');
+  assert.match(
+    verdict.ungraded_reason ?? '',
+    /declared but could not be graded/,
+    `the reason must not claim none were declared: ${JSON.stringify(verdict.ungraded_reason)}`,
+  );
+});

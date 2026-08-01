@@ -212,6 +212,12 @@ function failed({ session, work, sink, error, suite, gate = null, delivery = nul
       pass: gate?.pass ?? null,
       findings: gate?.findings ?? [],
       unverified: gate?.unverified ?? [],
+      // HOW MANY CRITERIA THE VERDICT GRADED (#13), and why it graded none. A green run with
+      // zero criteria is indistinguishable from one that satisfied four unless the record says
+      // so, and the record is what outlives the console line. `null` for a caller that supplied
+      // no verdict, matching `pass` above: absent is unobserved, not zero.
+      graded_criteria: gate?.graded_criteria ?? null,
+      ungraded_reason: gate?.ungraded_reason ?? null,
     },
     delivery: {
       commits: delivery?.commits ?? [],
@@ -388,6 +394,12 @@ export function buildRecord({
       pass: gate?.pass ?? null,
       findings: gate?.findings ?? [],
       unverified: gate?.unverified ?? [],
+      // HOW MANY CRITERIA THE VERDICT GRADED (#13), and why it graded none. A green run with
+      // zero criteria is indistinguishable from one that satisfied four unless the record says
+      // so, and the record is what outlives the console line. `null` for a caller that supplied
+      // no verdict, matching `pass` above: absent is unobserved, not zero.
+      graded_criteria: gate?.graded_criteria ?? null,
+      ungraded_reason: gate?.ungraded_reason ?? null,
     },
     delivery: {
       commits: delivery?.commits ?? [],

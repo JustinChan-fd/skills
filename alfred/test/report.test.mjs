@@ -683,3 +683,66 @@ test('ADDED: the failure path carries what was DELIVERED — a pushed branch is 
   assert.equal(record.delivery.pushed_to, 'alfred/some-item');
   assert.equal(record.delivery.pr_url, 'https://example.invalid/pr/1');
 });
+
+test('ADDED #13: the record carries the DISCLOSURE that nothing was graded', () => {
+  // A FIELD THE VERDICT CARRIES AND THE RECORD DROPS — #10's shape, at a new field. The gate
+  // now reports `graded_criteria` and `ungraded_reason` so a green run graded against zero
+  // criteria says so. `buildRecord` projects the verdict to a fixed shape rather than passing
+  // it through, so both fields died on the way to disk: the console printed the disclosure and
+  // record.json did not have it.
+  //
+  // That asymmetry is the worse half. The console line is read once by whoever ran it; the
+  // record is what an operator, a scheduler, or a later scoring pass reads. A stored verdict
+  // whose `pass: true` cannot be distinguished from a run that satisfied real criteria is how
+  // "verified" comes to mean "nothing objected" in the artifact that outlives the run.
+  //
+  // A REAL TRANSCRIPT, so this exercises the SUCCESS projection. `buildRecord` has two — the
+  // ordinary one and `failed()` — and a mutant caught the first draft of this test: it passed
+  // `transcriptPath: null`, which takes the failure path, so both of these tests graded the
+  // same projection and deleting the success one killed nothing. The assertion that this is
+  // the success path is below, not implied by the fixture.
+  const record = buildRecord({
+    transcriptPath: ARM0,
+    subagentsDir: null,
+    session: { id: 'sess-graded-nothing' },
+    gate: {
+      pass: true,
+      findings: [],
+      unverified: [],
+      graded_criteria: 0,
+      ungraded_reason: 'no acceptance criteria were graded: none were declared',
+    },
+  });
+
+  assert.equal(record.ok, true, 'the fixture must exercise the SUCCESS path, not failed()');
+  assert.equal(record.gate.pass, true);
+  assert.equal(record.gate.graded_criteria, 0, 'the record must say how many criteria were graded');
+  assert.equal(
+    record.gate.ungraded_reason,
+    'no acceptance criteria were graded: none were declared',
+    'the disclosure was dropped on the way to disk',
+  );
+});
+
+test('ADDED #13: the FAILURE path carries the disclosure too', () => {
+  // BOTH PROJECTIONS, and separately, for the reason the test above this file's gate-verdict
+  // test already records: `buildRecord` has two of them, and a fix to one leaves the other
+  // silently dropping the field. A run whose transcript could not be read was still graded,
+  // and it was still graded against however many criteria it had.
+  const record = buildRecord({
+    transcriptPath: join(tmpdir(), 'alfred-no-such-transcript-graded-' + process.pid + '.jsonl'),
+    subagentsDir: null,
+    session: { id: 'sess-broken-graded-nothing' },
+    gate: {
+      pass: true,
+      findings: [],
+      unverified: [],
+      graded_criteria: 0,
+      ungraded_reason: 'no acceptance criteria were graded: none were declared',
+    },
+  });
+
+  assert.equal(record.ok, false, 'the fixture must exercise the failure path');
+  assert.equal(record.gate.graded_criteria, 0, 'the failure path dropped the count');
+  assert.ok(record.gate.ungraded_reason, 'the failure path dropped the disclosure');
+});

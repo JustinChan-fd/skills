@@ -829,5 +829,40 @@ export async function runGate({
     ? 'unsatisfiable-ac'
     : null;
 
-  return { pass, findings, unverified, blocked_reason };
+  // HOW MANY CRITERIA THIS VERDICT ACTUALLY GRADED (#13). Measured: `acs: []` returned
+  // `pass: true`, `findings: []`, `unverified: []` — byte-identical to a run that satisfied
+  // four real criteria. Nothing on the verdict distinguished them, so a prompt-sourced item
+  // and a ticket whose criteria are a paragraph rather than a list passed MORE easily than a
+  // ticket with criteria, because the AC half of the checklist silently switched off.
+  //
+  // NOT A FINDING, deliberately. `pass` is a conjunction over findings and a ticket with no
+  // criteria has broken no rule — failing it would refuse honest prompt-sourced work, which
+  // `item.mjs` supports on purpose. The verdict discloses the condition instead.
+  //
+  // COUNTS CRITERIA, NEVER COMMANDS. A worker that volunteers checks for an item with no
+  // criteria produces a green run with commands in the log — the most convincing possible
+  // shape for a verdict that graded nothing anybody asked for. Counting executed commands
+  // would report evidence here and hide exactly the case worth disclosing; `runDeclaredChecks`
+  // labels that evidence `worker_declared` for the same reason.
+  //
+  // `item.ac_problem` already carries the operator-facing sentence and `prompt.mjs` already
+  // shows it to the worker. The gate never received it — the one component whose output an
+  // operator reads as the verdict. Not plumbed through here on purpose: the gate must not
+  // depend on an item field to notice it graded nothing, or an absent `ac_problem` would
+  // restore the silence. It counts what it was given.
+  // TWO WAYS TO GRADE NOTHING, and the reason must not conflate them. Zero declared is the
+  // ordinary prompt-sourced case. Declared-but-id-less only arrives from a caller that built
+  // the list itself — `item.mjs` always mints `AC1..ACn` — and `resolveAcs` already fails such
+  // a criterion `ac_unmapped`. Reporting "none were declared" there would have the verdict
+  // overstate what it saw, on the one input where the caller is already known to be wrong.
+  const declared = (acs ?? []).length;
+  const graded_criteria = (acs ?? []).filter((ac) => ac?.id != null).length;
+  const ungraded_reason =
+    graded_criteria > 0
+      ? null
+      : declared === 0
+        ? 'no acceptance criteria were graded: none were declared'
+        : `no acceptance criteria were graded: ${declared} declared but could not be graded`;
+
+  return { pass, findings, unverified, blocked_reason, graded_criteria, ungraded_reason };
 }
