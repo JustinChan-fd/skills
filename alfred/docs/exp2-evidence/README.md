@@ -95,6 +95,27 @@ fix was checked against these files directly, not only against the tests: `ac_un
 into a single canonical map — the difference between run 3's and the other two is the whole
 reason the fix normalizes rather than compares raw text.
 
+The **#73-fixed-gate** sonnet-5 run, 2026-07-31 — **n=1, and the denominator shrank on
+purpose.** The first run whose `gate_pass` is not over-determined by false findings. Suite
+stamp is **byte-identical** to the `.2` rows above while a *different* gate produced it
+(`lib/gate.mjs` content sha `e0de647e…`, `466e917`) — the gate is a declared `not_member`, so
+the digest cannot record it:
+
+| file | what it is | when written |
+|---|---|---|
+| `armC-fixedgate-n1-score.md` | the single run scored; §0 states why n=1 and what that forbids | after the run |
+| `armC-fixedgate-n1-record.json` | the runner record, verbatim | at run end |
+| `armC-fixedgate-run1-delivered.diff` | what the run changed to **tracked** files | after the run |
+| `armC-fixedgate-run1-ac-map.json` | the ac_map — the **prospective** proof of the #73 fix | at run end |
+| `armC-fixedgate-run1-new-src-retryPolicy.js` | the module it added (untracked; `git diff` cannot see it) | after the run |
+| `armC-fixedgate-run1-new-test-retryPolicy.test.js.txt` | its new test file — **`.txt` suffixed per the hazard above** | after the run |
+
+**Runs 2 and 3 were cancelled after run 1, and the reason is part of the evidence.** Delivery
+was already 9/9 (now 10/10) and cost already had 6dp vendor agreement on three arms, so the
+two remaining runs would have re-measured a settled result for ~$4.70. The one new fact — does
+`gate_pass` discriminate — is qualitative and n=1 answers it. Do not read this row's `$3.34`
+against the `.2` mean: it is one observation, not a mean.
+
 **This record's `usd` figures are correct and independently corroborated.** Each run's
 price-table figure agrees with the CLI's own `total_cost_usd` to six decimal places
 ($2.439392, $2.049787, $2.547346). Unlike the `.1` row above, nothing here needs a correction
