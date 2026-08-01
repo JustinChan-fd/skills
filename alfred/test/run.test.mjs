@@ -33,7 +33,7 @@
 
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { after, test } from 'node:test';
@@ -322,6 +322,218 @@ test('an untracked new file is touched — a worker delivers by adding, not only
 // --- executeWork: the eight steps, and what must happen before anything spends ---
 
 const stubSpawn = (impl) => (argv, opts) => Promise.resolve(impl(argv, opts));
+
+// --- #14: A DIRTY TREE IS NOT GRADEABLE ------------------------------------------------------
+//
+// THE ATTRIBUTION BUG. `observeTree` reports the diff against HEAD and hands it to the gate,
+// which reads every entry as work the worker did. Nothing in that path asks when a change
+// arrived. So an edit already in the tree when the run starts is scored as the worker's, and it
+// fails in BOTH directions at once:
+//
+//   FALSE FINDING — an operator's half-finished edit to `test/foo.test.js` raises
+//   `evidence_weakened` against a worker that never opened the file. That is the #71 shape
+//   (`gate failed a correct run`) with a cause the record cannot show, because the diffstat is
+//   the only evidence and it looks identical either way.
+//
+//   FALSE PASS — a pre-existing edit that happens to satisfy a criterion is graded as
+//   delivered. `resolveAcs` runs the declared commands against the tree as it stands and
+//   reports the pass, which is the same false-green mechanism as #15's inherited ac-map, one
+//   layer up: work nobody did this run, credited to this run.
+//
+// WHICH IS WHY THIS IS A REFUSAL AND NOT A FINDING. A finding is the gate's verdict on a run
+// that happened; this must land BEFORE the spawn, because the money is spent producing a
+// verdict that cannot mean anything. Exit 2, not 1 — the input is wrong, the run is not.
+//
+// AND IT MUST NOT AUTO-CLEAN. `git stash`/`git checkout -- .` on an operator's uncommitted work
+// is unrecoverable from Alfred's side and the run would proceed as though nothing happened.
+// Alfred's whole standing is that it does not silently repair the thing it is measuring.
+//
+// DIRTY IS DEFINED BY `observeTree`, NOT BY `git status`. The two disagree exactly where it
+// matters: `--exclude-standard` skips ignored files, so #15's `.alfred/ac-map.json` is invisible
+// to the observer and would be reported dirty by porcelain. A refusal keyed on a wider notion of
+// dirty than the gate's would refuse runs whose trees the gate reads as clean.
+
+test('ADDED #14: a tracked modification refuses BEFORE the worker is spawned', async () => {
+  const repo = repoWithCommit();
+  writeFileSync(join(repo, 'a.js'), 'export const a = 999;\n');
+  let spawned = 0;
+
+  const result = await executeWork({
+    ref: 'work against a dirty tree',
+    config: CONFIG,
+    repoRoot: repo,
+    runRoot: mktemp('runs'),
+    stamp: '20260801T100000Z',
+    spawn: stubSpawn(() => {
+      spawned += 1;
+      return { exit: 0, killed: false, signal: null, wall_ms: 1, log: null };
+    }),
+    report: () => null,
+  });
+
+  assert.equal(result.ok, false, 'a dirty tree was accepted');
+  // THE LOAD-BEARING ASSERTION. `ok: false` alone would be satisfied by a refusal that fired
+  // after the spend, which is the case this task exists to prevent.
+  assert.equal(spawned, 0, 'the worker was spawned against a tree the gate cannot attribute');
+});
+
+test('ADDED #14: the refusal NAMES the dirty paths — an operator cannot act on a count', async () => {
+  // The diagnostic is the whole value. "the working tree is dirty" sends someone to `git status`
+  // in a repository they may not be sitting in; the paths say what to commit or revert. Two
+  // files, so a message built from only the first is caught.
+  const repo = repoWithCommit();
+  writeFileSync(join(repo, 'a.js'), 'export const a = 999;\n');
+  writeFileSync(join(repo, 'untracked-new.js'), 'export const n = 1;\n');
+
+  const result = await executeWork({
+    ref: 'name the paths',
+    config: CONFIG,
+    repoRoot: repo,
+    runRoot: mktemp('runs'),
+    stamp: '20260801T100100Z',
+    spawn: stubSpawn(() => ({ exit: 0, killed: false, signal: null, wall_ms: 1, log: null })),
+    report: () => null,
+  });
+
+  assert.equal(result.ok, false);
+  assert.match(result.error, /a\.js/, 'the modified file is not named');
+  // UNTRACKED COUNTS, and this is the half a `git diff`-only check would miss. `observeTree`
+  // includes untracked files precisely because a whole new module can land unseen otherwise —
+  // so a new file sitting in the tree at spawn time is attributed to the worker just as surely.
+  assert.match(result.error, /untracked-new\.js/, 'an untracked file was not treated as dirty');
+});
+
+test('ADDED #14: the refusal does NOT clean the tree — the operator’s work survives it', async () => {
+  // A refusal that stashed or reverted would make the run possible at the cost of the thing it
+  // refused over. Asserted on the CONTENT, not on the file existing: `git checkout -- .` leaves
+  // the path in place holding HEAD's version.
+  const repo = repoWithCommit();
+  writeFileSync(join(repo, 'a.js'), 'export const a = 999;\n');
+  writeFileSync(join(repo, 'untracked-new.js'), 'export const n = 1;\n');
+
+  await executeWork({
+    ref: 'do not touch my work',
+    config: CONFIG,
+    repoRoot: repo,
+    runRoot: mktemp('runs'),
+    stamp: '20260801T100200Z',
+    spawn: stubSpawn(() => ({ exit: 0, killed: false, signal: null, wall_ms: 1, log: null })),
+    report: () => null,
+  });
+
+  assert.equal(readFileSync(join(repo, 'a.js'), 'utf8'), 'export const a = 999;\n', 'the edit was reverted');
+  assert.equal(readFileSync(join(repo, 'untracked-new.js'), 'utf8'), 'export const n = 1;\n', 'the new file was removed');
+  // And nothing was stashed away to be "helpfully" restored later.
+  const stash = git(repo, ['stash', 'list']).trim();
+  assert.equal(stash, '', `the tree was stashed: ${stash}`);
+});
+
+test('ADDED #14: a CLEAN tree still runs — the falsifier for all three above', async () => {
+  // Without this, `ok: false` for every input satisfies the refusal tests and Alfred never runs
+  // again. The §"unfalsifiable conjunct" rule applied to a guard: a check that always fires is
+  // indistinguishable from a correct one until something needs to pass.
+  const repo = repoWithCommit();
+  let spawned = 0;
+
+  const result = await executeWork({
+    ref: 'a clean tree is workable',
+    config: CONFIG,
+    repoRoot: repo,
+    runRoot: mktemp('runs'),
+    stamp: '20260801T100300Z',
+    spawn: stubSpawn((argv, opts) => {
+      spawned += 1;
+      return { exit: 0, killed: false, signal: null, wall_ms: 1, log: opts.logPath };
+    }),
+    report: () => null,
+  });
+
+  assert.equal(result.ok, true, result.error);
+  assert.equal(spawned, 1, 'a clean tree did not reach the worker');
+});
+
+test('ADDED #14: an IGNORED file is not dirty — dirty means what the gate can see', async () => {
+  // #15 put `.alfred/ac-map.json` in `.gitignore` so `--exclude-standard` skips it and the
+  // marker leaves the diff the gate scores. A refusal keyed on `git status --porcelain` would
+  // read that same file as dirty and refuse every run in this repository — a guard stricter than
+  // the harm, which is how a correct guard gets turned off.
+  const repo = repoWithCommit();
+  writeFileSync(join(repo, '.gitignore'), 'ignored-artifact.log\n');
+  git(repo, ['add', '-A']);
+  git(repo, ['commit', '--quiet', '-m', 'ignore rule']);
+  writeFileSync(join(repo, 'ignored-artifact.log'), 'noise\n');
+
+  const result = await executeWork({
+    ref: 'an ignored file is not the workers doing',
+    config: CONFIG,
+    repoRoot: repo,
+    runRoot: mktemp('runs'),
+    stamp: '20260801T100400Z',
+    spawn: stubSpawn((argv, opts) => ({
+      exit: 0, killed: false, signal: null, wall_ms: 1, log: opts.logPath,
+    })),
+    report: () => null,
+  });
+
+  assert.equal(result.ok, true, `an ignored file was treated as dirty: ${result.error}`);
+});
+
+test('ADDED #14: allowDirty runs anyway, and the refusal is what it overrides', async () => {
+  // The escape hatch, because the operator sometimes MEANS to work a tree that already has
+  // changes in it — a run resumed by hand, or an eval arm that stages a fixture first. It takes
+  // the same input as the refusing test above, so the two together prove the flag is what moved
+  // the outcome and not the tree.
+  const repo = repoWithCommit();
+  writeFileSync(join(repo, 'a.js'), 'export const a = 999;\n');
+  let spawned = 0;
+
+  const result = await executeWork({
+    ref: 'deliberately dirty',
+    config: CONFIG,
+    repoRoot: repo,
+    runRoot: mktemp('runs'),
+    stamp: '20260801T100500Z',
+    allowDirty: true,
+    spawn: stubSpawn((argv, opts) => {
+      spawned += 1;
+      return { exit: 0, killed: false, signal: null, wall_ms: 1, log: opts.logPath };
+    }),
+    report: () => null,
+  });
+
+  assert.equal(result.ok, true, result.error);
+  assert.equal(spawned, 1, 'allowDirty did not reach the worker');
+});
+
+test('ADDED #14: a refused run leaves the fetched payload, so the refusal is auditable', async () => {
+  // WHERE THE CHECK SITS, asserted rather than assumed. It is after `resolveItem` — which
+  // §2.1 step 2 calls non-negotiable — so a refused tick still has `source.json` on disk and an
+  // operator can see WHICH item was refused. Ordering it before the fetch would make a refused
+  // run indistinguishable from one that never started.
+  const repo = repoWithCommit();
+  writeFileSync(join(repo, 'a.js'), 'export const a = 999;\n');
+
+  const result = await executeWork({
+    ref: 'refused but recorded',
+    config: CONFIG,
+    repoRoot: repo,
+    runRoot: mktemp('runs'),
+    stamp: '20260801T100600Z',
+    spawn: stubSpawn(() => ({ exit: 0, killed: false, signal: null, wall_ms: 1, log: null })),
+    report: () => null,
+  });
+
+  assert.equal(result.ok, false);
+  assert.ok(result.run_dir, 'a refused run reported no run directory');
+  const written = JSON.parse(readFileSync(join(result.run_dir, SOURCE_FILENAME), 'utf8'));
+  assert.equal(written.ref, 'refused but recorded');
+  // And no record: nothing was graded, so there is no accounting to write. A record here would
+  // read as a run that completed.
+  assert.ok(
+    !readdirSync(result.run_dir).includes(RECORD_FILENAME),
+    'a refused run wrote an accounting record for work that never happened',
+  );
+});
 
 test('the raw payload is on disk BEFORE the worker is spawned', async () => {
   // PLAN.md §2.1 step 2, called non-negotiable there and a bug fix rather than a feature:

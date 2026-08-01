@@ -33,6 +33,7 @@ project is correcting.
 ```
 alfred/bin/alfred work <ref> [--repo <path>] [--run-root <path>] [--max-turns <n>]
                               [--wall-cap-minutes <n>] [--worker-bin <path>] [--dry-run]
+                              [--allow-dirty]
 ```
 
 From this repo that is `./alfred/bin/alfred`; installed as a skill it is
@@ -56,10 +57,28 @@ Flags (`alfred work --help` prints the authoritative list):
 | `--wall-cap-minutes <n>` | kill the worker after n minutes (default: 25) — this is the cap referred to below when a worker is killed mid-run |
 | `--worker-bin <path>` | the binary to spawn (default: `claude`) |
 | `--dry-run` | compose everything, spawn nothing, print the argv |
+| `--allow-dirty` | grade a tree that already has uncommitted changes (refused by default) |
 
 `--dry-run` composes the prompt and the argv, fetches and persists the ticket,
 spawns nothing, and prints what it would have run. Use it when you want to check
 the flags or the prompt without spending.
+
+## A dirty tree is refused, and that is exit 2
+
+Alfred **will not spawn against a working tree that already has uncommitted
+changes.** The gate scores the diff against `HEAD` and nothing on that path asks
+*when* a change arrived, so anything already in the tree is attributed to the
+worker — which fails in both directions. A stale edit to a test file raises
+`evidence_weakened` against a worker that never opened it, and a stale edit that
+happens to satisfy a criterion is graded as delivered. The verdict is not worth
+paying for either way, so the refusal lands **before the spawn**: exit 2, nothing
+spent.
+
+The refusal **names the dirty paths** and it **cleans nothing** — no stash, no
+revert, no checkout. Commit them, move them, or pass `--allow-dirty` if the dirt
+is deliberate (a run resumed by hand, a staged fixture). Untracked files count;
+gitignored files do not, because those are exactly the ones the gate cannot see
+either.
 
 ## Read the exit code, and do not collapse 1 and 2
 

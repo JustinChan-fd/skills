@@ -227,6 +227,50 @@ export async function observeTree({ repoRoot, since = 'HEAD' } = {}) {
   return { diffstat, touched: diffstat.map((e) => e.file) };
 }
 
+// Is this tree gradeable? The check that has to happen before the money is spent.
+//
+// DIRTY IS DEFINED BY `observeTree`, DELIBERATELY, AND NOT BY `git status --porcelain`. The two
+// disagree on ignored files, and the difference is not academic: #15 put `.alfred/ac-map.json`
+// into `.gitignore` precisely so `--exclude-standard` drops it from the diff the gate scores. A
+// refusal keyed on porcelain would read that marker as dirt and refuse every run in this
+// repository — a guard stricter than the harm it prevents, which is how a correct guard comes to
+// be switched off. What matters is exactly what the gate can see and will attribute to the
+// worker, so the observer that produces the gate's input is the one that answers the question.
+//
+// WHY REFUSE AT ALL. Nothing on the observe→gate path asks WHEN a change arrived, so a change
+// already present at spawn time is scored as the worker's. That is wrong in both directions: a
+// stale edit to a test file raises `evidence_weakened` against a worker that never opened it
+// (#71's shape, invisible in the record), and a stale edit that happens to satisfy a criterion is
+// graded as delivered (#15's false green, one layer up). Neither is a verdict worth paying for.
+export async function treeIsDirty({ repoRoot }) {
+  const { touched } = await observeTree({ repoRoot });
+  // Sorted so the refusal message is stable across runs — git's ordering differs between the
+  // tracked and untracked passes, and an operator diffing two refusals should see the tree
+  // change, not the enumeration order.
+  return [...touched].sort();
+}
+
+// The message, kept beside the check rather than inlined at the call site: the PATHS are the
+// diagnostic. "the working tree is dirty" sends someone to `git status` in a directory they may
+// not be sitting in, and a count says nothing about what to commit or revert.
+//
+// IT ALSO SAYS WHAT NOT TO EXPECT. Alfred does not stash, revert, or clean — the operator's
+// uncommitted work is unrecoverable from here, and a tool that silently repairs the thing it is
+// measuring has no standing to report on it. The override is named so the refusal is actionable
+// in the case where the dirt is deliberate.
+export function dirtyRefusal(paths) {
+  const shown = paths.slice(0, 20);
+  const more = paths.length - shown.length;
+  return (
+    `refusing to spawn against a dirty working tree: the gate scores the diff against HEAD and ` +
+    `would attribute ${paths.length === 1 ? 'this change' : 'these changes'} to the worker. ` +
+    `Commit, revert, or move ${paths.length === 1 ? 'it' : 'them'}, or pass --allow-dirty to ` +
+    `grade the tree as it stands. Nothing here was cleaned:\n` +
+    shown.map((p) => `  ${p}`).join('\n') +
+    (more > 0 ? `\n  ... and ${more} more` : '')
+  );
+}
+
 // Launches the worker and resolves once it has ended or been stopped.
 //
 // Everything about this function is one of the three measured gaps in the header. `bin` is a
@@ -319,6 +363,10 @@ export async function executeWork({
   stamp = null,
   maxTurns = null,
   wallCapMs = DEFAULT_WALL_CAP_MS,
+  // #14. Defaults to REFUSING, because the failure it prevents is silent: a run against a dirty
+  // tree produces a verdict that reads exactly like a valid one. An opt-in guard would be off on
+  // every unattended tick, which is the only place nobody is watching.
+  allowDirty = false,
   spawn: spawnFn = spawnWorker,
   gate: gateFn = runGate,
   // A REAL DEFAULT AT LAST. This was `null` with a comment saying the record "needs a transcript
@@ -354,6 +402,34 @@ export async function executeWork({
   const resolved = await resolveItem({ ref, config: cfg, runDir });
   if (!resolved.ok) return { ok: false, error: resolved.error, run_dir: runDir };
   const item = resolved.item;
+
+  // Step 2b. #14 — IS THE TREE GRADEABLE. After the fetch and before the spawn, and both halves
+  // of that placement are deliberate:
+  //
+  //   AFTER, so a refused tick leaves `source.json` on disk and an operator can see which item
+  //   was refused. Ordered before the fetch, a refusal would be indistinguishable from a run
+  //   that never started.
+  //
+  //   BEFORE, because the whole point is that nothing is spent. A dirty tree does not make the
+  //   worker fail — it makes the verdict meaningless, and a meaningless verdict costs the same
+  //   as a real one.
+  //
+  // A FAILED OBSERVATION IS NOT A CLEAN TREE. `observeTree` shells out to git, and a repoRoot
+  // that is not a repository throws. Treated as "could not tell" and allowed through: the
+  // not-a-git-repo case already has a stated verdict path of its own (see cli.test.mjs), and
+  // converting every such run into a refusal here would move a diagnosable failure to a
+  // misleading one. The gate still receives `diffstat: undefined` and #63's distinction holds.
+  if (!allowDirty) {
+    let dirty = [];
+    try {
+      dirty = await treeIsDirty({ repoRoot: root });
+    } catch {
+      dirty = [];
+    }
+    if (dirty.length > 0) {
+      return { ok: false, error: dirtyRefusal(dirty), run_dir: runDir, dirty };
+    }
+  }
 
   // Step 3 is `resolveBase`, and it belongs to delivery rather than to the worker — nothing here
   // creates a branch yet. Deliberately not called, so that a base this thin path cannot use is

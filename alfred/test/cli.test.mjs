@@ -253,12 +253,98 @@ test('parseArgv defaults the wall cap to lib/run.mjs\'s constant, not to its own
   assert.throws(() => parseArgv(['work', '#4', '--wall-cap-minutes', '-1']), /wall-cap/);
 });
 
+// --- #14: the dirty-tree refusal, on the operator's side ---
+
+test('ADDED #14: --allow-dirty parses, and defaults to false so an unattended tick is guarded', () => {
+  // Registered in BOTH places or it is not a flag: the switch that sets it and the `parsed`
+  // literal that declares it. Missing from the literal, `parsed.allowDirty` is `undefined` —
+  // which is falsy, so the guard would appear to work while the flag silently did nothing.
+  assert.equal(parseArgv(['work', '#4']).allowDirty, false);
+  assert.equal(parseArgv(['work', '#4', '--allow-dirty']).allowDirty, true);
+});
+
+test('ADDED #14: a dirty tree exits 2 and never launches the worker', () => {
+  // EXIT 2, NOT 1. Nothing was graded and nothing was spent — the operator's input is wrong, the
+  // run is not. A scheduler reading this as a failed run would retry it at full price forever
+  // against a tree that stays dirty; reading a failed run as this would stop retrying honest
+  // work. That is the distinction the three codes exist for.
+  const dir = repo();
+  writeFileSync(join(dir, 'a.js'), 'export const a = 999;\n');
+  const stub = workerStub();
+  const r = run(
+    ['work', 'anything', '--worker-bin', stub.path, '--run-root', mktemp('runs')],
+    { cwd: dir },
+  );
+
+  assert.equal(r.status, EXIT.refused, `expected refused, got ${r.status}\n${r.stdout}\n${r.stderr}`);
+  assert.throws(() => statSync(stub.argvFile), /ENOENT/, 'the worker was launched against a dirty tree');
+  // The path, on stderr where refusals go, and the override named so the message is actionable.
+  assert.match(r.stderr, /a\.js/, 'the refusal does not name the dirty path');
+  assert.match(r.stderr, /--allow-dirty/, 'the refusal does not name its own override');
+});
+
+test('ADDED #14: --allow-dirty on the same dirty tree runs the worker', () => {
+  // Same repository state as the test above; only the flag differs. Together they establish that
+  // the flag moved the outcome — a pair of tests on different trees could not.
+  const dir = repo();
+  writeFileSync(join(dir, 'a.js'), 'export const a = 999;\n');
+  const stub = workerStub();
+  const r = run(
+    ['work', 'anything', '--allow-dirty', '--worker-bin', stub.path, '--run-root', mktemp('runs')],
+    { cwd: dir },
+  );
+
+  assert.notEqual(r.status, EXIT.refused, `--allow-dirty still refused:\n${r.stderr}`);
+  assert.ok(statSync(stub.argvFile).size > 0, '--allow-dirty did not launch the worker');
+});
+
+test('ADDED #14: the dirty tree is unchanged after the refusal', () => {
+  // Asserted through the real entrypoint, because the auto-clean this must not do would be a
+  // convenience someone adds at the CLI layer — "refuse, but tidy up first" — where the unit
+  // test on executeWork cannot see it.
+  const dir = repo();
+  writeFileSync(join(dir, 'a.js'), 'export const a = 999;\n');
+  const stub = workerStub();
+  run(['work', 'anything', '--worker-bin', stub.path, '--run-root', mktemp('runs')], { cwd: dir });
+
+  assert.equal(readFileSync(join(dir, 'a.js'), 'utf8'), 'export const a = 999;\n', 'the CLI cleaned the tree');
+});
+
 test('usage names every subcommand parseArgv accepts', () => {
   // A subcommand that works and is undocumented is only reachable by reading the source; a
   // documented one that does not work is worse. Asserted against the parse rather than a list.
   const text = usage();
   for (const command of ['work', 'loop']) {
     assert.ok(text.includes(command), `usage omits '${command}'`);
+  }
+});
+
+test('ADDED #14: every flag the parser accepts is in usage AND in SKILL.md', () => {
+  // MEASURED ON THIS TASK. `--allow-dirty` was parsed, threaded, tested and shipped through a
+  // green suite while SKILL.md still described seven flags — because nothing checked. SKILL.md is
+  // the file a reader of this skill actually gets, and a refusal an operator has not been told
+  // about is indistinguishable from a bug at 3am.
+  //
+  // THE FLAG LIST COMES FROM THE PARSER, not from a list typed here. A literal array would have
+  // to be edited by the same person who forgot to edit the docs, which is no check at all. The
+  // switch's `case '--x':` lines are the authoritative set: the parse refuses anything absent
+  // from them, so a flag that works is a flag that appears there.
+  const source = readFileSync(fileURLToPath(new URL('../lib/cli.mjs', import.meta.url)), 'utf8');
+  const flags = [...source.matchAll(/case '(--[a-z-]+)':/g)].map((m) => m[1]);
+
+  // The extraction itself is asserted before it is trusted. A regex that silently matched
+  // nothing would make the loop below vacuous — the §"unfalsifiable conjunct" shape, where a
+  // green result means the check could not fire rather than that it passed.
+  assert.ok(flags.length >= 7, `only ${flags.length} flags found in the parser: ${flags}`);
+  assert.ok(flags.includes('--allow-dirty'), 'the flag extraction missed a known flag');
+
+  const usageText = usage();
+  const skill = readFileSync(fileURLToPath(new URL('../SKILL.md', import.meta.url)), 'utf8');
+  for (const flag of flags) {
+    // `-h` and `--help` share a case; `--help` is the documented spelling and the shorthand is
+    // not load-bearing.
+    assert.ok(usageText.includes(flag), `--help does not document '${flag}'`);
+    assert.ok(skill.includes(flag), `SKILL.md does not document '${flag}'`);
   }
 });
 

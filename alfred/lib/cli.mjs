@@ -62,6 +62,10 @@ export function usage() {
     `                           ${DEFAULT_WALL_CAP_MS / 60000})`,
     '  --worker-bin <path>      the binary to spawn (default: claude)',
     '  --dry-run                compose everything, spawn nothing, print the argv',
+    '  --allow-dirty            grade a tree that already has uncommitted changes.',
+    '                           Refused by default: the gate scores the diff against',
+    '                           HEAD, so pre-existing edits are attributed to the',
+    '                           worker. Nothing is ever cleaned either way.',
     '  --help                   print this and exit 0',
     '',
     'exit codes: 0 the gate passed, 1 a run was graded and failed, 2 refused before',
@@ -112,6 +116,11 @@ export function parseArgv(argv = []) {
     wallCapMs: DEFAULT_WALL_CAP_MS,
     workerBin: null,
     dryRun: false,
+    // #14. FALSE, not undefined, and declared here rather than left to the switch alone. An
+    // absent key is falsy too, so a flag registered in the switch and forgotten here would
+    // appear to work while `parsed.allowDirty` was never anything but undefined — and the test
+    // asserting the default would be asserting nothing.
+    allowDirty: false,
     help: false,
   };
 
@@ -140,6 +149,9 @@ export function parseArgv(argv = []) {
         break;
       case '--dry-run':
         parsed.dryRun = true;
+        break;
+      case '--allow-dirty':
+        parsed.allowDirty = true;
         break;
       default:
         if (arg.startsWith('-')) {
@@ -305,6 +317,7 @@ export async function main(
       runRoot: parsed.runRoot,
       maxTurns: parsed.maxTurns,
       wallCapMs: parsed.wallCapMs,
+      allowDirty: parsed.allowDirty,
       spawn,
     });
   } catch (e) {
