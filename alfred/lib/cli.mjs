@@ -170,7 +170,7 @@ export function parseArgv(argv = []) {
 
 // The verdict, printed for whoever reads the tick's output. Findings first: an operator reading
 // a failure wants the rule that fired, not the run's plumbing.
-function reportVerdict(gate, { out }) {
+export function reportVerdict(gate, { out }) {
   out(`gate: ${gate.pass ? 'PASS' : 'FAIL'}`);
   for (const finding of gate.findings ?? []) {
     out(`  ${finding.rule}: ${finding.detail ?? ''}`);
@@ -180,7 +180,11 @@ function reportVerdict(gate, { out }) {
   // findings only. It is printed because a criterion nobody could check is the thing a human
   // most needs to see, and swallowing it is how "verified" comes to mean "nothing objected".
   for (const item of gate.unverified ?? []) {
-    out(`  unverified: ${item.ac ?? item.id ?? ''} ${item.detail ?? item.reason ?? ''}`.trimEnd());
+    // `worker-declared` is printed because the label's whole purpose is preventing a
+    // misreading (#72): an entry the worker volunteered and a criterion from the ticket,
+    // printed identically, send an operator hunting the ticket for a bar nobody set there.
+    const origin = item.worker_declared ? ' [worker-declared]' : '';
+    out(`  unverified:${origin} ${item.ac ?? item.id ?? ''} ${item.detail ?? item.reason ?? ''}`.trimEnd());
   }
   if (gate.blocked_reason) out(`blocked: ${gate.blocked_reason}`);
 }

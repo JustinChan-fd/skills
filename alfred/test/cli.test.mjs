@@ -30,7 +30,7 @@ import { join } from 'node:path';
 import { after, test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 
-import { EXIT, parseArgv, usage } from '../lib/cli.mjs';
+import { EXIT, parseArgv, reportVerdict, usage } from '../lib/cli.mjs';
 import { SOURCE_FILENAME } from '../lib/item.mjs';
 import { DEFAULT_WALL_CAP_MS } from '../lib/run.mjs';
 
@@ -326,6 +326,30 @@ test('a worker that exits non-zero is reported, and the gate still decides the v
 
   assert.match(r.stdout + r.stderr, /\b7\b/, "the worker's exit code is not reported");
   assert.ok(r.status === EXIT.pass || r.status === EXIT.gate_failed, `got ${r.status}`);
+});
+
+test('a worker-declared unverified entry says so, so it is not read as a criterion (#72)', () => {
+  // The label exists to stop a misreading, so it has to reach the operator. `unverified: AC2 ...`
+  // and `unverified: some sentence the worker wrote ...` printed identically would have an
+  // operator hunting the ticket for a criterion nobody put there.
+  const printed = [];
+  reportVerdict(
+    {
+      pass: true,
+      findings: [],
+      unverified: [
+        { ac: 'AC2', reason: 'characterization tests are absent' },
+        { ac: 'backoff shape is preserved', reason: 'the tests stub sleep', worker_declared: true },
+      ],
+    },
+    { out: (line) => printed.push(line) },
+  );
+
+  const lines = printed.join('\n');
+  assert.match(lines, /unverified: AC2 characterization tests are absent/);
+  assert.match(lines, /worker-declared/);
+  // And the criterion from the ticket is NOT labelled — the whole value is telling them apart.
+  assert.doesNotMatch(lines.split('\n').find((l) => l.includes('AC2')), /worker-declared/);
 });
 
 test('a run in a directory that is not a git repository still returns a verdict', () => {

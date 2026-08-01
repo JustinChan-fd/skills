@@ -190,10 +190,15 @@ async function resolveAcs({ acs, acMap, repoRoot, run, findings, unverified }) {
     if (!byAc.has(entry?.ac)) byAc.set(entry?.ac, entry);
   }
 
+  // Which entries answered a criterion someone SET. The rest are the worker's own, and are
+  // handled below — see `runDeclaredChecks`.
+  const claimed = new Set();
+
   for (const ac of acs ?? []) {
     const id = ac?.id ?? null;
     const text = ac?.text ?? '';
     const entry = byAc.get(id);
+    if (entry) claimed.add(entry);
 
     if (!entry) {
       findings.push(
@@ -261,6 +266,56 @@ async function resolveAcs({ acs, acMap, repoRoot, run, findings, unverified }) {
     if (code !== 0) {
       findings.push(
         finding(GATE_RULES.ac_failed, `${id} failed its own check: ${command}`, `exit ${code}\n${String(output ?? '').trim()}`),
+      );
+    }
+  }
+
+  await runDeclaredChecks({ entries: [...byAc.values()].filter((e) => !claimed.has(e)), repoRoot, run, findings, unverified });
+}
+
+// #72: THE ENTRIES NOBODY ASKED FOR, WHICH IS MOST OF THEM ON A PROMPT-SOURCED ITEM.
+//
+// The loop above iterates the ITEM'S criteria. A prompt-sourced item has none — §2.1 invents
+// none, because a fabricated criterion is a bar nobody set — so on every such item the loop
+// body never ran and the ac_map was read but never EXECUTED. The first real run declared
+// `grep -L "from './retry.mjs'" src/{email,push,sms}.mjs` as the command proving all three
+// channels shared the helper, and that command was never run: the PASS rested on
+// `config.verify` alone. "The gate runs the commands itself, in a separate process" is the
+// property that makes a verdict unarguable, and here there was a command and no run.
+//
+// LABELLED, NOT PROMOTED. A worker-authored green is weak evidence — the worker could write
+// `true`. A worker-authored RED is strong: it is a worker reporting its own work incomplete,
+// and swallowing that is strictly worse than never having asked. That asymmetry is the whole
+// reason to run them, and it is also why the OTHER rules do not apply: `unverifiable_no_reason`
+// and `mapping_implausible` are defects against a bar someone set, and failing a run over a
+// volunteered entry would teach a worker to volunteer nothing.
+//
+// `ac_unmapped` is untouched by this. An entry answering no declared criterion is not credited
+// against one, so a worker cannot satisfy AC1 by declaring an entry named something else.
+async function runDeclaredChecks({ entries, repoRoot, run, findings, unverified }) {
+  for (const entry of entries) {
+    const label = String(entry?.ac ?? '').trim() || 'an unnamed check';
+
+    // A reasoned gap is carried; an unreasoned one is simply not evidence, and is dropped
+    // rather than made a finding. Marked `worker_declared` so nobody reading the list takes
+    // it for a criterion out of the ticket.
+    if (entry?.unverifiable) {
+      const reason = String(entry.reason ?? '').trim();
+      if (reason) unverified.push({ ac: label, reason, worker_declared: true });
+      continue;
+    }
+
+    const command = String(entry?.command ?? '').trim();
+    if (!command) continue;
+
+    const { code, output } = await run(command, repoRoot);
+    if (code !== 0) {
+      findings.push(
+        finding(
+          GATE_RULES.ac_failed,
+          `a worker-declared check failed: ${label} (${command})`,
+          `exit ${code}\n${String(output ?? '').trim()}`,
+        ),
       );
     }
   }

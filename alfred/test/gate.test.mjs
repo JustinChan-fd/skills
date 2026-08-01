@@ -1402,3 +1402,138 @@ test('ADDED: the narrowing still catches the executed script, by every spelling 
     );
   }
 });
+
+// ---------------------------------------------------------------------------------------
+// #72: WORKER-DECLARED CHECKS. Found by the first real run, and the more serious half of
+// what that run exposed.
+//
+// `resolveAcs` iterates the ITEM'S acceptance criteria and looks each one up in the ac_map.
+// A prompt-sourced item has none, by design — §2.1 invents no criteria, because a
+// fabricated criterion is a bar nobody set. So on every prompt-sourced item the loop body
+// never ran, and the ac_map was READ (checkEvidence and checkInstruments use it — that is
+// how #71 fired) but never EXECUTED. The measured run declared
+// `grep -L "from './retry.mjs'" src/email.mjs src/push.mjs src/sms.mjs` as the command
+// proving all three channels shared the helper, and the gate never ran it. Its PASS rested
+// on `config.verify` alone.
+//
+// That is the design's own property failing quietly: "the gate runs the commands itself, in
+// a separate process" is what makes the verdict unarguable, and here there was a command
+// and no run.
+//
+// WHY THEY ARE LABELLED RATHER THAN PROMOTED. A worker-authored command that exits 0 is
+// weak evidence — the worker could write `true`. One that FAILS is strong, and that
+// asymmetry is the whole reason to run them. So a declared entry can fail the run by its
+// command failing, and by nothing else: `unverifiable_no_reason` and `mapping_implausible`
+// are defects against a bar SOMEONE SET, and nobody set this one. Applying them here would
+// punish a worker for volunteering a check, which is the opposite of the incentive wanted.
+const RETRY_GREP = `grep -L "from './retry.mjs'" src/email.mjs src/push.mjs src/sms.mjs | grep -q . && exit 1 || exit 0`;
+
+test('ADDED: a worker-declared check on an item with no criteria is RUN (#72)', async () => {
+  // The measured shape: prompt-sourced item, zero acs, an ac_map the worker wrote itself.
+  const log = [];
+  const verdict = await runGate({
+    config: { verify: { test: 'npm test' }, off_limits: [] },
+    repoRoot: tempRepo(),
+    acs: [],
+    acMap: [{ ac: 'all three channels use one shared retry helper', command: RETRY_GREP }],
+    touched: ['src/email.mjs', 'src/retry.mjs'],
+    diffstat: [{ file: 'src/email.mjs', added: 8, deleted: 7 }, { file: 'src/retry.mjs', added: 15, deleted: 0 }],
+    run: runnerFor({ 'npm test': { code: 0 }, [RETRY_GREP]: { code: 0 } }, log),
+  });
+
+  // RUN, and asserted on the runner's log rather than on the verdict: a pass proves nothing
+  // here, because the run passed before this change too — by skipping the command entirely.
+  assert.ok(log.includes(RETRY_GREP), `the declared command never ran: ${JSON.stringify(log)}`);
+  assert.equal(verdict.pass, true, JSON.stringify(verdict.findings));
+});
+
+test('ADDED: a worker-declared check that FAILS fails the run (#72)', async () => {
+  // The direction that carries the value. A self-authored green is weak; a self-authored
+  // red is a worker reporting its own work as incomplete, and swallowing it is strictly
+  // worse than never having asked.
+  const verdict = await runGate({
+    config: { verify: { test: 'npm test' }, off_limits: [] },
+    repoRoot: tempRepo(),
+    acs: [],
+    acMap: [{ ac: 'all three channels use one shared retry helper', command: RETRY_GREP }],
+    touched: ['src/email.mjs'],
+    diffstat: [{ file: 'src/email.mjs', added: 8, deleted: 7 }],
+    run: runnerFor({ 'npm test': { code: 0 }, [RETRY_GREP]: { code: 1, output: 'src/push.mjs' } }),
+  });
+
+  assert.equal(verdict.pass, false);
+  const found = verdict.findings.find((f) => f.rule === GATE_RULES.ac_failed);
+  assert.ok(found, `expected ac_failed, got ${JSON.stringify(findingRules(verdict))}`);
+  // LABELLED as the worker's own, not as an acceptance criterion. An operator reading
+  // "AC1 failed" goes looking for a criterion in the ticket and finds none.
+  assert.match(found.detail, /worker-declared/i);
+  assert.match(found.evidence, /src\/push\.mjs/);
+});
+
+test('ADDED: an unverifiable declaration is reported, not dropped (#72)', async () => {
+  // What the measured run actually lost. The worker said the backoff shapes could not be
+  // checked by a command and gave a real reason — the tests stub `sleep`, so timing is not
+  // observed. That is exactly what unverified[] exists to carry, and it went nowhere.
+  const verdict = await runGate({
+    config: { verify: { test: 'npm test' }, off_limits: [] },
+    repoRoot: tempRepo(),
+    acs: [],
+    acMap: [{
+      ac: "each channel's deliberate retry behaviour is preserved",
+      unverifiable: true,
+      reason: 'the tests stub sleep, so backoff shape is not observed',
+    }],
+    touched: ['src/email.mjs'],
+    diffstat: [{ file: 'src/email.mjs', added: 8, deleted: 7 }],
+    run: runnerFor({ 'npm test': { code: 0 } }),
+  });
+
+  assert.equal(verdict.pass, true, 'an honest gap does not fail the run');
+  assert.equal(verdict.unverified.length, 1);
+  assert.match(verdict.unverified[0].reason, /stub sleep/);
+  // Marked as the worker's own, so nobody reads it as a criterion from the ticket.
+  assert.equal(verdict.unverified[0].worker_declared, true);
+});
+
+test('ADDED: a declared entry is not held to the bars nobody set for it (#72)', async () => {
+  // The narrowing, asserted rather than assumed. An UNREASONED unverifiable marker and an
+  // implausible command are both findings when they answer a DECLARED criterion, because
+  // there the worker is evading a bar someone set. Volunteered, there is no bar to evade:
+  // the entry is simply worth less, and failing a run over it would teach a worker to
+  // declare nothing at all.
+  const verdict = await runGate({
+    config: { verify: { test: 'npm test' }, off_limits: [] },
+    repoRoot: tempRepo(),
+    acs: [],
+    acMap: [
+      { ac: 'no reason given', unverifiable: true },
+      { ac: 'the retry helper is shared', command: 'echo unrelated' },
+    ],
+    touched: ['src/email.mjs'],
+    diffstat: [{ file: 'src/email.mjs', added: 8, deleted: 7 }],
+    run: runnerFor({ 'npm test': { code: 0 }, 'echo unrelated': { code: 0 } }),
+  });
+
+  assert.equal(verdict.pass, true, JSON.stringify(verdict.findings));
+  for (const rule of [GATE_RULES.unverifiable_no_reason, GATE_RULES.mapping_implausible, GATE_RULES.ac_unmapped]) {
+    assert.ok(!findingRules(verdict).includes(rule), `${rule} must not apply to a volunteered entry`);
+  }
+});
+
+test('ADDED: a declared entry does not satisfy a criterion someone DID set (#72)', async () => {
+  // The hole this must not open. If an entry whose `ac` matches no criterion id were
+  // credited loosely, a worker could answer AC1 by declaring an entry named anything at
+  // all, and `ac_unmapped` — the rule that makes silence fail — would stop firing.
+  const verdict = await runGate({
+    config: { verify: { test: 'npm test' }, off_limits: [] },
+    repoRoot: tempRepo(),
+    acs: [{ id: 'AC1', text: 'the retry helper is shared' }],
+    acMap: [{ ac: 'something I named myself', command: 'echo hi' }],
+    touched: ['src/email.mjs'],
+    diffstat: [{ file: 'src/email.mjs', added: 8, deleted: 7 }],
+    run: runnerFor({ 'npm test': { code: 0 }, 'echo hi': { code: 0 } }),
+  });
+
+  assert.equal(verdict.pass, false);
+  assert.ok(findingRules(verdict).includes(GATE_RULES.ac_unmapped), 'AC1 is still unmapped');
+});
