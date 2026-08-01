@@ -248,3 +248,42 @@ test('ADDED: the argv contains no shell metacharacter escaping — it is not a s
   assert.equal(flag(argv, '-p'), "don't");
   assert.ok(!argv.some((x) => x.includes('\\\'')));
 });
+
+// ---------------------------------------------------------------------------
+// #24 — the worker must not inherit the operator's MCP servers.
+//
+// MEASURED 2026-08-01, and this is the reason the flag exists rather than a precaution.
+// `claude -p` with NO --mcp-config still loaded the user's servers: a haiku spawn from a plain
+// tool shell called `mcp__atlassian__getJiraIssue` and returned TARS-1359's real summary, with
+// no interactive auth. Combined with the `--permission-mode bypassPermissions` above, a worker
+// spawned by this router held Jira WRITE access to the very ticket it is graded against.
+//
+// WHAT THAT BUYS AN UNDER-PRESSURE WORKER: rewrite the acceptance criteria so the gate grades
+// against an easier bar, transition the issue to Done, or strip its own `alfred:blocked` label
+// so the loop picks it up again. That is `instrument_modified` displaced one level — not the
+// grader, but the SPECIFICATION the grader reads. The gate cannot catch it: it scores the
+// working-tree diff, and a Jira edit leaves no diff.
+//
+// THE FIX IS MEASURED IN BOTH DIRECTIONS, which is what distinguishes it from a flag that only
+// looks protective. Without --strict-mcp-config the tool resolved and answered; with it (and no
+// --mcp-config) the same prompt replied NO_ATLASSIAN_TOOL. Alfred's own trusted fetch passes
+// BOTH flags together, so the deny here is the absence of the config, not the absence of the
+// strict flag — hence the second assertion.
+// ---------------------------------------------------------------------------
+
+test('ADDED: the worker is spawned with --strict-mcp-config so it inherits no MCP servers', () => {
+  const argv = argvOf();
+  assert.ok(argv.includes('--strict-mcp-config'), 'the worker inherits the operator’s MCP servers');
+});
+
+test('ADDED: the worker is given NO --mcp-config — strict alone would still load a named server', () => {
+  // The falsifier for the test above. `--strict-mcp-config` does not mean "no servers", it means
+  // "only the ones named by --mcp-config". Asserting the flag alone would pass an argv that
+  // handed the worker Atlassian explicitly, which is the exact access being removed.
+  const argv = argvOf();
+  assert.ok(!argv.includes('--mcp-config'), 'the worker is handed an MCP server explicitly');
+  assert.ok(
+    !argv.some((x) => typeof x === 'string' && x.includes('mcpServers')),
+    'an inline MCP payload reached the worker argv',
+  );
+});

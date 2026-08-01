@@ -164,6 +164,19 @@ export function workerArgv({ config, prompt, appendSystemPrompt, maxTurns } = {}
     // at the start of each user turn.
     '--fallback-model', fallback,
     '--permission-mode', 'bypassPermissions',
+    // NO MCP SERVERS, and this pairs with the line above rather than standing alone. MEASURED
+    // 2026-08-01: `claude -p` with no --mcp-config still loads the operator's servers — a haiku
+    // spawn from a bare tool shell called `mcp__atlassian__getJiraIssue` and got a real answer.
+    // So under bypassPermissions the worker held Jira WRITE access to the ticket it is graded
+    // against: it could rewrite the acceptance criteria, close the issue, or strip its own
+    // `alfred:blocked` label. That is instrument_modified aimed at the SPECIFICATION instead of
+    // the grader, and the gate is structurally blind to it — it scores the working-tree diff,
+    // and a Jira edit leaves no diff.
+    //
+    // `--strict-mcp-config` means "only servers named by --mcp-config", so passing it with no
+    // --mcp-config is what makes the set empty. Alfred's own trusted Jira fetch passes both
+    // flags together with a read-only allowlist; the worker gets the strict flag alone.
+    '--strict-mcp-config',
     // Both load-bearing rather than conveniences: the run is priced from the transcript and the
     // record is parsed from this payload.
     '--output-format', 'json',
