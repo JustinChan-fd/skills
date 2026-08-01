@@ -33,7 +33,7 @@
 
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { after, test } from 'node:test';
@@ -44,6 +44,7 @@ import { RECORD_FILENAME } from '../lib/run.mjs';
 import {
   SEAT_ENV_VARS,
   executeWork,
+  newRunDir,
   observeTree,
   runDirFor,
   seatEnvFrom,
@@ -266,6 +267,73 @@ test('the run directory is NOT inside the repository the gate scores', () => {
   // creates `.../acme/jarvis#4/` — a directory tree keyed on someone else's repo name.
   assert.doesNotMatch(dir.slice(resolve(repo).length + 1 || 0), /acme\/jarvis/);
   assert.ok(dir.includes('20260731T101500Z'));
+});
+
+test('a long ref does not truncate away the part that DISTINGUISHES two tickets', () => {
+  // ADDED after browse URLs became legal refs (`4c00ecf`). `newRunDir` names the directory from
+  // the REF, because resolving the item is what writes into the directory and so the directory
+  // must exist first — and the comment there asserted "a ticket ref slugs to the same thing its
+  // id would". A browse URL made that false.
+  //
+  // MEASURED: the slug caps at 60 chars, and the key sits at the END of a browse URL, so
+  //   https://fandango.atlassian.net/browse/TARS-1351?focusedCommentId=1234567890
+  // slugged to `https-fandango.atlassian.net-browse-TARS-1351-focusedComment` — the key gone. The
+  // 60 chars that survive are all PREFIX: scheme, host, `/browse/`. So the longer the host, the
+  // less of the ticket is left, and past a certain host length nothing distinguishes two tickets
+  // at all. That is the collision this function's own comment says it exists to prevent (armc's
+  // `$TMPDIR/armC1-worker.log` silently replaced its predecessor's output), reintroduced through
+  // the FRONT of the string rather than the back.
+  //
+  // The assertion is on DISTINGUISHABILITY, not on any particular slug format: whatever the naming
+  // rule is, two refs that name different tickets must not land in the same directory.
+  const repo = mktemp('longref');
+  const stamp = '20260801T220000Z';
+  const at = (ref) => runDirFor({ repoRoot: repo, itemId: ref, stamp });
+
+  // A LONG HOST, because that is the pair that actually collides. MEASURED first: the shorter
+  // `fandango.atlassian.net` pair keeps its differing digit at char ~45 and stays distinct, so
+  // asserting on it would have passed vacuously and pinned nothing.
+  const host = 'a-really-quite-long-company-name-goes-here.atlassian.net';
+  const a = at(`https://${host}/browse/TARS-1351`);
+  const b = at(`https://${host}/browse/TARS-1359`);
+  assert.notEqual(a, b, 'two different tickets share a run directory — one run overwrites the other');
+
+  // And the key must be legible in the path. An operator reading `.alfred-runs/` at 3am is the
+  // only consumer of this name; a directory they cannot attribute to a ticket is a directory they
+  // cannot use, even when it is unique.
+  for (const [ref, key] of [
+    ['https://fandango.atlassian.net/browse/TARS-1351', 'TARS-1351'],
+    ['https://fandango.atlassian.net/browse/TARS-1351?focusedCommentId=1234567890', 'TARS-1351'],
+    ['https://a-really-quite-long-company-name-goes-here.atlassian.net/browse/TARS-1351', 'TARS-1351'],
+    ['TARS-1351', 'TARS-1351'],
+  ]) {
+    assert.match(at(ref), new RegExp(key), `run dir for ${ref} does not name ${key}`);
+  }
+});
+
+test('the run directory NAME stays inside the filesystem limit, however long the ref', () => {
+  // A THIRD proposition, split out rather than folded above, and the split is not stylistic:
+  // mutation-scored, "drop the cap entirely" SURVIVED both assertions in that test. An untruncated
+  // slug is both unique and legible, so nothing there was defending the cap — and the cap is what
+  // stops a pathological ref from producing a name the filesystem refuses. Folded together, one
+  // green boolean would have covered two claims and the weaker one would be untested. (Same shape
+  // as the `unfalsifiable_conjunct` lesson, applied to a test instead of a gate rule.)
+  //
+  // 255 bytes is the per-component limit on both APFS and ext4. The stamp and its separator ride
+  // in the same component, so the budget is the WHOLE basename, not just the slug.
+  const repo = mktemp('namecap');
+  const stamp = '20260801T220000Z';
+  const dir = runDirFor({ repoRoot: repo, itemId: `TARS-${'9'.repeat(400)}`, stamp });
+  const name = dir.split('/').pop();
+  assert.ok(
+    Buffer.byteLength(name) <= 255,
+    `run dir basename is ${Buffer.byteLength(name)} bytes; ENAMETOOLONG before anything is written`,
+  );
+
+  // And it must still be CREATABLE, not merely short. The byte count is a proxy; mkdir is the
+  // actual claim, and a proxy that passes while the syscall fails is the failure this catches.
+  const made = newRunDir({ repoRoot: repo, ref: `TARS-${'9'.repeat(400)}`, stamp });
+  assert.ok(existsSync(made), `run dir was not created: ${made}`);
 });
 
 // --- OBSERVING THE TREE: the difference between clean and unlooked-at ---

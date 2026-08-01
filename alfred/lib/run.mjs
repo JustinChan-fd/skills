@@ -139,11 +139,23 @@ export function workerEnv({ env = process.env, seats = SEATS } = {}) {
 
 // A path component that cannot open a directory tree keyed on someone else's repository.
 // `acme/jarvis#4` carries a separator, and joining it unescaped creates `.../acme/jarvis#4/`.
-const slug = (text) =>
-  String(text ?? 'item')
+//
+// TRUNCATED FROM THE FRONT, not the back, and that is the whole point. The 60-char cap used to
+// keep the first 60 characters — fine when every ref was a short key or `acme/jarvis#4`, and wrong
+// the moment a browse URL became legal (`4c00ecf`), because a URL's distinguishing part is its
+// TAIL: scheme, host and `/browse/` are shared prefix, and the ticket is last. MEASURED before
+// this: `https://<56-char-host>/browse/TARS-1351` and `.../TARS-1359` slugged to the same 60
+// characters, so within one stamp two different tickets shared a run directory and one run's
+// artifacts overwrote the other's — the exact failure `runDirFor` below says it prevents, arrived
+// at from the other end of the string. Keeping the tail also keeps the name legible: an operator
+// reading `.alfred-runs/` wants to see which ticket, and the host is the part they already know.
+const slug = (text) => {
+  const clean = String(text ?? 'item')
     .replace(/[^A-Za-z0-9._-]+/g, '-')
-    .replace(/^-+|-+$/g, '')
-    .slice(0, 60) || 'item';
+    .replace(/^-+|-+$/g, '');
+  // `-` re-trimmed after the cut: slicing mid-separator would otherwise leave a leading dash.
+  return (clean.length > 60 ? clean.slice(-60).replace(/^-+/, '') : clean) || 'item';
+};
 
 // Where the run's own artifacts live. OUTSIDE `repoRoot` — see the header. Deterministic given
 // a stamp, so the record's path is reproducible and two runs never share a directory (armc's
