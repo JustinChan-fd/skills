@@ -17,3 +17,14 @@ harness-core/config/user.json
 
 # Probe run outputs (delivered to harness-telemetry, never committed here)
 harness-core/probes/*/results/
+
+# Alfred's PER-RUN worker markers. Named individually, NOT as `.alfred/`, because
+# `.alfred/config.json` is tracked and `alfred work` refuses without it — ignoring the
+# directory would work here (git honours a tracked file) and break on a fresh clone.
+#
+# Committed, these are worse than absent: `resolveAcs` would run a predecessor's commands
+# and report passes, a false green sourced from a stale file. Untracked, `collectDiff`
+# (`ls-files --others --exclude-standard`) attributes them to whoever runs next. Ignoring
+# fixes both — `--exclude-standard` skips ignored files.
+.alfred/ac-map.json
+.alfred/blocked.json

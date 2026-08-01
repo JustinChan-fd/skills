@@ -34,10 +34,13 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { existsSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { loadConfig, isOffLimits, resolveBase } from '../lib/config.mjs';
+import { AC_MAP_PATH } from '../lib/acmap.mjs';
+import { MARKER_PATH } from '../lib/blocked.mjs';
 
 // The repository root: one level above `alfred/`. Derived from this file's own location so
 // the test does not depend on the cwd `npm test` was invoked from.
@@ -142,4 +145,71 @@ test('delivery never merges, and the declared check is the command this repo act
   // naming a script that does not exist would fail every run for the wrong reason.
   assert.equal(config.verify.test, 'npm test');
   assert.equal(config.branch_prefix, 'alfred/');
+});
+
+// ---------------------------------------------------------------------------
+// #15 — the per-run worker markers must not be committable.
+//
+// MEASURED, on the run that produced the first `gate_pass: true`. The worker wrote
+// `.alfred/ac-map.json` and the tree was left holding it. Both outcomes are wrong:
+//
+//   COMMITTED — the next run starts with a predecessor's map already on disk. A worker
+//   that writes none is then graded on the WRONG run's commands, and `resolveAcs` runs
+//   them and reports passes. That is a false green sourced from a stale file, which is
+//   strictly worse than the `ac_unmapped` finding an absent map produces.
+//
+//   LEFT UNTRACKED — `collectDiff` uses `ls-files --others --exclude-standard`, so it is
+//   attributed to whoever runs next. On the #21 run it was attributed correctly only
+//   because I deleted it by hand afterwards; a discipline is not a mechanism.
+//
+// Ignoring them fixes both at once: `--exclude-standard` skips ignored files, so the
+// marker leaves the diff, and `git add` cannot pick it up.
+
+// `--no-index` IS LOAD-BEARING, and its absence made the first draft of the falsifier
+// below useless. `git check-ignore` consults the index by default, so a TRACKED file
+// reports "not ignored" even when a pattern matches it — `.alfred/` in `.gitignore` plus a
+// tracked `.alfred/config.json` returns status 1. That is precisely the state the falsifier
+// exists to reject, and it passed: mutant M6 replaced the two named markers with `.alfred/`
+// and every test stayed green.
+//
+// The bug and the test shared one blind spot. The comment on the falsifier already said in
+// prose that git keeps honouring a tracked file and the breakage only appears on a fresh
+// clone — and then the assertion was written with the tool that reproduces exactly that
+// blindness. `--no-index` asks the question actually meant: does a PATTERN match this path,
+// index aside. Under it, M6 fails as it must.
+const gitCheckIgnore = (path) => {
+  const r = spawnSync('git', ['check-ignore', '-q', '--no-index', '--', path], { cwd: REPO_ROOT });
+  // 0 = ignored, 1 = not ignored, 128 = error. The third must not read as the second.
+  if (r.status !== 0 && r.status !== 1) {
+    throw new Error(`git check-ignore failed on ${path}: status=${r.status} ${r.stderr}`);
+  }
+  return r.status === 0;
+};
+
+test('ADDED #15: the per-run worker markers are gitignored — a run cannot inherit its predecessor’s map', () => {
+  // The constants, not string literals: a rename in acmap.mjs or blocked.mjs must break
+  // this test rather than leave it asserting a path nothing writes any more.
+  assert.ok(gitCheckIgnore(AC_MAP_PATH), `${AC_MAP_PATH} is committable`);
+  assert.ok(gitCheckIgnore(MARKER_PATH), `${MARKER_PATH} is committable`);
+});
+
+test('ADDED #15: the CONFIG is not ignored — the file alfred work refuses without must stay tracked', () => {
+  // THE FALSIFIER, and the reason this task is not one line in `.gitignore`. The tempting
+  // pattern is `.alfred/`, which ignores the directory — including `config.json`, the file
+  // `alfred work` REFUSES without. It is tracked today, so git would keep honouring it and
+  // every test above would stay green; the breakage lands on a FRESH CLONE, where the
+  // config is absent and Alfred refuses to run at all.
+  //
+  // Same shape as the `dc72473` defect this file's header opens with: a rule whose failure
+  // direction is silent. There it was silent permission; here it is a silent uncommittable
+  // requirement.
+  assert.equal(gitCheckIgnore('.alfred/config.json'), false, 'the config became unignorable');
+
+  // And it must still be TRACKED, which is the stronger claim — an ignore rule is only one
+  // of the two ways a file goes missing from a clone.
+  const tracked = spawnSync('git', ['ls-files', '--', '.alfred/config.json'], {
+    cwd: REPO_ROOT,
+    encoding: 'utf8',
+  }).stdout.trim();
+  assert.equal(tracked, '.alfred/config.json', 'the config is not tracked by git');
 });
