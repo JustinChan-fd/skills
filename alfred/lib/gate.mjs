@@ -180,14 +180,50 @@ async function runChecks({ config, repoRoot, run, findings }) {
   }
 }
 
+// #73: THE JOIN THAT COULD NOT SUCCEED, and the narrowest thing that makes it possible.
+//
+// MEASURED. Three sonnet-5 runs under suite `2026-07-31.2` each filed a schema-valid
+// three-entry ac_map, one entry per criterion, each with a real command — and each drew
+// `ac_unmapped` on all three criteria, because the lookup was `entry.ac === ac.id` and the
+// ids were never rendered into the ticket those runs read. Every worker keyed by criterion
+// TEXT, correctly, and the join could not succeed on any input that prompt could produce.
+// `pass = findings.length === 0` was therefore false on a flawless diff exactly as on a
+// fabricated green — #63's shape, one layer out, and what #67 left behind after making the
+// contract reachable.
+//
+// WHY NORMALIZED AND NOT RAW. Runs 1 and 2 stripped the criterion's markdown
+// (`npm test passes.`); run 3 kept it (`` `npm test` passes. ``). Either raw form matches one
+// group and misses the other, so a fallback on exact text still fails 2 of 3.
+//
+// AND WHY IT STAYS THIS TIGHT. Whole-string equality after four reversible transforms —
+// nothing that could match two DIFFERENT criteria. No substring: `npm test` is contained in
+// '`npm test` passes.' and is not that criterion, and crediting containment would let a
+// worker settle an AC by quoting one word of it. No fuzzy distance, no token overlap. The
+// property being preserved is the one `runDeclaredChecks` states below in its own words —
+// "a worker cannot satisfy AC1 by declaring an entry named something else" — and a looser
+// match trades #73 (a rule that always fires) for its mirror image (one that never does).
+const acKey = (value) =>
+  String(value ?? '')
+    .toLowerCase()
+    .split('`').join('')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .replace(/\.$/, '');
+
 // Resolves each AC to exactly one of the four states. Silence is a finding.
 async function resolveAcs({ acs, acMap, repoRoot, run, findings, unverified }) {
   const byAc = new Map();
+  // A SECOND INDEX, not a replacement for the first. The id lookup stays exact and stays
+  // primary: lib/prompt.mjs does render `AC1: <text>` and names the ids as the keys, so a
+  // worker that used them must not be re-resolved through a normalizer.
+  const byText = new Map();
   for (const entry of acMap ?? []) {
     // First mapping wins, and a duplicate is not silently merged: two entries for one
     // AC where the second says `unverifiable` would otherwise let a worker append an
     // opt-out after proposing a command.
     if (!byAc.has(entry?.ac)) byAc.set(entry?.ac, entry);
+    const key = acKey(entry?.ac);
+    if (key && !byText.has(key)) byText.set(key, entry);
   }
 
   // Which entries answered a criterion someone SET. The rest are the worker's own, and are
@@ -197,7 +233,10 @@ async function resolveAcs({ acs, acMap, repoRoot, run, findings, unverified }) {
   for (const ac of acs ?? []) {
     const id = ac?.id ?? null;
     const text = ac?.text ?? '';
-    const entry = byAc.get(id);
+    // Id first, then the criterion's own text. Order matters where a map carries both: the
+    // id is what the operator's manifest declared, and the text index is the fallback for a
+    // caller that never showed the worker an id.
+    const entry = byAc.get(id) ?? byText.get(acKey(text));
     if (entry) claimed.add(entry);
 
     if (!entry) {

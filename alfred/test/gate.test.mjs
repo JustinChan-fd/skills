@@ -1537,3 +1537,219 @@ test('ADDED: a declared entry does not satisfy a criterion someone DID set (#72)
   assert.equal(verdict.pass, false);
   assert.ok(findingRules(verdict).includes(GATE_RULES.ac_unmapped), 'AC1 is still unmapped');
 });
+
+// ---------------------------------------------------------------------------
+// #73 — THE JOIN THAT COULD NOT SUCCEED.
+//
+// MEASURED, not reasoned about. Three sonnet-5 runs under suite `2026-07-31.2` each wrote a
+// schema-valid three-entry ac_map, one entry per criterion, each with a real command — and
+// all three drew `ac_unmapped` on every criterion anyway, so `gate_pass` was false on 3/3.
+// `resolveAcs` looked entries up by `entry.ac === ac.id`, and the ids the runner's prompt
+// rendered were markdown checkboxes with no id in them, so every worker keyed by criterion
+// TEXT. The join could not succeed on any input that prompt could produce.
+//
+// SAME CLASS AS #63 / #69 / #72, one layer out: a rule that reads as protection and supplies
+// none. #67 made the contract REACHABLE and left the lookup impossible, so `findings.length
+// === 0` stayed false on a flawless diff exactly as on a fabricated green.
+//
+// WHY THE FIX IS A NORMALIZER AND NOT AN EXACT-TEXT FALLBACK. Runs 1 and 2 de-markdowned the
+// criterion (`npm test passes.`); run 3 kept the backticks (`` `npm test` passes. ``). Raw
+// text would still have failed 2 of 3. The normalizer stays TIGHT — lowercase, strip
+// backticks, collapse whitespace, drop a trailing period — because loosening it to a
+// substring or fuzzy match would break the property `runDeclaredChecks` was built to keep:
+// "a worker cannot satisfy AC1 by declaring an entry named something else."
+//
+// lib/prompt.mjs is NOT the defect site and is not changed: it already renders `AC1: <text>`
+// and names the ids as the keys. The gate must work for both callers, and the one that
+// renders no id is the one that spent $7.04 proving the lookup was unreachable.
+
+const AC_MAP_N3 = Object.freeze([
+  { id: 'AC1', text: 'All three channels retry up to 3 attempts with exponential backoff.' },
+  { id: 'AC2', text: '`npm test` passes.' },
+  { id: 'AC3', text: '`npm run lint` reports 0 errors and 0 warnings.' },
+]);
+
+test('ADDED #73: an ac_map keyed by criterion TEXT settles the criterion (runs 1 and 2, verbatim)', async () => {
+  // Keys copied from armC-acmap-run{1,2}-ac-map.json. Backticks stripped by the worker.
+  const log = [];
+  const verdict = await runGate({
+    config: { verify: {}, off_limits: [] },
+    repoRoot: tempRepo(),
+    acs: AC_MAP_N3,
+    acMap: [
+      { ac: 'All three channels retry up to 3 attempts with exponential backoff.', command: 'npm test -- channels retry attempts backoff' },
+      { ac: 'npm test passes.', command: 'npm test' },
+      { ac: 'npm run lint reports 0 errors and 0 warnings.', command: 'npm run lint' },
+    ],
+    touched: ['src/email.mjs'],
+    diffstat: [{ file: 'src/email.mjs', added: 8, deleted: 0 }],
+    run: runnerFor({}, log),
+  });
+
+  assert.deepEqual(
+    findingRules(verdict).filter((r) => r === GATE_RULES.ac_unmapped),
+    [],
+    `a three-entry map answering three criteria left none unmapped: ${JSON.stringify(verdict.findings)}`,
+  );
+  // CREDITED AND GRADED, not credited and skipped. #72's defect was an ac_map that was read
+  // and never executed; a text match that short-circuited the run would reproduce it.
+  assert.ok(log.includes('npm test'), `the text-matched entry's command was never run: ${JSON.stringify(log)}`);
+  assert.equal(verdict.pass, true, JSON.stringify(verdict.findings));
+});
+
+test('ADDED #73: run 3 kept the backticks, so raw text is not enough', async () => {
+  // Keys copied from armC-acmap-run3-ac-map.json. This run is why the fix normalizes: an
+  // exact-text fallback matches this one and fails runs 1 and 2, and the reverse for a fix
+  // keyed on the de-markdowned form. Two of three either way.
+  const verdict = await runGate({
+    config: { verify: {}, off_limits: [] },
+    repoRoot: tempRepo(),
+    acs: AC_MAP_N3,
+    acMap: [
+      { ac: 'All three channels retry up to 3 attempts with exponential backoff.', command: 'npm test -- channels retry attempts backoff' },
+      { ac: '`npm test` passes.', command: 'npm test' },
+      { ac: '`npm run lint` reports 0 errors and 0 warnings.', command: 'npm run lint' },
+    ],
+    touched: ['src/email.mjs'],
+    diffstat: [{ file: 'src/email.mjs', added: 8, deleted: 0 }],
+    run: runnerFor({}),
+  });
+
+  assert.deepEqual(
+    findingRules(verdict).filter((r) => r === GATE_RULES.ac_unmapped),
+    [],
+    JSON.stringify(verdict.findings),
+  );
+});
+
+test('ADDED #73: THE MUTANT — a plausible-looking key that is not the criterion still fails', async () => {
+  // THE TEST THAT MAKES THE OTHER TWO MEAN ANYTHING. A match that always succeeds is #73 in
+  // new clothes: it would turn `ac_unmapped` from a rule that always fires into one that
+  // never does, and the boolean would be just as undiscriminating in the other direction.
+  //
+  // These three keys are the measured rejects — each is on-topic for its criterion, each is
+  // a paraphrase rather than the criterion, and all three must be refused.
+  const verdict = await runGate({
+    config: { verify: {}, off_limits: [] },
+    repoRoot: tempRepo(),
+    acs: AC_MAP_N3,
+    acMap: [
+      { ac: 'retry stuff', command: 'npm test -- channels retry attempts backoff' },
+      { ac: 'tests are fine', command: 'npm test' },
+      { ac: 'lint', command: 'npm run lint' },
+    ],
+    touched: ['src/email.mjs'],
+    diffstat: [{ file: 'src/email.mjs', added: 8, deleted: 0 }],
+    run: runnerFor({}),
+  });
+
+  assert.equal(verdict.pass, false, 'three paraphrases are not three criteria');
+  assert.equal(
+    findingRules(verdict).filter((r) => r === GATE_RULES.ac_unmapped).length,
+    3,
+    `all three criteria are still unmapped: ${JSON.stringify(verdict.findings)}`,
+  );
+});
+
+test('ADDED #73: a SUBSTRING of the criterion does not settle it', async () => {
+  // The specific loosening to refuse, named because it is the tempting one: `npm test` is a
+  // substring of '`npm test` passes.' and reads like the same subject. Credit it and a worker
+  // settles a criterion by quoting one word of it, which is the property #72 recorded in
+  // lib/gate.mjs's own comment — "a worker cannot satisfy AC1 by declaring an entry named
+  // something else." Whole-string equality after normalizing, never containment.
+  const verdict = await runGate({
+    config: { verify: {}, off_limits: [] },
+    repoRoot: tempRepo(),
+    acs: [{ id: 'AC2', text: '`npm test` passes.' }],
+    acMap: [{ ac: 'npm test', command: 'npm test' }],
+    touched: ['src/email.mjs'],
+    diffstat: [{ file: 'src/email.mjs', added: 8, deleted: 0 }],
+    run: runnerFor({}),
+  });
+
+  assert.ok(
+    findingRules(verdict).includes(GATE_RULES.ac_unmapped),
+    `a substring is not the criterion: ${JSON.stringify(verdict.findings)}`,
+  );
+});
+
+test('ADDED #73: a text-matched entry is graded, not waved through', async () => {
+  // The other half of "credited AND graded". An entry found by text goes through every bar an
+  // id-matched entry does: an implausible command is still `mapping_implausible`, and an
+  // unreasoned opt-out is still `unverifiable_no_reason`. A text match that reached a
+  // different, gentler code path would be a way to escape the gate by not quoting an id.
+  const verdict = await runGate({
+    config: { verify: {}, off_limits: [] },
+    repoRoot: tempRepo(),
+    acs: [
+      { id: 'AC1', text: 'the notification channels are consolidated into one module' },
+      { id: 'AC2', text: '`npm test` passes.' },
+    ],
+    acMap: [
+      { ac: 'the notification channels are consolidated into one module', command: 'git status --porcelain' },
+      { ac: 'npm test passes.', unverifiable: true },
+    ],
+    touched: ['src/email.mjs'],
+    diffstat: [{ file: 'src/email.mjs', added: 8, deleted: 0 }],
+    run: runnerFor({}),
+  });
+
+  const rules = findingRules(verdict);
+  assert.ok(rules.includes(GATE_RULES.mapping_implausible), `expected mapping_implausible, got ${JSON.stringify(rules)}`);
+  assert.ok(rules.includes(GATE_RULES.unverifiable_no_reason), `expected unverifiable_no_reason, got ${JSON.stringify(rules)}`);
+  assert.deepEqual(rules.filter((r) => r === GATE_RULES.ac_unmapped), [], 'both criteria were mapped');
+});
+
+test('ADDED #73: two criteria that normalize alike are both credited by one entry — a declared limit', async () => {
+  // PINNED RATHER THAN FIXED, and named here rather than left to be discovered. If a ticket
+  // lists '`npm test` passes.' and 'npm test passes' as two criteria, they normalize to one
+  // key and one map entry settles both.
+  //
+  // WHY THAT IS THE RIGHT DIRECTION. The transforms are tight enough that colliding keys mean
+  // the SAME criterion written twice — a duplicate in the operator's ticket, not a worker
+  // covering two bars with one answer. Firing `ac_unmapped` on the second would fail a run
+  // for the ticket author's typo, which is #63's shape (a bar that cannot be passed) rather
+  // than a guard. Nothing escapes grading either way: the entry's command is run once per
+  // criterion it is credited against, so a failing command still fails both.
+  const log = [];
+  const verdict = await runGate({
+    config: { verify: {}, off_limits: [] },
+    repoRoot: tempRepo(),
+    acs: [{ id: 'AC1', text: '`npm test` passes.' }, { id: 'AC2', text: 'npm test passes' }],
+    acMap: [{ ac: 'npm test passes.', command: 'npm test' }],
+    touched: ['src/email.mjs'],
+    diffstat: [{ file: 'src/email.mjs', added: 8, deleted: 0 }],
+    run: runnerFor({}, log),
+  });
+
+  assert.deepEqual(findingRules(verdict), [], JSON.stringify(verdict.findings));
+  assert.equal(log.filter((c) => c === 'npm test').length, 2, 'graded once per criterion, not once per entry');
+});
+
+test('ADDED #73: a FAILING text-matched command fails the run (the fix cannot only add passes)', async () => {
+  // The direction a permissive fix would break silently. #73 made `ac_unmapped` fire on
+  // everything; the mirror defect is a join that credits an entry and then never lets its
+  // exit code matter. A criterion matched by text and failing its own command is `ac_failed`,
+  // exactly as an id-matched one is.
+  //
+  // ASSERTED ON THE AC ID, and that is not a stylistic choice. `ac_failed` alone was green
+  // before the fix, by a different route: an unmatched entry fell through to
+  // `runDeclaredChecks`, which emits the same RULE with "a worker-declared check failed". A
+  // test that only named the rule could not tell a credited criterion from a volunteered
+  // check, and would have passed on the defect. The detail naming AC2 is what separates them.
+  const verdict = await runGate({
+    config: { verify: {}, off_limits: [] },
+    repoRoot: tempRepo(),
+    acs: [{ id: 'AC2', text: '`npm test` passes.' }],
+    acMap: [{ ac: 'npm test passes.', command: 'npm test' }],
+    touched: ['src/email.mjs'],
+    diffstat: [{ file: 'src/email.mjs', added: 8, deleted: 0 }],
+    run: runnerFor({ 'npm test': { code: 1, output: '2 failing' } }),
+  });
+
+  assert.equal(verdict.pass, false, 'a text-matched entry whose command fails is not a pass');
+  const f = verdict.findings.find((x) => x.rule === GATE_RULES.ac_failed);
+  assert.ok(f, `expected ac_failed, got ${JSON.stringify(findingRules(verdict))}`);
+  assert.match(f.detail, /^AC2 failed its own check/, `credited against the criterion, not counted as a volunteered check: ${f.detail}`);
+  assert.match(f.evidence, /2 failing/);
+});
