@@ -1430,7 +1430,14 @@ test('a worker writing more than a pipe buffer is not deadlocked by the launcher
       index: 9,
       env: { ...process.env, PATH: `${bin}:${process.env.PATH}` },
       pollMs: 50,
-      wallCapMs: 15_000,
+      // RAISED FROM 15s, AND IT COSTS THE TEST NOTHING. Measured 2026-07-31: this case takes
+      // 4.1s run alone and 14.9s under a full concurrent suite — it was failing by margin, not
+      // by deadlock, and that was the unexplained flake. The cap can go up freely because the
+      // assertion below is `killed === false`: a genuine deadlock on a full pipe NEVER exits
+      // (measured: still running at 25s), so it is killed at 60s exactly as it was at 15s. A
+      // tight cap discriminates nothing extra here; it only converts machine load into a
+      // failure that reads like the bug.
+      wallCapMs: 60_000,
     });
     assert.equal(outcome.killed, false, 'the worker was killed by the wall cap — it deadlocked on a full pipe');
     assert.ok(outcome.log, 'no log path was reported, so the worker output is unreadable');
