@@ -33,7 +33,7 @@
 
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { after, test } from 'node:test';
@@ -508,4 +508,190 @@ test('executeWork returns a result and does not throw on a broken repo root', as
     report: () => null,
   });
   assert.equal(typeof result.ok, 'boolean');
+});
+
+// --- THE RECORD: the run that spent $1.07 and left no trace of having done so ------------
+
+test('a completed run produces an accounting record from the transcript its worker wrote', async () => {
+  // THE DEFECT THIS CLOSES. `executeWork` shipped with `report: null` and a comment saying the
+  // record "needs a transcript path this slice does not yet know how to find". Consequence,
+  // measured: the first real run cost $1.0671732 and produced no record at all. The path was
+  // always computable — the CLI prints its own `session_id` into the log we told it to write,
+  // and we chose the cwd — so what was missing was the wiring, not the information.
+  //
+  // NOTHING IS INJECTED AT THE REPORTING SEAM. `report` keeps its real default here; the only
+  // substitution is `home`, which is an environment fact rather than a module boundary. So the
+  // log is really parsed, the path is really composed, the transcript is really read and priced,
+  // and a break anywhere along that chain fails this test — which is the whole lesson of the
+  // three defects a suite green on all of them could not see.
+  const repo = repoWithCommit();
+  const home = mktemp('home');
+  const sessionId = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee';
+
+  // The transcript where the CLI would have filed it, in the layout measured on this machine:
+  // realpath'd cwd, every non-alphanumeric character a dash.
+  const projectDir = join(home, '.claude', 'projects', realpathSync(repo).replace(/[^A-Za-z0-9]/g, '-'));
+  mkdirSync(projectDir, { recursive: true });
+  writeFileSync(
+    join(projectDir, `${sessionId}.jsonl`),
+    JSON.stringify({
+      type: 'assistant',
+      timestamp: '2026-07-31T18:50:38.000Z',
+      message: {
+        model: 'claude-sonnet-5',
+        id: 'msg_recorded',
+        usage: { input_tokens: 1000, output_tokens: 200 },
+      },
+    }) + '\n',
+  );
+
+  const result = await executeWork({
+    ref: 'share one retry helper across the channels',
+    config: CONFIG,
+    repoRoot: repo,
+    runRoot: mktemp('runs'),
+    stamp: '20260731T185038Z',
+    home,
+    spawn: stubSpawn((argv, opts) => {
+      // The real `--output-format json` result shape. Written to the log the runner named,
+      // because reading it back from there is the step under test.
+      writeFileSync(opts.logPath, JSON.stringify({
+        type: 'result',
+        session_id: sessionId,
+        total_cost_usd: 0.0042,
+        num_turns: 9,
+      }));
+      return { exit: 0, killed: false, signal: null, wall_ms: 1234, log: opts.logPath };
+    }),
+  });
+
+  assert.equal(result.ok, true);
+  assert.ok(result.record, 'a completed run produced no record');
+  assert.equal(result.record.ok, true, `record failed: ${result.record.error}`);
+
+  // The numbers came from the transcript, which is the only place they exist.
+  assert.equal(result.record.tokens.by_model['claude-sonnet-5'].input, 1000);
+  assert.ok(result.record.cost.total_usd > 0, 'a priced record reported no cost');
+
+  // The joins a dashboard reads. A record that cannot be tied back to its session or its work
+  // item is a number with no row to sit in.
+  assert.equal(result.record.session.id, sessionId);
+  assert.equal(result.record.session.cwd, repo);
+  assert.equal(result.record.work.item_id, result.item.id);
+  assert.equal(result.record.gate.pass, result.gate.pass);
+});
+
+test('the vendor CLI cost and our own are BOTH recorded, because agreement is the evidence', async () => {
+  // Measured on the real run: vendor `total_cost_usd` 1.0671731999999998, ours from the price
+  // table 1.067173. Two independent sources for one number, and their agreeing is the only
+  // evidence the copied table is right — [[project-otel-bedrock-verified]] found that a
+  // CLI-reported CEILING was not ground truth, so a second source is checked, never trusted.
+  //
+  // Kept as a separate field rather than reconciled into one: collapsing them would destroy the
+  // comparison, and a silently preferred winner is the shape `seatEnvFrom` refuses for seats.
+  const repo = repoWithCommit();
+  const home = mktemp('home');
+  const sessionId = 'ffffffff-1111-2222-3333-444444444444';
+  const projectDir = join(home, '.claude', 'projects', realpathSync(repo).replace(/[^A-Za-z0-9]/g, '-'));
+  mkdirSync(projectDir, { recursive: true });
+  writeFileSync(
+    join(projectDir, `${sessionId}.jsonl`),
+    JSON.stringify({
+      type: 'assistant',
+      timestamp: '2026-07-31T18:50:38.000Z',
+      message: { model: 'claude-sonnet-5', id: 'm1', usage: { input_tokens: 1000 } },
+    }) + '\n',
+  );
+
+  const result = await executeWork({
+    ref: 'do the thing',
+    config: CONFIG,
+    repoRoot: repo,
+    runRoot: mktemp('runs'),
+    stamp: '20260731T185039Z',
+    home,
+    spawn: stubSpawn((argv, opts) => {
+      writeFileSync(opts.logPath, JSON.stringify({ session_id: sessionId, total_cost_usd: 7.5 }));
+      return { exit: 0, killed: false, signal: null, wall_ms: 1, log: opts.logPath };
+    }),
+  });
+
+  assert.equal(result.record.cost.vendor_usd, 7.5, 'the vendor figure was dropped');
+  assert.ok(result.record.cost.total_usd !== 7.5, 'ours was replaced by the vendor figure');
+});
+
+test('a transcript that is not where the formula says is a named gap, not a silent zero', async () => {
+  // The failure that matters: the formula is a vendor convention, so it can go stale under us.
+  // When it does, every run reports as unmeasurable — and the record must SAY that rather than
+  // report $0.00, which is plottable and false (the never-zero-fill rule).
+  const repo = repoWithCommit();
+  const result = await executeWork({
+    ref: 'do the thing',
+    config: CONFIG,
+    repoRoot: repo,
+    runRoot: mktemp('runs'),
+    stamp: '20260731T185040Z',
+    home: mktemp('empty-home'),
+    spawn: stubSpawn((argv, opts) => {
+      writeFileSync(opts.logPath, JSON.stringify({ session_id: 'no-such-session' }));
+      return { exit: 0, killed: false, signal: null, wall_ms: 1, log: opts.logPath };
+    }),
+  });
+
+  assert.equal(result.ok, true, 'an unreadable transcript failed the run it was reporting on');
+  assert.equal(result.record.ok, false);
+  assert.equal(result.record.cost.total_usd, null, 'an unread run was priced at zero');
+  assert.match(result.record.error, /no-such-session/, 'the error does not name what it looked for');
+});
+
+test('a worker log with no session id reports the hole and never composes undefined.jsonl', async () => {
+  // The wrong-session defect, refused at the source. `<project-dir>/undefined.jsonl` from an
+  // earlier bug would be read as this run's, and the number would be confident and wrong.
+  const repo = repoWithCommit();
+  const result = await executeWork({
+    ref: 'do the thing',
+    config: CONFIG,
+    repoRoot: repo,
+    runRoot: mktemp('runs'),
+    stamp: '20260731T185041Z',
+    home: mktemp('home'),
+    spawn: stubSpawn((argv, opts) => {
+      // An error result: valid JSON, no id. The shape a failed launch actually leaves.
+      writeFileSync(opts.logPath, JSON.stringify({ type: 'result', is_error: true }));
+      return { exit: 1, killed: false, signal: null, wall_ms: 1, log: opts.logPath };
+    }),
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.record.ok, false);
+  assert.equal(result.record.cost.total_usd, null);
+  assert.ok(
+    !/undefined\.jsonl/.test(result.record.error ?? ''),
+    `composed a path from a missing id: ${result.record.error}`,
+  );
+  assert.match(result.record.error, /session id/i);
+});
+
+test('reporting cannot fail the run: a reporter that throws is caught and named', async () => {
+  // The sidecar rule, at the one seam where it is reachable. Work that landed, a gate that
+  // graded it, and then an exception in the accounting must not turn a successful tick into a
+  // refusal — `main` reads a throw as exit 2, which a scheduler retries at full price.
+  const repo = repoWithCommit();
+  const result = await executeWork({
+    ref: 'do the thing',
+    config: CONFIG,
+    repoRoot: repo,
+    runRoot: mktemp('runs'),
+    stamp: '20260731T185042Z',
+    report: () => {
+      throw new Error('the reporter exploded');
+    },
+    spawn: stubSpawn((argv, opts) => ({
+      exit: 0, killed: false, signal: null, wall_ms: 1, log: opts.logPath,
+    })),
+  });
+
+  assert.equal(result.ok, true, 'a broken reporter failed the run it was reporting on');
+  assert.equal(result.record, null);
+  assert.match(result.record_error, /the reporter exploded/);
 });

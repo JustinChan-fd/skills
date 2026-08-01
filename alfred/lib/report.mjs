@@ -15,6 +15,14 @@
 // all of it is dead weight, and worse than dead: a searcher can find the wrong file
 // and report a confident number for a session that isn't the one that just ended.
 //
+// AND STILL NO DISCOVERY LAYER, NOW THAT THERE IS A THIRD ENTRY POINT. `recordForRun`
+// reports on a worker the PARENT spawned, which gets no Stop hook — that is why
+// `executeWork` shipped with `report: null` and the first real run cost $1.0671732 and
+// left no record. It searches nothing either: the CLI prints its own `session_id` into
+// the log we told it to write, we chose the cwd, and lib/transcript.mjs composes ONE
+// candidate from the two. The distinction that matters is between computing a path and
+// hunting for a file; only the second can land on the wrong session.
+//
 // WHAT THIS MODULE ADDS OVER `tokens.mjs` + `prices.mjs`:
 //
 //   1. THE PARENT/SUBAGENT JOIN. Subagent turns are NOT in the parent transcript —
@@ -54,6 +62,7 @@ import { collectFromText } from './tokens.mjs';
 import { priceTokens } from './prices.mjs';
 import { newGaps, noteGap, usageRefusal } from './gaps.mjs';
 import { stampProblems } from './suite.mjs';
+import { projectDirFor, sessionFromWorkerLog, transcriptPathFor } from './transcript.mjs';
 
 const DIRECTIONS = ['input', 'output', 'cache_read', 'cache_creation'];
 
@@ -157,7 +166,7 @@ function readSubagents(subagentsDir) {
 // The shape returned when the transcript itself could not be read. Built as a whole
 // record so a consumer never has to branch on which fields exist — `ok: false` tells
 // it not to trust the numbers, and every field it might read is present.
-function failed({ session, work, sink, error, suite }) {
+function failed({ session, work, sink, error, suite, workerCostUsd = null }) {
   return {
     ok: false,
     error,
@@ -173,6 +182,12 @@ function failed({ session, work, sink, error, suite }) {
       // would silently stop protecting anything.
       total_usd: null,
       parent_usd: null,
+      // CARRIED EVEN HERE, and it is the one number this path can still have. When the
+      // transcript cannot be read the CLI's own figure is the only surviving account of what the
+      // run cost — so a record that dropped it would report an unmeasurable run while holding
+      // the measurement. It does NOT fill `total_usd`: that field means "computed from the price
+      // table", and quietly substituting a second source is how a table stops being checked.
+      vendor_usd: workerCostUsd,
       price_table_version: null,
       unpriced: [],
       complete: false,
@@ -213,7 +228,20 @@ export function buildRecord({
   delivery = null,
   suite = null,
   sink = null,
+  // The CLI's own `total_cost_usd`, when a caller has it. An INDEPENDENT second source for the
+  // number computed below, carried beside it rather than merged into it — the two agreeing is
+  // the only evidence the copied price table is right, and a merge destroys the comparison.
+  // Measured on the real run of 2026-07-31: vendor 1.0671731999999998, ours 1.067173.
+  workerCostUsd = null,
+  // A refusal the CALLER already reached, reported through the same shape as every other
+  // failure. `recordForRun` needs this: "no session id in the log" is known before a path can be
+  // composed, and inventing one to fail on would be the wrong-session defect.
+  error: presetError = null,
 } = {}) {
+  if (presetError) {
+    return failed({ session, work, sink, suite, workerCostUsd, error: presetError });
+  }
+
   let text;
   try {
     text = readFileSync(transcriptPath, 'utf8');
@@ -225,6 +253,7 @@ export function buildRecord({
       work,
       sink,
       suite,
+      workerCostUsd,
       error: `could not read transcript ${transcriptPath}: ${err?.code ?? err?.message ?? 'unknown'}`,
     });
   }
@@ -236,6 +265,7 @@ export function buildRecord({
       work,
       sink,
       suite,
+      workerCostUsd,
       error: collected.error?.detail ?? 'transcript could not be parsed',
     });
   }
@@ -320,6 +350,8 @@ export function buildRecord({
       // project's recurring failure mode.
       total_usd: refusal.refused ? null : priced.total_usd,
       parent_usd: refusal.refused ? null : parentPriced.total_usd,
+      // The vendor's own figure, beside ours and never instead of it. See `workerCostUsd`.
+      vendor_usd: workerCostUsd,
       price_table_version: priced.price_table_version,
       unpriced: priced.unpriced,
       complete: refusal.refused ? false : priced.complete,
@@ -363,5 +395,58 @@ export function recordFromHookPayload(payload = {}, extra = {}) {
     transcriptPath,
     subagentsDir: extra.subagentsDir ?? subagentsDir,
     session: { id: sessionId, cwd: payload.cwd ?? null, ...(extra.session ?? {}) },
+  });
+}
+
+// Entry point three: a worker WE spawned, reporting from the parent.
+//
+// The hook path above is a session reporting on itself — Claude Code runs the Stop hook inside
+// the session and hands over `transcript_path`. A worker Alfred launched is a different process
+// and the parent gets no hook, which is why `executeWork` shipped with `report: null` and the
+// first real run cost $1.0671732 and left no record. Nothing was undiscoverable; nothing had
+// told us, and the CLI had.
+//
+// STILL NOT A SEARCH. `sessionFromWorkerLog` reads the id the CLI printed and
+// `transcriptPathFor` composes one candidate from it. If the file is not there the record says
+// so and names the path, which is how a stale vendor convention becomes diagnosable instead of
+// becoming a fleet of runs that all cost $0.00.
+export function recordForRun({
+  workerLog = null,
+  cwd = null,
+  session = {},
+  home = undefined,
+  ...extra
+} = {}) {
+  const found = sessionFromWorkerLog(workerLog);
+
+  if (!found.session_id) {
+    // REFUSED BEFORE COMPOSING A PATH. Without an id the formula yields
+    // `<project-dir>/undefined.jsonl`, and a stale file left there by an earlier bug would be
+    // read as this run's — a confident number for the wrong session, which is the one failure
+    // this module's header refuses outright. `buildRecord` is still what answers, so the caller
+    // gets the same shape on every path and never branches on which fields exist.
+    return buildRecord({
+      ...extra,
+      transcriptPath: null,
+      session: { cwd, ...session },
+      workerCostUsd: found.total_cost_usd,
+      error: 'the worker log carried no session id, so no transcript could be named',
+    });
+  }
+
+  const home_ = home === undefined ? {} : { home };
+  return buildRecord({
+    ...extra,
+    transcriptPath: transcriptPathFor({ cwd, sessionId: found.session_id, ...home_ }),
+    // Derived the same way the hook path derives it: sibling of the transcript, named for the
+    // session. One formula, so a subagent layout change breaks both paths at once rather than
+    // leaving one of them quietly reading nothing.
+    subagentsDir: join(
+      projectDirFor(cwd, home_),
+      found.session_id,
+      'subagents',
+    ),
+    session: { id: found.session_id, cwd, ...session },
+    workerCostUsd: found.total_cost_usd,
   });
 }

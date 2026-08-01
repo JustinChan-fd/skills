@@ -44,12 +44,13 @@
 
 import { spawn } from 'node:child_process';
 import { execFile } from 'node:child_process';
-import { closeSync, mkdirSync, openSync } from 'node:fs';
-import { dirname, join, resolve } from 'node:path';
+import { closeSync, mkdirSync, openSync, readFileSync } from 'node:fs';
+import { basename, dirname, join, resolve } from 'node:path';
 import { promisify } from 'node:util';
 
 import { loadConfig } from './config.mjs';
 import { resolveItem } from './item.mjs';
+import { recordForRun } from './report.mjs';
 import { runGate } from './gate.mjs';
 import { SEATS } from './models.mjs';
 import { composeWorkerPrompt, standingRules } from './prompt.mjs';
@@ -316,8 +317,18 @@ export async function executeWork({
   wallCapMs = DEFAULT_WALL_CAP_MS,
   spawn: spawnFn = spawnWorker,
   gate: gateFn = runGate,
-  report: reportFn = null,
+  // A REAL DEFAULT AT LAST. This was `null` with a comment saying the record "needs a transcript
+  // path this slice does not yet know how to find", and the consequence was measured: the first
+  // real run cost $1.0671732 and produced no record at all. The path was always computable — see
+  // lib/transcript.mjs — so what was missing was the wiring, not the information.
+  report: reportFn = recordForRun,
   env = process.env,
+  // Injected only so a test can put a transcript somewhere and have the composed path find it.
+  // An environment fact rather than a module boundary, which is the point: with `report` left at
+  // its default, the log is really parsed, the path really composed, and the transcript really
+  // read and priced. Substituting the reporter instead would re-create the mocked-seam blindness
+  // that let three defects through a suite green on all of them.
+  home = undefined,
 } = {}) {
   const root = typeof repoRoot === 'string' ? repoRoot : '';
   if (!root) return { ok: false, error: 'no repoRoot: nothing to work in', run_dir: null };
@@ -408,10 +419,33 @@ export async function executeWork({
     pass: findings.length === 0,
   };
 
-  // Step 7. Report, if a reporter was supplied. Null rather than a default, because the record
-  // needs a transcript path this slice does not yet know how to find — and a reporter called with
-  // a guessed path would produce a record about the wrong session.
-  const record = reportFn ? reportFn({ item, config: cfg, gate, worker, runDir }) : null;
+  // Step 7. Report. A SIDECAR, AND THE try/catch IS THE WHOLE POINT: the work landed, the gate
+  // graded it, and an exception in the accounting must not turn that into a refusal. `main` reads
+  // a throw as exit 2, which a scheduler retries — at full price, for a run that already
+  // succeeded. So a broken reporter costs the record and nothing else, and says so.
+  let record = null;
+  let recordError = null;
+  try {
+    record = reportFn({
+      // What the record needs to be joinable: the log to read the session id out of, and the cwd
+      // the transcript was filed under. Both are things this function chose, which is why no
+      // search is involved.
+      workerLog: readLogText(worker?.log),
+      cwd: root,
+      home,
+      work: {
+        source: item.source ?? null,
+        item_id: item.id ?? null,
+        title: item.title ?? null,
+        ac_count: item.acceptance_criteria?.length ?? null,
+      },
+      gate,
+      session: { run_id: basename(runDir), repo: cfg.repo ?? null, wall_ms: worker?.wall_ms ?? null },
+      sink: cfg.telemetry?.sink ?? null,
+    });
+  } catch (err) {
+    recordError = String(err?.message ?? err);
+  }
 
   return {
     ok: true,
@@ -421,8 +455,23 @@ export async function executeWork({
     worker,
     gate,
     record,
+    // Named rather than swallowed. A record that is absent for a reason nobody wrote down is
+    // indistinguishable from a run nobody asked to report on.
+    record_error: recordError,
     observed_error: observed.error ?? null,
   };
+}
+
+// The worker's own result JSON. Unreadable is null, not an exception, for the sidecar reason
+// above — and a killed worker, whose accounting matters most, is exactly the case that leaves a
+// log that may not be there or may be half-written.
+function readLogText(logPath) {
+  if (!logPath) return null;
+  try {
+    return readFileSync(logPath, 'utf8');
+  } catch {
+    return null;
+  }
 }
 
 // Reads the ac_map the worker filed, if it filed one. Kept here rather than in acmap.mjs because
