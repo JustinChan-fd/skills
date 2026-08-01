@@ -1753,3 +1753,227 @@ test('ADDED #73: a FAILING text-matched command fails the run (the fix cannot on
   assert.match(f.detail, /^AC2 failed its own check/, `credited against the criterion, not counted as a volunteered check: ${f.detail}`);
   assert.match(f.evidence, /2 failing/);
 });
+
+// ---------------------------------------------------------------------------
+// THE LABEL JOIN (#21). Measured on the first real github-sourced run.
+// ---------------------------------------------------------------------------
+//
+// $1.831013 spent, worker exit 0, `npm test` green on its tree, `alfred/SKILL.md` correctly
+// rewritten, a valid `.alfred/ac-map.json` with one command per criterion — and all four of
+// those commands PASS when run by hand. The gate failed the run with `ac_unmapped` x4.
+//
+// The ticket's prose numbered its criteria `**AC-1:**`; `item.mjs` mints ids POSITIONALLY as
+// `AC1..ACn`. The worker keyed its map from the prose it read. `AC-1` !== `AC1`, so the exact-id
+// index missed, and the text index could not rescue it: that index keys the entry's `ac` field
+// against the criterion's full TEXT, so it only helps a worker that pasted the whole criterion
+// as its id.
+//
+// NOT A TICKET-FORMAT DEFECT, and this was measured too: seven prose styles — no labels,
+// `**AC-1:**`, `**AC1:**`, `AC 1`, `1.`, `- [ ]`, Given/When/Then — all mint `AC1, AC2`.
+// Minting is already format-independent and is the sound half. The brittle half is the join.
+//
+// WHY NORMALIZE AND NOT RE-MINT. Making ids follow the ticket's prose would make them vary with
+// how each ticket happens to be authored: labels on some criteria and not others, duplicates,
+// and inconsistent spellings all become new failure modes, and the gate's ac_map keys are an
+// interface. So the ids stay positional and the JOIN gets one bounded extra index.
+//
+// THE DIGITS MUST SURVIVE. That is the whole safety property, and it is what keeps this out of
+// the fuzzy-matching territory the `acKey` comment refuses. `ac-1`, `AC 1`, `ac_1`, `AC1` all
+// collapse to `ac1`; `AC1` and `AC2` cannot collapse into each other at any point. A normalizer
+// that stripped digits would trade #73 (a rule that always fires) for its mirror image — an
+// entry credited against the wrong criterion, which is worse than an uncredited one because it
+// reports a bar as met by evidence for a different bar.
+
+test('ADDED #21: a hyphenated label matches the positional id — the measured false FAIL', async () => {
+  // The exact shape of the live run, reduced: the ticket said AC-1/AC-2, the item carries
+  // AC1/AC2, both commands pass. Before the fix this is ac_unmapped x2 on correct work.
+  const log = [];
+  const verdict = await runGate({
+    config: { verify: {}, off_limits: [] },
+    repoRoot: tempRepo(),
+    acs: [
+      { id: 'AC1', text: '**AC-1:** every key in `GATE_RULES` appears in `alfred/SKILL.md`.' },
+      { id: 'AC2', text: '**AC-2:** `npm test` passes.' },
+    ],
+    acMap: [
+      { ac: 'AC-1', command: 'grep -q check_failed alfred/SKILL.md' },
+      { ac: 'AC-2', command: 'npm test' },
+    ],
+    touched: ['alfred/SKILL.md'],
+    diffstat: [{ file: 'alfred/SKILL.md', added: 27, deleted: 5 }],
+    run: runnerFor({ 'grep -q check_failed alfred/SKILL.md': { code: 0 }, 'npm test': { code: 0 } }, log),
+  });
+
+  assert.equal(verdict.pass, true, `correct work was failed: ${JSON.stringify(verdict.findings)}`);
+  assert.deepEqual(findingRules(verdict), [], 'no finding should survive a matched, passing map');
+  // AND THE COMMANDS MUST HAVE RUN. A join that matches but never executes would satisfy the
+  // assertion above while grading nothing — #72's shape. Both commands, once each.
+  assert.equal(log.filter((c) => c === 'npm test').length, 1, 'the matched command never ran');
+  assert.equal(log.filter((c) => c.startsWith('grep -q')).length, 1, 'the matched command never ran');
+});
+
+test('ADDED #21: a normalized match still grades — a FAILING hyphenated entry fails the run', async () => {
+  // A SEPARATE PROPOSITION from the test above, deliberately. That one proves the join can
+  // credit; this proves crediting does not disable the exit code. One test spanning both would
+  // go green on a fix that matched every entry and ran none of them.
+  //
+  // Asserted on the DETAIL naming AC1, not on the rule alone: an unmatched entry falls through
+  // to `runDeclaredChecks`, which emits the same `ac_failed` rule with "a worker-declared check
+  // failed". The rule name cannot tell a credited criterion from a volunteered check.
+  const verdict = await runGate({
+    config: { verify: {}, off_limits: [] },
+    repoRoot: tempRepo(),
+    acs: [{ id: 'AC1', text: '**AC-1:** `npm test` passes.' }],
+    acMap: [{ ac: 'AC-1', command: 'npm test' }],
+    touched: ['alfred/SKILL.md'],
+    diffstat: [{ file: 'alfred/SKILL.md', added: 3, deleted: 0 }],
+    run: runnerFor({ 'npm test': { code: 1, output: '2 failing' } }),
+  });
+
+  assert.equal(verdict.pass, false, 'a matched entry whose command fails is not a pass');
+  const f = verdict.findings.find((x) => x.rule === GATE_RULES.ac_failed);
+  assert.ok(f, `expected ac_failed, got ${JSON.stringify(findingRules(verdict))}`);
+  assert.match(f.detail, /^AC1 failed its own check/, `credited against the criterion, not counted as volunteered: ${f.detail}`);
+  assert.match(f.evidence, /2 failing/);
+});
+
+test('ADDED #21: the digits are load-bearing — AC1 and AC2 never collapse into each other', async () => {
+  // The falsifier for the normalizer itself, and the reason it is bounded rather than fuzzy.
+  // A map answering ONLY AC-2 must leave AC1 unmapped. A normalizer that stripped digits — or
+  // matched on the `ac` prefix — would credit AC1 with AC2's passing command and report a pass
+  // on a criterion nobody verified, which is strictly worse than the false FAIL being fixed.
+  const verdict = await runGate({
+    config: { verify: {}, off_limits: [] },
+    repoRoot: tempRepo(),
+    acs: [
+      { id: 'AC1', text: '**AC-1:** every gate rule is documented.' },
+      { id: 'AC2', text: '**AC-2:** `npm test` passes.' },
+    ],
+    acMap: [{ ac: 'AC-2', command: 'npm test' }],
+    touched: ['alfred/SKILL.md'],
+    diffstat: [{ file: 'alfred/SKILL.md', added: 3, deleted: 0 }],
+    run: runnerFor({ 'npm test': { code: 0 } }),
+  });
+
+  assert.equal(verdict.pass, false, 'AC1 was credited with AC2 evidence');
+  const unmapped = verdict.findings.filter((x) => x.rule === GATE_RULES.ac_unmapped);
+  assert.equal(unmapped.length, 1, `exactly AC1 should be unmapped: ${JSON.stringify(findingRules(verdict))}`);
+  assert.match(unmapped[0].detail, /^AC1 /, `the wrong criterion was reported unmapped: ${unmapped[0].detail}`);
+});
+
+test('ADDED #21: an EXACT id match wins over a label match — precedence, not just presence', async () => {
+  // PRECEDENCE, NOT PRESENCE. The three tests above each carry only one entry per criterion, so
+  // no ordering could be observed in any of them. `resolveAcs`'s comment claims "an exact match
+  // must never be re-resolved through a normalizer"; without this test nothing enforces it, and an
+  // untested claim in a comment is the #63 shape at the documentation layer.
+  //
+  // This test does kill that reordering — verified by mutation, consulting the label index ahead of
+  // the exact id fails exactly here. Worth recording how nearly it went the other way: an earlier
+  // mutation run reported this same mutant as SURVIVING, twice. It had not survived; the `perl`
+  // substitution silently matched nothing, so a clean file was tested and scored as a mutant.
+  // A mutation run that cannot prove the mutation applied measures nothing, and reports green.
+  //
+  // Two entries whose keys BOTH resolve to AC1: the exact id and its label form, carrying
+  // different commands. Only the exact-id command may run. This matters where a worker files
+  // both a precise entry and a loose one — crediting the loose one silently grades the criterion
+  // against evidence the worker itself considered secondary.
+  const log = [];
+  const verdict = await runGate({
+    config: { verify: {}, off_limits: [] },
+    repoRoot: tempRepo(),
+    // Both commands name the criterion's subject terms, so `mapping_implausible` cannot fire and
+    // the only thing this test observes is WHICH entry was credited. A first draft used
+    // `echo exact-form`, which drew `mapping_implausible` — the plausibility rule firing first
+    // would have made the assertion below measure that rule instead of the precedence.
+    acs: [{ id: 'AC1', text: 'every gate rule is documented.' }],
+    acMap: [
+      { ac: 'AC-1', command: 'grep -c "gate rule documented" label.md' },
+      { ac: 'AC1', command: 'grep -c "gate rule documented" exact.md' },
+    ],
+    touched: ['alfred/SKILL.md'],
+    diffstat: [{ file: 'alfred/SKILL.md', added: 3, deleted: 0 }],
+    run: runnerFor({
+      'grep -c "gate rule documented" label.md': { code: 0 },
+      'grep -c "gate rule documented" exact.md': { code: 0 },
+    }, log),
+  });
+
+  assert.equal(verdict.pass, true, JSON.stringify(verdict.findings));
+  // ASSERTED ON ORDER, not on membership. Both commands run: the credited entry is graded in the
+  // criterion loop, and the other answers no declared criterion so it runs afterwards through
+  // `runDeclaredChecks` as a volunteered check (#72). A `log.includes(...)` assertion is
+  // therefore true either way and cannot see the precedence at all — the criterion loop runs
+  // first, so the CREDITED command is the one logged first.
+  const exact = 'grep -c "gate rule documented" exact.md';
+  const label = 'grep -c "gate rule documented" label.md';
+  assert.ok(log.indexOf(exact) >= 0, `the exact-id command never ran: ${JSON.stringify(log)}`);
+  assert.ok(
+    log.indexOf(exact) < log.indexOf(label),
+    `the label entry was credited ahead of the exact id: ${JSON.stringify(log)}`,
+  );
+});
+
+test('ADDED #21: the criterion TEXT outranks the label — the label index is last of three', async () => {
+  // THE OTHER HALF OF THE PRECEDENCE CLAIM. Test 64 pins the label index below the exact id.
+  // `resolveAcs` claims more than that: the label is "last because it is the loosest of the
+  // three", which also puts it below the TEXT index. A mutant that moved the label ahead of the
+  // text index only — leaving the exact id first — passed all 65 tests, so that half of the
+  // sentence was carried by nothing.
+  //
+  // No entry is keyed `AC1` here, so tier 1 misses by construction and tiers 2 and 3 compete
+  // directly: one entry keyed with the criterion's whole prose, one keyed with its label form.
+  // Both must be reachable on their own for this to be a precedence test rather than a coverage
+  // test, and the three tests above already establish the label index matches when alone.
+  const log = [];
+  const verdict = await runGate({
+    config: { verify: {}, off_limits: [] },
+    repoRoot: tempRepo(),
+    acs: [{ id: 'AC1', text: 'every gate rule is documented.' }],
+    acMap: [
+      { ac: 'every gate rule is documented.', command: 'grep -c "gate rule documented" text.md' },
+      { ac: 'AC-1', command: 'grep -c "gate rule documented" label.md' },
+    ],
+    touched: ['alfred/SKILL.md'],
+    diffstat: [{ file: 'alfred/SKILL.md', added: 3, deleted: 0 }],
+    run: runnerFor({
+      'grep -c "gate rule documented" text.md': { code: 0 },
+      'grep -c "gate rule documented" label.md': { code: 0 },
+    }, log),
+  });
+
+  assert.equal(verdict.pass, true, JSON.stringify(verdict.findings));
+  // Same order-based observation as test 64, and for the same reason: both commands run either
+  // way, the credited one in the criterion loop and the loser as a volunteered check.
+  const text = 'grep -c "gate rule documented" text.md';
+  const label = 'grep -c "gate rule documented" label.md';
+  assert.ok(log.indexOf(text) >= 0, `the text-keyed command never ran: ${JSON.stringify(log)}`);
+  assert.ok(
+    log.indexOf(text) < log.indexOf(label),
+    `the label entry was credited ahead of the criterion text: ${JSON.stringify(log)}`,
+  );
+});
+
+test('ADDED #21: acLabel only accepts a LABEL — an arbitrary string ending in a digit is not one', async () => {
+  // WRITTEN BECAUSE A MUTANT SURVIVED. Replacing the `^ac[sep]*(\d+)$` shape guard with a
+  // trailing-digit match kept all four tests above green, because none of them file an entry
+  // whose key merely ENDS in the right number.
+  //
+  // `sandbox-b trap 2` is a real ac_map key shape from this project's own corpus. Under the
+  // loosened matcher it normalizes to `ac2` and would be credited against AC2 — a criterion
+  // settled by an entry that was never about it. The shape guard is what makes the third index
+  // bounded rather than a third chance to match anything.
+  const verdict = await runGate({
+    config: { verify: {}, off_limits: [] },
+    repoRoot: tempRepo(),
+    acs: [{ id: 'AC2', text: '`npm test` passes.' }],
+    acMap: [{ ac: 'sandbox-b trap 2', command: 'echo unrelated' }],
+    touched: ['alfred/SKILL.md'],
+    diffstat: [{ file: 'alfred/SKILL.md', added: 3, deleted: 0 }],
+    run: runnerFor({ 'echo unrelated': { code: 0 } }),
+  });
+
+  assert.equal(verdict.pass, false, 'an unrelated entry ending in "2" was credited against AC2');
+  const unmapped = verdict.findings.filter((x) => x.rule === GATE_RULES.ac_unmapped);
+  assert.equal(unmapped.length, 1, `AC2 should be unmapped: ${JSON.stringify(findingRules(verdict))}`);
+  assert.match(unmapped[0].detail, /^AC2 /);
+});

@@ -210,6 +210,33 @@ const acKey = (value) =>
     .trim()
     .replace(/\.$/, '');
 
+// THE LABEL FORM (#21). Measured on the first real github-sourced run: $1.831013, worker exit
+// 0, `npm test` green, a correct diff, a schema-valid ac_map whose four commands all pass by
+// hand — failed with `ac_unmapped` x4. The ticket's prose numbered its criteria `**AC-1:**`;
+// ids are minted POSITIONALLY as `AC1..ACn`; `AC-1 !== AC1`.
+//
+// `acKey` above could not rescue it and was not built to: it keys an entry's `ac` against the
+// criterion's TEXT, so it only helps a worker that pasted a whole criterion as its id. A worker
+// that wrote a LABEL — the ordinary thing to do — misses both indexes.
+//
+// NOT A TICKET-FORMAT PROBLEM. Seven prose styles were measured (no labels, `**AC-1:**`,
+// `**AC1:**`, `AC 1`, `1.`, `- [ ]`, Given/When/Then) and all mint `AC1, AC2`. Minting is
+// already format-independent, so the ids stay positional and the JOIN takes the extra index.
+//
+// THE DIGITS SURVIVE, and that is the entire safety property. Only a leading `ac` and the
+// separators between it and the number are removed, so `ac-1`, `AC 1`, `ac_1`, `AC1` collapse to
+// `ac1` while `AC1` and `AC2` cannot collapse into each other on any input. A normalizer that
+// dropped or ignored the digits would credit one criterion with another's evidence — worse than
+// the false FAIL being fixed here, because a bar reported as met by evidence for a different
+// bar is indistinguishable from a bar actually met.
+//
+// RETURNS NULL for anything not label-shaped, so an arbitrary string cannot become a third
+// chance to match. `null` is never inserted into the index and never looked up.
+const acLabel = (value) => {
+  const m = /^ac[\s._:#-]*(\d+)$/i.exec(String(value ?? '').split('*').join('').replace(/[\s:.]+$/, '').trim());
+  return m ? `ac${Number(m[1])}` : null;
+};
+
 // Resolves each AC to exactly one of the four states. Silence is a finding.
 async function resolveAcs({ acs, acMap, repoRoot, run, findings, unverified }) {
   const byAc = new Map();
@@ -217,6 +244,9 @@ async function resolveAcs({ acs, acMap, repoRoot, run, findings, unverified }) {
   // primary: lib/prompt.mjs does render `AC1: <text>` and names the ids as the keys, so a
   // worker that used them must not be re-resolved through a normalizer.
   const byText = new Map();
+  // A THIRD INDEX, ranked last. See `acLabel`: this is the label form (`AC-1` for `AC1`), and it
+  // is consulted only after the exact id and the criterion text have both missed.
+  const byLabel = new Map();
   for (const entry of acMap ?? []) {
     // First mapping wins, and a duplicate is not silently merged: two entries for one
     // AC where the second says `unverifiable` would otherwise let a worker append an
@@ -224,6 +254,8 @@ async function resolveAcs({ acs, acMap, repoRoot, run, findings, unverified }) {
     if (!byAc.has(entry?.ac)) byAc.set(entry?.ac, entry);
     const key = acKey(entry?.ac);
     if (key && !byText.has(key)) byText.set(key, entry);
+    const label = acLabel(entry?.ac);
+    if (label && !byLabel.has(label)) byLabel.set(label, entry);
   }
 
   // Which entries answered a criterion someone SET. The rest are the worker's own, and are
@@ -233,10 +265,21 @@ async function resolveAcs({ acs, acMap, repoRoot, run, findings, unverified }) {
   for (const ac of acs ?? []) {
     const id = ac?.id ?? null;
     const text = ac?.text ?? '';
-    // Id first, then the criterion's own text. Order matters where a map carries both: the
-    // id is what the operator's manifest declared, and the text index is the fallback for a
-    // caller that never showed the worker an id.
-    const entry = byAc.get(id) ?? byText.get(acKey(text));
+    // Id first, then the criterion's own text, then the label form of the id. Order matters
+    // where a map carries several: the id is what the operator's manifest declared, the text
+    // index is the fallback for a caller that never showed the worker an id, and the label index
+    // is last because it is the loosest of the three — an exact match must never be re-resolved
+    // through a normalizer.
+    //
+    // The label is derived from the ID, never from the text. Deriving it from the criterion's
+    // prose would read `**AC-1:**` out of the sentence and match on the ticket's own numbering,
+    // which is the authorship-dependent behaviour `acLabel` exists to avoid.
+    // NO SENTINEL. An earlier draft passed a placeholder string when `acLabel` returned null,
+    // which meant the lookup depended on that placeholder never equalling a real `ac<digits>`
+    // key. The null is checked instead, so there is no magic value to collide with.
+    const label = acLabel(id);
+    const entry =
+      byAc.get(id) ?? byText.get(acKey(text)) ?? (label === null ? undefined : byLabel.get(label));
     if (entry) claimed.add(entry);
 
     if (!entry) {
