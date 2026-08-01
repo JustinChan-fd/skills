@@ -50,6 +50,39 @@ manufactured an *acceptance* for anyone who deleted the older project dirs first
 wrong number is part of the provenance. The score sheet carries both columns and the
 reconciliation.
 
+The **ac_map-contract** sonnet-5 n=3 run, 2026-07-31 — the first with `instrument_modified`
+wired (#68) and the ac_map contract reachable (#67). Suite `2026-07-31.2`, digest
+`88b12fd0…17e5c0d6` **re-verified unchanged after the arm**, so its figures are not comparable
+to the `.1` rows above:
+
+| file | what it is | when written |
+|---|---|---|
+| `armC-acmap-n3-score.md` | all three runs scored; §3 is the self-certified-green measurement | after the run |
+| `armC-acmap-n3-record.json` | the runner record, verbatim | at run end |
+| `armC-acmap-run{1,2,3}-delivered.diff` | what each run changed to **tracked** files | after the run |
+| `armC-acmap-run{1,2,3}-new-*` | the files each run **added** — `git diff` cannot see untracked files (#68's recorded gap), so a diff alone would omit the new retry module entirely | after the run |
+
+⚠ **A worker's test file copied in here gets COLLECTED BY OUR OWN SUITE.** Measured: copying
+runs 2 and 3's new `*.test.js` verbatim took the repo from 1378/1378 to **1380 tests, 2
+failing** — `ERR_MODULE_NOT_FOUND` on their relative imports, because the file now sits at a
+different depth than the sandbox it was written for. Nothing was wrong with Alfred; the
+*evidence* had joined the suite. Hence the `.test.js.txt` suffix on those two files: still
+readable as evidence, no longer a test. Anything ending `.test.js` under `alfred/` is a repo
+test regardless of which directory it is in.
+| `armC-acmap-run{1,2,3}-ac-map.json` | the ac_map each worker wrote — **the evidence for #73** | at run end |
+
+**The three ac_maps are kept because they are the defect's evidence, not because they are
+inputs.** All three are schema-valid with one entry per criterion, and all three drew
+`ac_unmapped` on every criterion anyway: the gate joins on AC **id** while the ticket prints
+only checkbox text (#73). Run 3's file is the one that matters most — it kept the markdown
+backticks (`` `npm test` passes. ``) where runs 1 and 2 stripped them, which is the measured
+proof that an exact-text fallback would still fail 2 of 3 and a normalizer is required.
+
+**This record's `usd` figures are correct and independently corroborated.** Each run's
+price-table figure agrees with the CLI's own `total_cost_usd` to six decimal places
+($2.439392, $2.049787, $2.547346). Unlike the `.1` row above, nothing here needs a correction
+column.
+
 **`armC1-record.json`'s `$1.974173` is superseded, and is kept anyway.** It was priced
 before #59 fixed the introductory-rate defect; the same run at the decided $3/$15 table is
 **$2.961259** (= 1.974173 × 1.5), which is the CLI's own `total_cost_usd`. Per §9's
