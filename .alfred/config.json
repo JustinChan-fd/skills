@@ -1,0 +1,37 @@
+{
+  "version": 1,
+  "repo": "skills",
+  "source": {
+    "kind": "github",
+    "github": {
+      "owner": "JustinChan-fd",
+      "repo": "skills"
+    }
+  },
+  "base": {
+    "rules": [
+      { "default": "main" }
+    ]
+  },
+  "branch_prefix": "alfred/",
+  "verify": {
+    "test": "npm test"
+  },
+  "delivery": {
+    "mode": "pr",
+    "never_merge": true
+  },
+  "off_limits": [
+    "harness-core/",
+    "harness-implement-core/",
+    "harness-intake-core/",
+    "harness-loop-core/",
+    "harness-plan-core/",
+    "alfred/lib/gate.mjs",
+    "alfred/test/",
+    "alfred/docs/exp2-evidence/",
+    ".alfred/config.json",
+    "package-lock.json"
+  ],
+  "budget_usd": 8
+}
