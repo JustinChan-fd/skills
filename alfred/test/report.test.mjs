@@ -633,3 +633,53 @@ test('ADDED: the failure path carries the stamp too — an unreadable transcript
   assert.equal(record.suite.model, 'claude-sonnet-5');
   assert.equal(record.cost.total_usd, null);
 });
+
+test('ADDED: the failure path carries the GATE VERDICT too — an unreadable transcript was still graded', () => {
+  // FOUND BY READING THE FIRST PERSISTED RECORD, not by a test. The e2e run of
+  // 2026-08-01 printed `gate: FAIL / check_failed: declared check test failed: npm test`
+  // to the console and wrote `"gate": {"pass": null, "findings": []}` to record.json.
+  //
+  // The cause is the same over-broad default as #63: `failed()` never accepted a `gate`
+  // parameter at all, so every transcript-unreadable run persisted an empty verdict. The
+  // reasoning already written one field over for `suite` — "a run whose transcript could
+  // not be read was still scored against a suite" — is exactly as true of the gate, and
+  // the gate is the field the whole architecture exists to produce. Reading the
+  // transcript is ACCOUNTING; the gate is JUDGEMENT, and it is reached before this and
+  // by a path that does not touch the transcript. One failing does not unmake the other.
+  const record = buildRecord({
+    transcriptPath: join(tmpdir(), 'alfred-no-such-transcript-gate-' + process.pid + '.jsonl'),
+    subagentsDir: null,
+    session: { id: 'sess-broken-graded' },
+    gate: {
+      pass: false,
+      findings: [{ rule: 'check_failed', detail: 'declared check test failed: npm test', evidence: 'exit 1' }],
+      unverified: ['AC-2'],
+    },
+  });
+  assert.equal(record.ok, false, 'the fixture must exercise the failure path, not the success one');
+  // NOT `pass ?? null`. `false` is a verdict and `null` is the absence of one, and the
+  // defect turned the first into the second — the difference between "this run was
+  // rejected" and "nobody looked".
+  assert.equal(record.gate.pass, false, 'a failing verdict was persisted as no verdict');
+  assert.equal(record.gate.findings.length, 1, 'the reason for the verdict was dropped');
+  assert.equal(record.gate.findings[0].rule, 'check_failed');
+  assert.deepEqual(record.gate.unverified, ['AC-2']);
+});
+
+test('ADDED: the failure path carries what was DELIVERED — a pushed branch is not unpushed by a bad transcript', () => {
+  // A SEPARATE PROPOSITION from the gate above, and separate for a reason: `failed()`
+  // omitted both, and one test spanning them would have gone green on a fix to either.
+  // This one is the more dangerous omission of the two — a record claiming no commits
+  // and no PR for a run that pushed a branch and opened a PR does not merely lose
+  // information, it asserts a false negative about work that exists on a remote.
+  const record = buildRecord({
+    transcriptPath: join(tmpdir(), 'alfred-no-such-transcript-delivery-' + process.pid + '.jsonl'),
+    subagentsDir: null,
+    session: { id: 'sess-broken-delivered' },
+    delivery: { commits: ['abc1234'], pushed_to: 'alfred/some-item', pr_url: 'https://example.invalid/pr/1' },
+  });
+  assert.equal(record.ok, false);
+  assert.deepEqual(record.delivery.commits, ['abc1234']);
+  assert.equal(record.delivery.pushed_to, 'alfred/some-item');
+  assert.equal(record.delivery.pr_url, 'https://example.invalid/pr/1');
+});

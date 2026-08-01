@@ -166,7 +166,20 @@ function readSubagents(subagentsDir) {
 // The shape returned when the transcript itself could not be read. Built as a whole
 // record so a consumer never has to branch on which fields exist — `ok: false` tells
 // it not to trust the numbers, and every field it might read is present.
-function failed({ session, work, sink, error, suite, workerCostUsd = null }) {
+//
+// PRESENT IS NOT THE SAME AS CARRIED. Until 2026-08-01 this function did not accept
+// `gate` or `delivery`, so both keys existed here and both were always empty: every
+// transcript-unreadable run persisted `gate: {pass: null, findings: []}` over a verdict
+// it had been handed, and `delivery: {commits: [], pr_url: null}` over a branch it had
+// pushed. Found by diffing the console against the first record ever written to disk,
+// which printed `gate: FAIL / check_failed` beside a file that said nobody looked.
+//
+// `ok: false` SCOPES TO THE NUMBERS, not to the judgement. What failed here is reading
+// the transcript — accounting. The gate ran earlier, over commands and exit codes, and
+// touches no transcript; delivery already happened against a remote. Neither is made
+// untrue by an unreadable file, and defaulting them empty asserts something false
+// rather than declining to answer.
+function failed({ session, work, sink, error, suite, gate = null, delivery = null, workerCostUsd = null }) {
   return {
     ok: false,
     error,
@@ -192,8 +205,19 @@ function failed({ session, work, sink, error, suite, workerCostUsd = null }) {
       unpriced: [],
       complete: false,
     },
-    gate: { pass: null, findings: [], unverified: [] },
-    delivery: { commits: [], pushed_to: null, pr_url: null },
+    // The SAME shape as the success path, from the same fallbacks. `pass: null` here now
+    // means what it means there — no verdict was supplied — instead of meaning the
+    // verdict was thrown away on the way in.
+    gate: {
+      pass: gate?.pass ?? null,
+      findings: gate?.findings ?? [],
+      unverified: gate?.unverified ?? [],
+    },
+    delivery: {
+      commits: delivery?.commits ?? [],
+      pushed_to: delivery?.pushed_to ?? null,
+      pr_url: delivery?.pr_url ?? null,
+    },
     // Carried on the failure path too. A run whose transcript could not be read was
     // still scored against a suite, and a `suite` key that exists on one path and not
     // the other is the one field a reader would have to guard.
@@ -239,7 +263,7 @@ export function buildRecord({
   error: presetError = null,
 } = {}) {
   if (presetError) {
-    return failed({ session, work, sink, suite, workerCostUsd, error: presetError });
+    return failed({ session, work, sink, suite, gate, delivery, workerCostUsd, error: presetError });
   }
 
   let text;
@@ -253,6 +277,8 @@ export function buildRecord({
       work,
       sink,
       suite,
+      gate,
+      delivery,
       workerCostUsd,
       error: `could not read transcript ${transcriptPath}: ${err?.code ?? err?.message ?? 'unknown'}`,
     });
@@ -265,6 +291,8 @@ export function buildRecord({
       work,
       sink,
       suite,
+      gate,
+      delivery,
       workerCostUsd,
       error: collected.error?.detail ?? 'transcript could not be parsed',
     });
