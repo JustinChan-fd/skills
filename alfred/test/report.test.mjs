@@ -746,3 +746,90 @@ test('ADDED #13: the FAILURE path carries the disclosure too', () => {
   assert.equal(record.gate.graded_criteria, 0, 'the failure path dropped the count');
   assert.ok(record.gate.ungraded_reason, 'the failure path dropped the disclosure');
 });
+
+// ---------------------------------------------------------------------------
+// #8 — the grader's identity has to survive the trip to disk.
+
+test('ADDED #8: the record carries the sha of the gate that graded it', () => {
+  // #10's SHAPE, AT A THIRD FIELD. `buildRecord` projects the verdict to a fixed shape
+  // rather than passing it through, so a new field on the verdict dies silently on the way
+  // to `record.json` — which has now happened to `graded_criteria`, to `ungraded_reason`,
+  // and would happen to `gate_sha`. The console line is read once; the record is what a
+  // scheduler, an operator, or a later scoring pass reads.
+  //
+  // WHY THIS FIELD SPECIFICALLY. The first `gate_pass: true` (`e802f1d`) cannot be
+  // distinguished from a verdict produced by the pre-`bb6aaa1` gate, which returned a FALSE
+  // FAIL on that same correct diff. `suite` is null on every production run and gate.mjs is
+  // a declared not_member of the digest, so the run's provenance had to be pinned by hand.
+  //
+  // ON `gate`, NOT IN `suite` — following `cost.price_table_version`, which is how the
+  // other declared not_member reaches the record: on the section it governs.
+  const record = buildRecord({
+    transcriptPath: ARM0,
+    subagentsDir: null,
+    session: { id: 'sess-gate-sha' },
+    gate: {
+      pass: true,
+      findings: [],
+      unverified: [],
+      graded_criteria: 4,
+      ungraded_reason: null,
+      gate_sha: '620e8240155e2c77bf16c56f44f7a7910b94b468',
+    },
+  });
+
+  assert.equal(record.ok, true, 'the fixture must exercise the SUCCESS path, not failed()');
+  assert.equal(
+    record.gate.gate_sha,
+    '620e8240155e2c77bf16c56f44f7a7910b94b468',
+    'the grader’s identity was dropped on the way to disk',
+  );
+});
+
+test('ADDED #8: the FAILURE path carries the gate sha too', () => {
+  // BOTH PROJECTIONS, SEPARATELY, for the reason the two #13 tests above already record:
+  // `buildRecord` has two of them and fixing one leaves the other dropping the field. A run
+  // whose transcript could not be read was still graded, and it was still graded by a
+  // specific gate — arguably more urgently, since a record that lost its cost figures is
+  // one whose remaining provenance matters most.
+  const record = buildRecord({
+    transcriptPath: join(tmpdir(), 'alfred-no-such-transcript-gatesha-' + process.pid + '.jsonl'),
+    subagentsDir: null,
+    session: { id: 'sess-broken-gate-sha' },
+    gate: {
+      pass: false,
+      findings: [],
+      unverified: [],
+      graded_criteria: 4,
+      ungraded_reason: null,
+      gate_sha: '620e8240155e2c77bf16c56f44f7a7910b94b468',
+    },
+  });
+
+  assert.equal(record.ok, false, 'the fixture must exercise the failure path');
+  assert.equal(
+    record.gate.gate_sha,
+    '620e8240155e2c77bf16c56f44f7a7910b94b468',
+    'the failure path dropped the grader’s identity',
+  );
+});
+
+test('ADDED #8: an absent sha is null, never a guess — unmeasured is not zero', () => {
+  // THE OTHER DIRECTION, and the rule `pass: null` and `graded_criteria: null` already
+  // follow on this exact projection. A caller that supplied no verdict has told us nothing
+  // about which gate ran, and the honest record of that is `null`.
+  //
+  // The tempting alternative is worse than useless: hashing `lib/gate.mjs` HERE, in
+  // report.mjs, would produce a real-looking sha for a run this gate never graded — the
+  // "precise wrong number" failure mode `cost.total_usd` is guarded against three lines up
+  // in the same object. The sha must come from the verdict or not at all.
+  const record = buildRecord({
+    transcriptPath: ARM0,
+    subagentsDir: null,
+    session: { id: 'sess-no-verdict' },
+  });
+
+  assert.equal(record.ok, true, 'the fixture must exercise the SUCCESS path');
+  assert.equal(record.gate.pass, null, 'no verdict supplied');
+  assert.equal(record.gate.gate_sha, null, 'an unsupplied grader must be null, not synthesized');
+});

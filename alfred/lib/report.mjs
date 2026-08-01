@@ -218,6 +218,11 @@ function failed({ session, work, sink, error, suite, gate = null, delivery = nul
       // no verdict, matching `pass` above: absent is unobserved, not zero.
       graded_criteria: gate?.graded_criteria ?? null,
       ungraded_reason: gate?.ungraded_reason ?? null,
+      // WHICH GATE PRODUCED THIS VERDICT (#8). Carried here for the reason the fields above
+      // it are: a record that lost its cost figures is the one whose remaining provenance
+      // matters most. Never computed here from `lib/gate.mjs` — that would attach a
+      // real-looking sha to a run this gate never graded.
+      gate_sha: gate?.gate_sha ?? null,
     },
     delivery: {
       commits: delivery?.commits ?? [],
@@ -400,6 +405,16 @@ export function buildRecord({
       // no verdict, matching `pass` above: absent is unobserved, not zero.
       graded_criteria: gate?.graded_criteria ?? null,
       ungraded_reason: gate?.ungraded_reason ?? null,
+      // WHICH GATE PRODUCED THIS VERDICT (#8). The blob sha of `lib/gate.mjs`, so
+      // `gate_pass: true` records the ruler it was measured against instead of leaving the
+      // fixed gate and the gate it replaced byte-indistinguishable on disk. `null` for a
+      // caller that supplied no verdict, matching `pass` above.
+      //
+      // ON THIS SECTION, NOT IN `suite`. `lib/gate.mjs` is a declared not_member of the
+      // suite digest — the system under test must not version its own ruler — and the
+      // precedent for where a not_member's identity lands is `cost.price_table_version`
+      // above: on the section it governs.
+      gate_sha: gate?.gate_sha ?? null,
     },
     delivery: {
       commits: delivery?.commits ?? [],

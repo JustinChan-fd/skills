@@ -34,6 +34,7 @@ import { execFileSync } from 'node:child_process';
 import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
@@ -2097,5 +2098,122 @@ test('ADDED #13: a criterion with no id is not counted as graded, and says so ac
     verdict.ungraded_reason ?? '',
     /declared but could not be graded/,
     `the reason must not claim none were declared: ${JSON.stringify(verdict.ungraded_reason)}`,
+  );
+});
+
+// ---------------------------------------------------------------------------
+// #8 — which gate produced this verdict.
+//
+// THE DEMONSTRATED GAP, not a hypothetical one. The first `gate_pass: true` in the
+// project's history (run `20260801T065609Z-21`, evidence at `e802f1d`) is byte-identical
+// in provenance to a record produced by the PRE-`bb6aaa1` gate — the one that returned a
+// FALSE FAIL on the same correct diff, four spurious `ac_unmapped` findings from an
+// unnormalized join key. `record.suite` is `null` on every production run and `gate.mjs`
+// is a declared `not_member` of the suite digest, so nothing on that record says which
+// ruler graded it. Attribution required reading git by hand.
+//
+// WHY IT IS NOT IN THE SUITE STAMP, which is what task #8's title originally asked for:
+// `config/suite.json`'s `not_members.gate` forbids it in as many words — the gate is the
+// system UNDER TEST, and if every Alfred improvement bumped the suite version no
+// before/after comparison could run against a constant ruler. The precedent for where it
+// DOES go is `config/prices.json`, also a declared not_member, whose version reaches the
+// record as `cost.price_table_version` — on the section it governs, never on the stamp.
+//
+// A CONTENT HASH, not a commit sha. A commit sha says which tree was checked out, not
+// which gate ran: an uncommitted gate edit — which is every gate edit, mid-development —
+// would be misattributed to whatever HEAD claimed. The pre-fix and post-fix gates must
+// differ even before either is committed.
+
+test('ADDED #8: a verdict says which gate produced it', async () => {
+  const verdict = await runGate({
+    config: { verify: {}, off_limits: [] },
+    repoRoot: tempRepo(),
+    acs: [],
+    acMap: [],
+    touched: ['alfred/SKILL.md'],
+    diffstat: [{ file: 'alfred/SKILL.md', added: 3, deleted: 0 }],
+    run: allGreen,
+  });
+
+  assert.equal(typeof verdict.gate_sha, 'string', 'the verdict must name its own grader');
+  assert.match(verdict.gate_sha, /^[0-9a-f]{40}$/, 'a git blob sha, lowercase hex, 40 chars');
+});
+
+test('ADDED #8: the sha is git’s blob sha of lib/gate.mjs, verifiable with hash-object', async () => {
+  // THE FALSIFIER THAT MAKES THE FIELD MEAN SOMETHING. `/^[0-9a-f]{40}$/` above is
+  // satisfied by any constant — sha1 of the empty string would pass it, and a hardcoded
+  // string is exactly the mutant that turns provenance into decoration. So the value is
+  // checked against an INDEPENDENT implementation: `git hash-object`, the tool an operator
+  // would actually reach for when reading a record months later.
+  //
+  // That is the whole point of choosing git's blob format over a bare sha256 of the bytes.
+  // A bare digest is only checkable by re-running our own code, which is no check at all
+  // when the question is whether our own code is what we think it is.
+  const verdict = await runGate({
+    config: { verify: {}, off_limits: [] },
+    repoRoot: tempRepo(),
+    acs: [],
+    acMap: [],
+    touched: ['alfred/SKILL.md'],
+    diffstat: [{ file: 'alfred/SKILL.md', added: 3, deleted: 0 }],
+    run: allGreen,
+  });
+
+  const gatePath = fileURLToPath(new URL('../lib/gate.mjs', import.meta.url));
+  const fromGit = execFileSync('git', ['hash-object', gatePath], { encoding: 'utf8' }).trim();
+
+  assert.equal(verdict.gate_sha, fromGit, 'the sha must be git’s blob sha of lib/gate.mjs');
+});
+
+test('ADDED #8: the sha tracks CONTENT, so an edited gate cannot claim an unedited sha', async () => {
+  // THE PROPERTY THE FIELD EXISTS FOR, and it cannot be tested by editing `lib/gate.mjs`
+  // — the suite runs against the real file. So the hash FUNCTION is exercised directly on
+  // two inputs that differ by one byte, against values `git hash-object --stdin` produced
+  // outside this process:
+  //
+  //     printf 'hello\n' | git hash-object --stdin  ->  ce013625030ba8dba906f756967f9e9ca394464a
+  //     printf ''        | git hash-object --stdin  ->  e69de29bb2d1d6434b8b29ae775ad8c2e48c5391
+  //
+  // The empty case is the one that matters: git's blob format prefixes the byte LENGTH, so
+  // an implementation that hashed only content would still produce 40 hex chars and would
+  // still differ between the two inputs — passing a weaker version of this test while
+  // being unverifiable with the tool the record points a reader at. Pinning the exact
+  // known-answer values is what distinguishes the two.
+  //
+  // Imported dynamically, not at module scope: a missing named export is a module-level
+  // SyntaxError, which collapses all 70+ tests in this file into a single failure. TDD's
+  // rule is that each test fails for ITS OWN reason, and a whole-file parse error tells you
+  // nothing about which behaviour is absent.
+  const { gitBlobSha } = await import('../lib/gate.mjs');
+
+  assert.equal(gitBlobSha(Buffer.from('hello\n')), 'ce013625030ba8dba906f756967f9e9ca394464a');
+  assert.equal(gitBlobSha(Buffer.from('')), 'e69de29bb2d1d6434b8b29ae775ad8c2e48c5391');
+
+  // And a one-byte difference must move it. A constant passes both lines above only if
+  // they are equal, which this asserts they are not.
+  assert.notEqual(gitBlobSha(Buffer.from('hello\n')), gitBlobSha(Buffer.from('hello')));
+});
+
+test('ADDED #8: the sha is on the verdict, NOT in the suite digest — the ruler must not move with the subject', async () => {
+  // A GUARDRAIL, green before and after by construction, so it is mutated rather than
+  // watched to fail (see feedback-mutate-to-prove-a-falsifier). What it prevents: someone
+  // reading task #8's original title and adding `lib/gate.mjs` to `SUITE_MEMBERS`, which
+  // would make every gate fix bump the suite version and leave no two arms comparable.
+  //
+  // `test/suite.test.mjs` already asserts gate.mjs is not a member. This asserts the
+  // OTHER half — that satisfying #8 did not achieve it by that route — and pins the digest
+  // to the literal value `config/suite.json` declares, so a change reaching the digest
+  // fails HERE with a message about the gate rather than only in the suite tests with a
+  // message about a stale stamp.
+  const { computeSuiteDigest, SUITE_MEMBERS } = await import('../lib/suite.mjs');
+
+  assert.ok(
+    !SUITE_MEMBERS.some((m) => m.path === 'lib/gate.mjs'),
+    'gate.mjs must never become a suite member',
+  );
+  assert.equal(
+    computeSuiteDigest(),
+    '88b12fd0be400e1c5d8336c8b28c6c2148d9b0a1e4b7059a998c7b6417e5c0d6',
+    'adding gate_sha must not move the suite digest',
   );
 });

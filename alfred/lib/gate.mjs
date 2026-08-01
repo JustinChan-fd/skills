@@ -42,8 +42,10 @@ import { execFile } from 'node:child_process';
 // runs. Read-only and inside the repo the gate was handed: PLAN.md:186 forbids EDITING the
 // repo, not looking at it, and the alternative — asking the worker which file its linter is —
 // hands the conflict of interest in §8.1 the one answer that matters.
+import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 
 // #69: `matchesGlob` is not called directly here any more. It read an operator's
@@ -53,6 +55,54 @@ import { promisify } from 'node:util';
 import { matchesPathPattern } from './paths.mjs';
 
 const execFileAsync = promisify(execFile);
+
+// WHICH GATE GRADED THIS RUN (#8). The first `gate_pass: true` in this project's history
+// is byte-identical in provenance to a verdict from the PRE-`bb6aaa1` gate — the one that
+// returned a FALSE FAIL on that same correct diff — because nothing on the record said
+// which grader ran. It had to be pinned by reading git by hand.
+//
+// A CONTENT HASH, NOT A COMMIT SHA. A commit sha says which tree was checked out, not
+// which gate ran; an uncommitted gate edit is misattributed to whatever HEAD claimed, and
+// mid-development every gate edit is uncommitted. The whole requirement is that the
+// pre-fix and post-fix graders differ even before either is committed.
+//
+// GIT'S BLOB FORMAT (`sha1("blob <len>\0" + bytes)`), not a bare digest, so the value is
+// checkable with `git hash-object alfred/lib/gate.mjs` by someone reading the record months
+// later. A bare sha256 is only verifiable by re-running our own code, which is no check at
+// all when the question is whether our own code is what we believe it to be. Exported for
+// the same reason: a known-answer test against values git produced outside this process.
+export function gitBlobSha(bytes) {
+  return createHash('sha1')
+    .update(`blob ${bytes.length}\0`)
+    .update(bytes)
+    .digest('hex');
+}
+
+// READ ONCE PER PROCESS, not once per run. `runGate`'s purity test asserts two runs of
+// identical inputs agree, and a file re-read between them could disagree if the source
+// changed mid-process. This also keeps the verdict path free of I/O it cannot fail on
+// usefully — see the try/catch below.
+//
+// NO `git` SHELL-OUT. The gate already execFile's the verify commands, and adding a git
+// dependency to the VERDICT path would make a grader failure (no git, not a repo, a
+// checkout mid-rebase) look like a check failure. Hashing in-process cannot fail that way.
+let GATE_SHA = null;
+
+function gateSha() {
+  if (GATE_SHA === null) {
+    try {
+      GATE_SHA = gitBlobSha(readFileSync(fileURLToPath(import.meta.url)));
+    } catch {
+      // `null`, never a guess. An unreadable grader is unmeasured provenance, and the
+      // failure mode this project keeps hitting is a precise wrong number — the same reason
+      // `cost.total_usd` goes null rather than substituting a second source. A verdict must
+      // never be refused over its own metadata: the findings are the product, the sha is a
+      // label on them.
+      GATE_SHA = false;
+    }
+  }
+  return GATE_SHA === false ? null : GATE_SHA;
+}
 
 // A closed set, same reasoning as `blocked.mjs` REASONS and `gaps.mjs` GAP_CODES: a
 // rule string invented at a call site is invisible to any aggregate over findings, so
@@ -864,5 +914,16 @@ export async function runGate({
         ? 'no acceptance criteria were graded: none were declared'
         : `no acceptance criteria were graded: ${declared} declared but could not be graded`;
 
-  return { pass, findings, unverified, blocked_reason, graded_criteria, ungraded_reason };
+  return {
+    pass,
+    findings,
+    unverified,
+    blocked_reason,
+    graded_criteria,
+    ungraded_reason,
+    // The grader's own identity, travelling WITH the verdict. Not computed by the reporter:
+    // hashing gate.mjs at report time would attach a real-looking sha to a run this gate
+    // never graded.
+    gate_sha: gateSha(),
+  };
 }
