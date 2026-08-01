@@ -168,6 +168,40 @@ export function parseArgv(argv = []) {
   return parsed;
 }
 
+// The accounting, printed for the same reader. A record built and never mentioned is the shape
+// this project keeps finding in its own instruments: `report` is wired now, but a run whose books
+// silently failed to balance looks on the console exactly like one whose books balanced.
+//
+// BOTH COST FIGURES OR NEITHER. `total_usd` is ours, from the copied price table; `vendor_usd` is
+// what the CLI said it charged. Their agreeing is the only evidence the copy is right, and an
+// operator shown one of them cannot notice the day they diverge.
+//
+// A NULL COST IS A SENTENCE, NOT A BLANK. `total_usd: null` means we could not read the spend —
+// printed as such, because a missing line reads as "cheap" and `$0.00` reads as "free".
+export function reportRecord(record, { out, recordError = null }) {
+  if (recordError) {
+    // The reporter itself threw. Said out loud and NOT fatal: the record is a sidecar, and a
+    // scheduler that reads a failed report as a failed run retries a succeeded one at full price.
+    out(`record: FAILED to build — ${recordError}`);
+    return;
+  }
+  if (!record) {
+    out('record: none was built for this run');
+    return;
+  }
+
+  const cost = record.cost ?? {};
+  const ours = typeof cost.total_usd === 'number' ? `$${cost.total_usd.toFixed(6)}` : 'unreadable';
+  const vendor = typeof cost.vendor_usd === 'number' ? `$${cost.vendor_usd}` : 'unreported';
+  out(`record: ${record.ok ? 'ok' : 'INCOMPLETE'} cost ${ours} (vendor ${vendor})`);
+
+  // The reason, on its own line. `ok: false` without a cause is indistinguishable from a run
+  // nobody asked to report on.
+  if (!record.ok && record.error) out(`  reason: ${record.error}`);
+  // A gap does not condemn the record — it says which part of a record worth reading is missing.
+  for (const gap of record.gaps ?? []) out(`  gap ${gap.code}: ${gap.detail ?? ''}`.trimEnd());
+}
+
 // The verdict, printed for whoever reads the tick's output. Findings first: an operator reading
 // a failure wants the rule that fired, not the run's plumbing.
 export function reportVerdict(gate, { out }) {
@@ -293,6 +327,7 @@ export async function main(
     err(`tree not observed: ${result.observed_error} — the evidence rules could not run`);
   }
 
+  reportRecord(result.record ?? null, { out, recordError: result.record_error ?? null });
   reportVerdict(result.gate ?? { pass: false, findings: [] }, { out });
 
   return result.gate?.pass ? EXIT.pass : EXIT.gate_failed;

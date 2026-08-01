@@ -24,7 +24,16 @@
 
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import {
+  chmodSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { after, test } from 'node:test';
@@ -367,4 +376,74 @@ test('a run in a directory that is not a git repository still returns a verdict'
 
   assert.ok([EXIT.pass, EXIT.gate_failed, EXIT.refused].includes(r.status), `got ${r.status}`);
   assert.doesNotMatch(r.stderr, /at .*\.mjs:\d+/, 'an uncaught exception reached the operator');
+});
+
+// --- THE RECORD, ON THE OPERATOR'S SIDE -----------------------------------------------------
+
+test('a completed run prints what its accounting record cost, or says it could not read it', () => {
+  // WHY THE CLI HAS TO SAY SOMETHING. `executeWork` now builds a record by default, and a record
+  // built and then never mentioned is the unwired-tripwire shape this project keeps finding in
+  // its own instruments — the operator's only signal that accounting happened at all.
+  //
+  // THIS RUN'S RECORD DELIBERATELY FAILS, and that is the case worth pinning. The stub is not
+  // `claude`, so it writes no result JSON and there is no session id to name a transcript with.
+  // A run that spends money and cannot be priced must SAY SO on the console rather than print
+  // nothing and let a passing gate imply the books balanced.
+  const dir = repo();
+  const stub = workerStub();
+  const result = run(['work', 'tidy the retry helper', '--worker-bin', stub.path], { cwd: dir });
+
+  assert.equal(result.status, EXIT.pass, result.stderr);
+  assert.match(
+    `${result.stdout}${result.stderr}`,
+    /record|cost|accounting/i,
+    `the run said nothing about its own accounting: ${result.stdout}${result.stderr}`,
+  );
+  // The reason, not just the fact. "no record" with no cause is indistinguishable from a run
+  // nobody asked to report on.
+  assert.match(`${result.stdout}${result.stderr}`, /session id/i);
+});
+
+test('a priced record prints the figure, and prints the vendor figure beside it', () => {
+  // The pass case, driven by a stub that emits the real `--output-format json` shape and by a
+  // transcript planted where the formula says. Both numbers are printed because their agreeing
+  // is the only evidence the copied price table is right — and an operator who can see only one
+  // of them cannot notice the day they stop agreeing.
+  const dir = repo();
+  const home = mktemp('home');
+  const sessionId = 'cccccccc-dddd-eeee-ffff-000000000000';
+
+  const projectDir = join(
+    home,
+    '.claude',
+    'projects',
+    realpathSync(dir).replace(/[^A-Za-z0-9]/g, '-'),
+  );
+  mkdirSync(projectDir, { recursive: true });
+  writeFileSync(
+    join(projectDir, `${sessionId}.jsonl`),
+    JSON.stringify({
+      type: 'assistant',
+      timestamp: '2026-07-31T19:00:00.000Z',
+      message: { model: 'claude-sonnet-5', id: 'm1', usage: { input_tokens: 500000 } },
+    }) + '\n',
+  );
+
+  const stub = workerStub({
+    script: `printf '{"type":"result","session_id":"${sessionId}","total_cost_usd":0.5}'`,
+  });
+  const result = spawnSync(BIN, ['work', 'tidy up', '--worker-bin', stub.path], {
+    cwd: dir,
+    encoding: 'utf8',
+    // HOME is what `transcriptPathFor` resolves the project directory under. An environment
+    // fact, so the composition itself still runs for real.
+    env: { ...process.env, HOME: home },
+  });
+
+  assert.equal(result.status, EXIT.pass, result.stderr);
+  assert.match(result.stdout, /record:/, `no record line: ${result.stdout}`);
+  // Ours, from the price table, over 500k input tokens — a figure no zero-fill could produce.
+  assert.match(result.stdout, /\$1\.5/, `our cost is missing or wrong: ${result.stdout}`);
+  // And the vendor's own, carried beside it rather than instead of it.
+  assert.match(result.stdout, /vendor \$0\.5/, `the vendor figure is missing: ${result.stdout}`);
 });
