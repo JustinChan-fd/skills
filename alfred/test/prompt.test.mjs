@@ -26,6 +26,7 @@ import { fileURLToPath } from 'node:url';
 
 import { MARKER_PATH, REASONS, markerContract } from '../lib/blocked.mjs';
 import { AC_MAP_PATH, acMapContract } from '../lib/acmap.mjs';
+import { AGENT_BRIEFS, AGENT_SEATS } from '../lib/router.mjs';
 import { composeWorkerPrompt, standingRules } from '../lib/prompt.mjs';
 
 const CONFIG = Object.freeze({
@@ -189,6 +190,25 @@ test('the config-declared verify commands reach the prompt, because the gate wil
   const p = compose();
   for (const cmd of Object.values(CONFIG.verify)) {
     assert.ok(p.includes(cmd), `prompt omits verify command: ${cmd}`);
+  }
+});
+
+test('the prompt tells the worker the scan/reason seats exist, byte-identically from router.mjs', () => {
+  // `--agents` WIRES THE SEATS; IT DOES NOT ADVERTISE THEM. router.mjs's own header measured
+  // that `--agents `model`` genuinely routes a delegated call to the named tier — but nothing
+  // in that payload tells the WORKER, in the main context, that delegating is cheap and
+  // available, or when to prefer it. A worker never told a scan seat exists has no reason to
+  // reach for one, which is exactly how `subagents: []` stays empty on every real run. So the
+  // brief each seat carries — the same text sent to the CLI via `--agents`, imported rather
+  // than re-typed for the same reason the marker/ac_map contracts are imported: two copies of
+  // "what scan is for" drift, and a worker reading the stale one delegates on the wrong basis.
+  const p = compose();
+  for (const seat of AGENT_SEATS) {
+    assert.ok(p.includes(seat), `prompt never names the '${seat}' seat`);
+    assert.ok(
+      p.includes(AGENT_BRIEFS[seat].description),
+      `prompt does not carry router.mjs's own description for '${seat}', byte-identically`,
+    );
   }
 });
 

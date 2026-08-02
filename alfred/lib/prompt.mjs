@@ -37,6 +37,7 @@
 
 import { AC_MAP_PATH, acMapContract } from './acmap.mjs';
 import { MARKER_PATH, markerContract } from './blocked.mjs';
+import { AGENT_BRIEFS, AGENT_SEATS } from './router.mjs';
 
 // The fence. Two markers rather than a code fence because a ticket body legitimately contains
 // triple backticks, and a delimiter the content can produce is not a delimiter.
@@ -156,6 +157,24 @@ export function composeWorkerPrompt({ item, config, repoRoot } = {}) {
       '',
     );
   }
+
+  // THE SEATS, ADVERTISED — NOT JUST WIRED. `--agents` (lib/router.mjs) makes the CLI honour a
+  // delegated call at the named tier; it does not tell the worker, in its own context, that
+  // delegating is an option or when it is the cheaper move. A worker never told a seat exists
+  // has no basis to reach for it, which is how `subagents: []` stays empty on a real run. The
+  // brief per seat is imported rather than retyped, for the reason the marker/ac_map contracts
+  // are: two copies of "what scan is for" drift, and a worker reading the stale one delegates on
+  // the wrong basis.
+  lines.push(
+    'You may delegate to a subagent for part of this work. Two tiers are available:',
+    '',
+    ...AGENT_SEATS.map((seat) => `  ${seat}: ${AGENT_BRIEFS[seat].description}`),
+    '',
+    'Prefer delegating a mechanical read to the scan seat over doing it yourself — it is cheaper',
+    'and its answer is a fact, not an argument. Reserve the reason seat for a sub-question that',
+    'genuinely needs judgement rather than a lookup.',
+    '',
+  );
 
   if (offLimits.length > 0) {
     lines.push(
