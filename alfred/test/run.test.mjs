@@ -745,6 +745,175 @@ test('a worker killed at the wall cap is reported as killed and does not pass', 
   );
 });
 
+test('a worker that exhausted its budget is not a graded worker', async () => {
+  // MEASURED ON THE FIRST REAL JIRA RUN, 2026-08-01, and it is the reason this test exists rather
+  // than a hypothesis about one. TARS-1351 spent the whole `--max-budget-usd 8` cap and the CLI
+  // terminated it mid-flight. `worker.log` said so in four separate fields — `is_error: true`,
+  // `subtype: error_max_budget_usd`, `terminal_reason: budget_exhausted`, and an `errors` array —
+  // and `gate: PASS` came back with zero findings on a run that had been cut off.
+  //
+  // WHY THE EXISTING WALL-CAP GUARD DOES NOT COVER THIS, which is the whole defect. `killed` is
+  // set by Alfred's own `setTimeout` (`spawnWorker`), so it means "WE stopped it". A budget kill
+  // happens INSIDE the child, which then exits NORMALLY: exit 0, no signal, `killed: false`. So
+  // the one branch that distinguishes a stopped worker from a finished one is false exactly when
+  // the child stopped for a reason Alfred did not cause. The stub below therefore returns the
+  // measured shape — `exit: 0, killed: false` — and NOT a kill, because a stub that set
+  // `killed: true` would pass against the old code and pin nothing.
+  //
+  // §2.8's principle, one case wider: from the tree's side, a worker that ran out of money looks
+  // exactly like one that chose to stop. The tree here is deliberately CLEAN and the config has
+  // no verify commands, so no other rule can fire and the finding under test is the only thing
+  // that can turn the verdict — if this passes for some unrelated reason, it is not measuring.
+  const repo = repoWithCommit();
+
+  const result = await executeWork({
+    ref: 'audit every handler then write the doc',
+    config: CONFIG,
+    repoRoot: repo,
+    runRoot: mktemp('runs'),
+    stamp: '20260731T120450Z',
+    spawn: stubSpawn((argv, opts) => {
+      // The real payload, trimmed to the fields that carry the outcome. Written to the log the
+      // run will read, because that file is the only place the reason exists — the exit code is
+      // 0 and carries none of it.
+      writeFileSync(
+        opts.logPath,
+        `${JSON.stringify({
+          is_error: true,
+          subtype: 'error_max_budget_usd',
+          terminal_reason: 'budget_exhausted',
+          errors: ['Reached maximum budget ($8)'],
+          session_id: 'b6ec833a-cc3c-4c5c-9abe-17c7be4e53ae',
+          total_cost_usd: 8.022070500000003,
+          num_turns: 71,
+          type: 'result',
+        })}\n`,
+      );
+      return { exit: 0, killed: false, signal: null, wall_ms: 544109, log: opts.logPath };
+    }),
+    report: () => null,
+  });
+
+  assert.ok(result.ok, result.error);
+  // The worker's own report of itself stays what it was: this is not a kill, and relabelling it
+  // as one would trade a true finding for a false detail.
+  assert.equal(result.worker.killed, false);
+  assert.equal(result.gate.pass, false, 'a budget-exhausted run was graded as a pass');
+  const finding = result.gate.findings.find((f) => f.rule === 'check_failed');
+  assert.ok(
+    finding,
+    `expected check_failed, got ${result.gate.findings.map((f) => f.rule).join(', ') || '(none)'}`,
+  );
+  // THE REASON, not just the rule. An operator reading `check_failed` acts differently on "the
+  // test suite failed" than on "it ran out of money" — the first is the worker's work, the second
+  // is the cap. A finding that fires with the wrong detail sends them at the wrong thing.
+  //
+  // MATCHED ON THE REASON TOKEN, not on the word "budget", and that is mutation-scored rather
+  // than stylistic: `/budget/i` SURVIVED a mutant that replaced `${terminal.reason}` with a
+  // generic string, because the `errors` prose this detail also quotes happens to contain
+  // "maximum budget". The loose pattern was being satisfied by the vendor's English instead of by
+  // the field the finding is supposed to carry.
+  assert.match(
+    finding.detail,
+    /budget_exhausted/,
+    `check_failed fired without naming the terminal reason: ${finding.detail}`,
+  );
+  // And the operator-facing numbers, which are the two things that make the finding actionable:
+  // what it cost before it stopped, and how far it got.
+  // `8.022071`, not `8.0220705`: the detail rounds to 6dp, which is the precision the record and
+  // the vendor already agree at. Asserted at that precision rather than on the raw float, because
+  // pinning `8.022070` here would be pinning a rounding bug that does not exist.
+  assert.match(finding.detail, /\$8\.022071\b/, `the detail omits what the run spent: ${finding.detail}`);
+  assert.match(finding.detail, /71 turns/, `the detail omits how far it got: ${finding.detail}`);
+});
+
+test('a terminal reason alone stops the run, without waiting for is_error', async () => {
+  // A SECOND PROPOSITION, split out because it is not the one above. Mutation-scored: "read only
+  // `is_error` and ignore `terminal_reason`/`subtype`" SURVIVED the budget test, because that
+  // fixture is the measured payload and carries BOTH. A guard resting on one field is one vendor
+  // rename away from silently passing every truncated run again, and the failure direction is the
+  // one this whole finding exists to close.
+  //
+  // The fixture is therefore the payload MINUS `is_error` — deliberately not a shape I have
+  // measured, and that is the point of it: the claim under test is that the check does not depend
+  // on which of the three fields survives, so the fixture has to remove one.
+  const repo = repoWithCommit();
+
+  const result = await executeWork({
+    ref: 'work until something stops you',
+    config: CONFIG,
+    repoRoot: repo,
+    runRoot: mktemp('runs'),
+    stamp: '20260731T120455Z',
+    spawn: stubSpawn((argv, opts) => {
+      writeFileSync(
+        opts.logPath,
+        `${JSON.stringify({
+          terminal_reason: 'context_exhausted',
+          session_id: 'e0de647e-0000-0000-0000-000000000000',
+          total_cost_usd: 3.5,
+          num_turns: 40,
+          type: 'result',
+        })}\n`,
+      );
+      return { exit: 0, killed: false, signal: null, wall_ms: 200000, log: opts.logPath };
+    }),
+    report: () => null,
+  });
+
+  assert.ok(result.ok, result.error);
+  assert.equal(result.gate.pass, false, 'a run terminated for a non-budget reason was graded a pass');
+  const finding = result.gate.findings.find((f) => f.rule === 'check_failed');
+  assert.ok(finding, `expected check_failed, got ${result.gate.findings.map((f) => f.rule).join(', ') || '(none)'}`);
+  // The reason is carried VERBATIM rather than mapped to a category. `context_exhausted` is not a
+  // budget kill and must not be reported as one — a finding that renames what happened is how an
+  // operator comes to raise the wrong cap.
+  assert.match(finding.detail, /context_exhausted/, `the reason was not carried: ${finding.detail}`);
+});
+
+test('a clean run is NOT reported as terminated — the guard can tell the difference', async () => {
+  // THE FALSIFIER for both tests above, and it is not hypothetical: a guard that raised
+  // `check_failed` on every log would satisfy each of them perfectly while failing every honest
+  // run. This is the `unfalsifiable_conjunct` lesson — "it has never returned true" and "it cannot
+  // return true" are different claims, and only this test separates them.
+  //
+  // The payload is a SUCCESSFUL result, which is the shape the overwhelming majority of runs
+  // write: `is_error: false`, `subtype: success`.
+  const repo = repoWithCommit();
+
+  const result = await executeWork({
+    ref: 'a job that finishes',
+    config: CONFIG,
+    repoRoot: repo,
+    runRoot: mktemp('runs'),
+    stamp: '20260731T120458Z',
+    spawn: stubSpawn((argv, opts) => {
+      writeFileSync(
+        opts.logPath,
+        `${JSON.stringify({
+          is_error: false,
+          subtype: 'success',
+          stop_reason: 'end_turn',
+          session_id: 'aaaaaaaa-0000-0000-0000-000000000000',
+          total_cost_usd: 0.42,
+          num_turns: 9,
+          type: 'result',
+        })}\n`,
+      );
+      return { exit: 0, killed: false, signal: null, wall_ms: 30000, log: opts.logPath };
+    }),
+    report: () => null,
+  });
+
+  assert.ok(result.ok, result.error);
+  assert.deepEqual(
+    result.gate.findings.filter((f) => /did not finish/.test(f.detail ?? '')),
+    [],
+    'a completed run was reported as terminated',
+  );
+  assert.equal(result.gate.pass, true, `a clean run did not pass: ${JSON.stringify(result.gate.findings)}`);
+});
+
 test('the argv handed to the worker comes from the router and carries the composed prompt', async () => {
   // §2.1 step 4. Asserted on the argv the spawn actually received, because a router called and
   // then ignored is the same as no router — and the flags a run used have to be recoverable
@@ -833,6 +1002,10 @@ test('a completed run produces an accounting record from the transcript its work
     runRoot: mktemp('runs'),
     stamp: '20260731T185038Z',
     home,
+    // Fixes the id Step 4 generates to the one the fixture's transcript was filed under —
+    // exactly what `--session-id` being CLI-honored means in practice: the id is known before
+    // the worker runs, not parsed back out afterward.
+    newSessionId: () => sessionId,
     spawn: stubSpawn((argv, opts) => {
       // The real `--output-format json` result shape. Written to the log the runner named,
       // because reading it back from there is the step under test.
@@ -891,6 +1064,7 @@ test('the vendor CLI cost and our own are BOTH recorded, because agreement is th
     runRoot: mktemp('runs'),
     stamp: '20260731T185039Z',
     home,
+    newSessionId: () => sessionId,
     spawn: stubSpawn((argv, opts) => {
       writeFileSync(opts.logPath, JSON.stringify({ session_id: sessionId, total_cost_usd: 7.5 }));
       return { exit: 0, killed: false, signal: null, wall_ms: 1, log: opts.logPath };
@@ -901,11 +1075,46 @@ test('the vendor CLI cost and our own are BOTH recorded, because agreement is th
   assert.ok(result.record.cost.total_usd !== 7.5, 'ours was replaced by the vendor figure');
 });
 
+test('the id Step 4 generates is the SAME id the worker receives and the reporter files under', async () => {
+  // The whole point of pre-generating the id: one value, two independent confirmations. If the
+  // worker got a different id than the report was built with, `--session-id` being CLI-honored
+  // would buy nothing — the reporter would be back to parsing the log to find out what happened.
+  const repo = repoWithCommit();
+  const home = mktemp('home');
+  const knownId = 'known-one-id-two-uses-7777-888888888888';
+  let argvSeen;
+
+  const result = await executeWork({
+    ref: 'do the thing',
+    config: CONFIG,
+    repoRoot: repo,
+    runRoot: mktemp('runs'),
+    stamp: '20260731T185039Z',
+    home,
+    newSessionId: () => knownId,
+    spawn: stubSpawn((argv, opts) => {
+      argvSeen = argv;
+      writeFileSync(opts.logPath, JSON.stringify({ session_id: knownId, total_cost_usd: 0.01 }));
+      return { exit: 0, killed: false, signal: null, wall_ms: 1, log: opts.logPath };
+    }),
+  });
+
+  const at = argvSeen.indexOf('--session-id');
+  assert.ok(at !== -1, '--session-id never reached the worker argv');
+  assert.equal(argvSeen[at + 1], knownId, 'the worker got a different id than the one generated');
+  assert.equal(result.record.session.id, knownId, 'the report was filed under a different id');
+});
+
 test('a transcript that is not where the formula says is a named gap, not a silent zero', async () => {
   // The failure that matters: the formula is a vendor convention, so it can go stale under us.
   // When it does, every run reports as unmeasurable — and the record must SAY that rather than
   // report $0.00, which is plottable and false (the never-zero-fill rule).
+  //
+  // The KNOWN id, not the log's, is what the path gets composed from — `run.mjs` generates one at
+  // Step 4 whether or not the worker ever echoes it back correctly, so a stale-formula failure now
+  // surfaces under the id Alfred actually asked for.
   const repo = repoWithCommit();
+  const knownId = 'known-no-transcript-1111-2222-333333333333';
   const result = await executeWork({
     ref: 'do the thing',
     config: CONFIG,
@@ -913,6 +1122,7 @@ test('a transcript that is not where the formula says is a named gap, not a sile
     runRoot: mktemp('runs'),
     stamp: '20260731T185040Z',
     home: mktemp('empty-home'),
+    newSessionId: () => knownId,
     spawn: stubSpawn((argv, opts) => {
       writeFileSync(opts.logPath, JSON.stringify({ session_id: 'no-such-session' }));
       return { exit: 0, killed: false, signal: null, wall_ms: 1, log: opts.logPath };
@@ -922,13 +1132,18 @@ test('a transcript that is not where the formula says is a named gap, not a sile
   assert.equal(result.ok, true, 'an unreadable transcript failed the run it was reporting on');
   assert.equal(result.record.ok, false);
   assert.equal(result.record.cost.total_usd, null, 'an unread run was priced at zero');
-  assert.match(result.record.error, /no-such-session/, 'the error does not name what it looked for');
+  assert.match(result.record.error, new RegExp(knownId), 'the error does not name what it looked for');
 });
 
-test('a worker log with no session id reports the hole and never composes undefined.jsonl', async () => {
-  // The wrong-session defect, refused at the source. `<project-dir>/undefined.jsonl` from an
-  // earlier bug would be read as this run's, and the number would be confident and wrong.
+test('a worker log with no session id still composes a path, from the id Alfred generated', async () => {
+  // Superseded by `--session-id` being CLI-honored: `executeWork` now generates the id at Step 4
+  // and hands it to BOTH the worker and the reporter, so "no session id anywhere" is no longer
+  // reachable through this path — there is always a known one. What a failed launch (valid JSON,
+  // no id in the log) now degrades to is a MISMATCH-proof, not a blackout: the known id still
+  // names a transcript, and finding none there is an ordinary unreadable-transcript gap, not the
+  // wrong-session defect `<project-dir>/undefined.jsonl` used to risk.
   const repo = repoWithCommit();
+  const knownId = 'known-no-log-id-4444-5555-666666666666';
   const result = await executeWork({
     ref: 'do the thing',
     config: CONFIG,
@@ -936,6 +1151,7 @@ test('a worker log with no session id reports the hole and never composes undefi
     runRoot: mktemp('runs'),
     stamp: '20260731T185041Z',
     home: mktemp('home'),
+    newSessionId: () => knownId,
     spawn: stubSpawn((argv, opts) => {
       // An error result: valid JSON, no id. The shape a failed launch actually leaves.
       writeFileSync(opts.logPath, JSON.stringify({ type: 'result', is_error: true }));
@@ -950,7 +1166,7 @@ test('a worker log with no session id reports the hole and never composes undefi
     !/undefined\.jsonl/.test(result.record.error ?? ''),
     `composed a path from a missing id: ${result.record.error}`,
   );
-  assert.match(result.record.error, /session id/i);
+  assert.match(result.record.error, new RegExp(knownId), 'the composed path did not use the known id');
 });
 
 test('reporting cannot fail the run: a reporter that throws is caught and named', async () => {

@@ -465,6 +465,16 @@ export function recordFromHookPayload(payload = {}, extra = {}) {
 // `transcriptPathFor` composes one candidate from it. If the file is not there the record says
 // so and names the path, which is how a stale vendor convention becomes diagnosable instead of
 // becoming a fleet of runs that all cost $0.00.
+//
+// THE KNOWN ID, PREFERRED OVER THE LOGGED ONE. MEASURED 2026-08-01: `--session-id <uuid>` is
+// honoured by the CLI — the supplied id comes back verbatim in the log's own `session_id`. So a
+// caller that generated the id BEFORE spawning (as `run.mjs`'s `executeWork` now does) knows the
+// transcript path without reading the log at all, and that path survives exactly the failure
+// this reporter used to be helpless against: a worker killed mid-write leaves a log
+// `sessionFromWorkerLog` cannot parse, and before this, no parse meant no id, no path, no
+// record — for the run whose accounting matters most. `session.id` on the way in is that known
+// id; the log's own account is still read and cross-checked, per this project's standing "never
+// trust one source" rule, and a disagreement is a named gap rather than a silent override.
 export function recordForRun({
   workerLog = null,
   cwd = null,
@@ -473,8 +483,10 @@ export function recordForRun({
   ...extra
 } = {}) {
   const found = sessionFromWorkerLog(workerLog);
+  const knownId = typeof session.id === 'string' && session.id.trim() ? session.id : null;
+  const sessionId = knownId ?? found.session_id;
 
-  if (!found.session_id) {
+  if (!sessionId) {
     // REFUSED BEFORE COMPOSING A PATH. Without an id the formula yields
     // `<project-dir>/undefined.jsonl`, and a stale file left there by an earlier bug would be
     // read as this run's — a confident number for the wrong session, which is the one failure
@@ -483,25 +495,39 @@ export function recordForRun({
     return buildRecord({
       ...extra,
       transcriptPath: null,
-      session: { cwd, ...session },
+      session: { ...session, cwd },
       workerCostUsd: found.total_cost_usd,
       error: 'the worker log carried no session id, so no transcript could be named',
     });
   }
 
+  const gaps = newGaps();
+  if (found.session_id && found.session_id !== sessionId) {
+    noteGap(
+      gaps,
+      'session-id-mismatch',
+      `Alfred generated ${sessionId} but the worker log reported ${found.session_id}`,
+    );
+  }
+
   const home_ = home === undefined ? {} : { home };
-  return buildRecord({
+  const record = buildRecord({
     ...extra,
-    transcriptPath: transcriptPathFor({ cwd, sessionId: found.session_id, ...home_ }),
+    transcriptPath: transcriptPathFor({ cwd, sessionId, ...home_ }),
     // Derived the same way the hook path derives it: sibling of the transcript, named for the
     // session. One formula, so a subagent layout change breaks both paths at once rather than
     // leaving one of them quietly reading nothing.
     subagentsDir: join(
       projectDirFor(cwd, home_),
-      found.session_id,
+      sessionId,
       'subagents',
     ),
-    session: { id: found.session_id, cwd, ...session },
+    session: { ...session, id: sessionId, cwd },
     workerCostUsd: found.total_cost_usd,
   });
+
+  // Merged rather than overwritten: `buildRecord` already ran its own gap checks (an absent
+  // subagents dir, the usage tripwire) and this adds to that list, it does not replace it.
+  if (record.ok && gaps.length > 0) record.gaps.push(...gaps);
+  return record;
 }

@@ -157,13 +157,34 @@ test('ADDED: the default budget is the pre-registered KILL cap, not the acceptan
   assert.equal(budgetUsdFor({}), 8);
 });
 
-test('ADDED: --permission-mode bypassPermissions and --output-format json are both present', () => {
-  // The run is priced from the transcript and the record is parsed from the json payload, so
-  // both are load-bearing rather than conveniences. Same pair the arm C runner used, which is
-  // what keeps a production run comparable to a measured one.
+test('ADDED: --permission-mode bypassPermissions and --output-format stream-json are both present', () => {
+  // The run is priced from the transcript and the record is parsed from this payload, so both
+  // are load-bearing rather than conveniences. stream-json rather than the single-object json
+  // mode so the log fills in as the worker runs — the operator was otherwise flying blind for
+  // the whole run. transcript.mjs's two log readers were changed to read the LAST line rather
+  // than the whole blob, so this switch does not change what the accounting can see.
   const argv = argvOf();
   assert.equal(flag(argv, '--permission-mode'), 'bypassPermissions');
-  assert.equal(flag(argv, '--output-format'), 'json');
+  assert.equal(flag(argv, '--output-format'), 'stream-json');
+});
+
+test('ADDED: --verbose is present, because stream-json refuses to run without it', () => {
+  // MEASURED 2026-08-01: `claude -p --output-format stream-json` with no --verbose is a hard
+  // CLI error before anything spawns ("requires --verbose"). Not an enhancement — the flag the
+  // switch above cannot work without.
+  assert.ok(argvOf().includes('--verbose'));
+});
+
+test('ADDED: --session-id is carried only when given, and is not generated in here', () => {
+  // Absent by default so the M5 purity test above (two calls, deep-equal argv) keeps holding —
+  // `randomUUID()` inside this function would make every call differ. The id is the caller's
+  // to generate, so the transcript path can be composed before the worker writes a byte.
+  assert.equal(flag(argvOf(), '--session-id'), null);
+  const id = '32e90f59-ff6b-4cf4-a5ac-6cd0358a9b89';
+  assert.equal(
+    flag(workerArgv({ config: CONFIG, prompt: 'p', sessionId: id }), '--session-id'),
+    id,
+  );
 });
 
 test('ADDED: an append-system-prompt is carried when given, and absent when not', () => {

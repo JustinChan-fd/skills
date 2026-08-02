@@ -44,6 +44,7 @@
 
 import { spawn } from 'node:child_process';
 import { execFile } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import { closeSync, mkdirSync, openSync, readFileSync, writeFileSync } from 'node:fs';
 import { basename, dirname, join, resolve } from 'node:path';
 import { promisify } from 'node:util';
@@ -55,6 +56,7 @@ import { runGate } from './gate.mjs';
 import { SEATS } from './models.mjs';
 import { composeWorkerPrompt, standingRules } from './prompt.mjs';
 import { workerArgv } from './router.mjs';
+import { terminalErrorFromWorkerLog } from './transcript.mjs';
 
 const execFileAsync = promisify(execFile);
 
@@ -393,6 +395,14 @@ export async function executeWork({
   // read and priced. Substituting the reporter instead would re-create the mocked-seam blindness
   // that let three defects through a suite green on all of them.
   home = undefined,
+  // Injected so a test can assert the SAME id reaches both `--session-id` and the composed
+  // transcript path, without depending on the real generator's randomness. Real default is
+  // `randomUUID`: pre-generating the id here (rather than parsing it back out of the worker log
+  // after the fact) is what lets a caller compose the transcript path before the worker has
+  // written a byte, and it means `--session-id` and `sessionFromWorkerLog`'s reading of the
+  // stream-json log are two independent confirmations of the same session, not one derived
+  // from the other.
+  newSessionId = randomUUID,
 } = {}) {
   const root = typeof repoRoot === 'string' ? repoRoot : '';
   if (!root) return { ok: false, error: 'no repoRoot: nothing to work in', run_dir: null };
@@ -448,6 +458,7 @@ export async function executeWork({
   // not resolved and then quietly discarded.
 
   // Step 4. The prompt and the flags, both from the modules that own them.
+  const sessionId = newSessionId();
   let argv;
   try {
     argv = workerArgv({
@@ -455,6 +466,7 @@ export async function executeWork({
       prompt: composeWorkerPrompt({ item, config: cfg, repoRoot: root }),
       appendSystemPrompt: standingRules(),
       maxTurns,
+      sessionId,
     });
   } catch (err) {
     return { ok: false, error: err.message, run_dir: runDir };
@@ -505,6 +517,24 @@ export async function executeWork({
     });
   }
 
+  // NOR IS A WORKER THAT STOPPED FOR ITS OWN REASONS. The clause above only sees kills ALFRED
+  // caused; `killed` is its own timer's flag. Measured on TARS-1351: the CLI hit
+  // `--max-budget-usd 8`, terminated the worker mid-flight, and exited 0 with `killed: false`, so
+  // that branch was false and the verdict came back PASS with zero findings on a truncated run.
+  // The reason exists only in the log, which is why this reads the log and not the exit code.
+  const terminal = terminalErrorFromWorkerLog(readLogText(worker?.log));
+  if (terminal) {
+    const spent = terminal.cost_usd === null ? '' : ` after $${terminal.cost_usd.toFixed(6)}`;
+    const turns = terminal.turns === null ? '' : ` and ${terminal.turns} turns`;
+    findings.push({
+      rule: 'check_failed',
+      detail:
+        `the worker did not finish: the CLI reported ${terminal.reason}${spent}${turns}` +
+        (terminal.errors.length > 0 ? ` — ${terminal.errors.join('; ')}` : ''),
+      evidence: `log: ${worker?.log}`,
+    });
+  }
+
   const gate = {
     ...verdict,
     findings,
@@ -532,7 +562,15 @@ export async function executeWork({
         ac_count: item.acceptance_criteria?.length ?? null,
       },
       gate,
-      session: { run_id: basename(runDir), repo: cfg.repo ?? null, wall_ms: worker?.wall_ms ?? null },
+      // `sessionId` is the id THIS function generated at Step 4 and handed to the worker via
+      // `--session-id` — known before the log exists, so `recordForRun` composes the transcript
+      // path from it rather than waiting to parse it back out of the worker's own log.
+      session: {
+        id: sessionId,
+        run_id: basename(runDir),
+        repo: cfg.repo ?? null,
+        wall_ms: worker?.wall_ms ?? null,
+      },
       sink: cfg.telemetry?.sink ?? null,
     });
   } catch (err) {

@@ -123,3 +123,46 @@ test('a log that parses but carries no session id is not mistaken for one that d
   assert.equal(found.session_id, null);
   assert.equal(found.total_cost_usd, null);
 });
+
+test('ADDED: a stream-json log is many lines, and the session lives in the LAST one', () => {
+  // Real shape, measured live 2026-08-01 from `claude -p --output-format stream-json
+  // --verbose`: a system/hook_started line, a system/hook_response line, a system/init line,
+  // an assistant message line, then the terminal result line — the same terminal object
+  // `--output-format json` writes as its only line. `JSON.parse` on the whole blob throws on
+  // this shape, and the old implementation's catch returns nulls: a session that ran to
+  // completion is reported identically to one that never wrote a byte.
+  const lines = [
+    JSON.stringify({ type: 'system', subtype: 'hook_started' }),
+    JSON.stringify({ type: 'system', subtype: 'hook_response', hook: 'huge context here' }),
+    JSON.stringify({ type: 'system', subtype: 'init', tools: ['a', 'b'] }),
+    JSON.stringify({
+      type: 'assistant',
+      message: { content: [{ type: 'text', text: '4' }] },
+      session_id: '32e90f59-ff6b-4cf4-a5ac-6cd0358a9b89',
+    }),
+    JSON.stringify({
+      type: 'result',
+      is_error: false,
+      num_turns: 1,
+      session_id: '32e90f59-ff6b-4cf4-a5ac-6cd0358a9b89',
+      total_cost_usd: 0.27543449999999997,
+    }),
+  ];
+  const found = sessionFromWorkerLog(lines.join('\n'));
+  assert.equal(found.session_id, '32e90f59-ff6b-4cf4-a5ac-6cd0358a9b89');
+  assert.equal(found.total_cost_usd, 0.27543449999999997);
+});
+
+test('ADDED: a stream-json log truncated mid-write still yields nulls, never an exception', () => {
+  // The wall-cap kill: earlier lines are complete JSON, the last is a half-written fragment.
+  // Falling back to a whole-blob parse on failure would have hit this fragment as text; the
+  // fix must walk backwards past it rather than giving up at the first unparseable line.
+  const lines = [
+    JSON.stringify({ type: 'system', subtype: 'init' }),
+    JSON.stringify({ type: 'assistant', message: { content: [] } }),
+    '{"type": "result", "session_id": "abc", "tot',
+  ];
+  const found = sessionFromWorkerLog(lines.join('\n'));
+  assert.equal(found.session_id, null);
+  assert.equal(found.total_cost_usd, null);
+});

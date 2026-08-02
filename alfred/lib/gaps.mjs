@@ -17,6 +17,7 @@
 export const GAP_CODES = Object.freeze({
   'subagents-unreadable': 'the subagents directory exists but could not be read',
   'session-id-absent': 'no session id was available to join on',
+  'session-id-mismatch': 'the session id Alfred generated disagrees with the one the worker log reported',
   'run-window-guessed': 'the run window was inferred rather than given',
   'no-usable-usage': 'lines parsed, but none carried a usage record',
   'model-id-disagreement': 'sources reported different model ids for one call',

@@ -514,7 +514,9 @@ test('a completed run prints what its accounting record cost, or says it could n
   // its own instruments — the operator's only signal that accounting happened at all.
   //
   // THIS RUN'S RECORD DELIBERATELY FAILS, and that is the case worth pinning. The stub is not
-  // `claude`, so it writes no result JSON and there is no session id to name a transcript with.
+  // `claude`, so it writes no result JSON — but `executeWork` now generates a session id itself
+  // and hands it to the worker via `--session-id` before the run starts, so there IS a known id,
+  // and the failure this run hits is an unreadable transcript under that id, not a missing one.
   // A run that spends money and cannot be priced must SAY SO on the console rather than print
   // nothing and let a passing gate imply the books balanced.
   const dir = repo();
@@ -529,7 +531,7 @@ test('a completed run prints what its accounting record cost, or says it could n
   );
   // The reason, not just the fact. "no record" with no cause is indistinguishable from a run
   // nobody asked to report on.
-  assert.match(`${result.stdout}${result.stderr}`, /session id/i);
+  assert.match(`${result.stdout}${result.stderr}`, /transcript/i);
 });
 
 test('a priced record prints the figure, and prints the vendor figure beside it', () => {
@@ -537,9 +539,14 @@ test('a priced record prints the figure, and prints the vendor figure beside it'
   // transcript planted where the formula says. Both numbers are printed because their agreeing
   // is the only evidence the copied price table is right — and an operator who can see only one
   // of them cannot notice the day they stop agreeing.
+  //
+  // THE ID IS NOT KNOWN UNTIL THE WORKER IS SPAWNED — `executeWork` generates it and hands it to
+  // the worker via `--session-id`, so this test cannot plant a transcript under a hardcoded id in
+  // advance. The stub reads its OWN `--session-id` argument back out of argv and writes the
+  // transcript and its own result JSON under that id, the same way the real CLI's `session_id`
+  // in its result JSON is the id it was told to use, not one it invented.
   const dir = repo();
   const home = mktemp('home');
-  const sessionId = 'cccccccc-dddd-eeee-ffff-000000000000';
 
   const projectDir = join(
     home,
@@ -548,17 +555,24 @@ test('a priced record prints the figure, and prints the vendor figure beside it'
     realpathSync(dir).replace(/[^A-Za-z0-9]/g, '-'),
   );
   mkdirSync(projectDir, { recursive: true });
-  writeFileSync(
-    join(projectDir, `${sessionId}.jsonl`),
-    JSON.stringify({
-      type: 'assistant',
-      timestamp: '2026-07-31T19:00:00.000Z',
-      message: { model: 'claude-sonnet-5', id: 'm1', usage: { input_tokens: 500000 } },
-    }) + '\n',
-  );
 
   const stub = workerStub({
-    script: `printf '{"type":"result","session_id":"${sessionId}","total_cost_usd":0.5}'`,
+    script: [
+      'sid=""',
+      'prev=""',
+      'for a in "$@"; do',
+      '  if [ "$prev" = "--session-id" ]; then sid="$a"; fi',
+      '  prev="$a"',
+      'done',
+      `cat > '${projectDir}/'"$sid"'.jsonl' <<'JSONL'`,
+      JSON.stringify({
+        type: 'assistant',
+        timestamp: '2026-07-31T19:00:00.000Z',
+        message: { model: 'claude-sonnet-5', id: 'm1', usage: { input_tokens: 500000 } },
+      }),
+      'JSONL',
+      'printf \'{"type":"result","session_id":"%s","total_cost_usd":0.5}\' "$sid"',
+    ].join('\n'),
   });
   const result = spawnSync(BIN, ['work', 'tidy up', '--worker-bin', stub.path], {
     cwd: dir,

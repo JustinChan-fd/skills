@@ -50,12 +50,12 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, writeFileSync, mkdirSync, rmSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, mkdirSync, rmSync, realpathSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 
-import { buildRecord, recordFromHookPayload } from '../lib/report.mjs';
+import { buildRecord, recordFromHookPayload, recordForRun } from '../lib/report.mjs';
 import { suiteStamp, loadSuiteConfig, computeSuiteDigest } from '../lib/suite.mjs';
 
 // A stamp's `at` is the record's own timestamp, never `now()` — the rule `priceTokens`
@@ -832,4 +832,138 @@ test('ADDED #8: an absent sha is null, never a guess — unmeasured is not zero'
   assert.equal(record.ok, true, 'the fixture must exercise the SUCCESS path');
   assert.equal(record.gate.pass, null, 'no verdict supplied');
   assert.equal(record.gate.gate_sha, null, 'an unsupplied grader must be null, not synthesized');
+});
+
+// --- ADDED: recordForRun prefers the id Alfred generated over the one it parsed back ------
+
+test('ADDED: recordForRun composes the path from the KNOWN id, not the log-parsed one', () => {
+  // §2c. `--session-id` is honoured by the CLI (measured live 2026-08-01), so Alfred can hand
+  // the worker an id it generated itself BEFORE the worker writes a byte. That id is why the
+  // transcript path can be composed in advance rather than discovered — so it is the one
+  // `recordForRun` should trust, with the log's own `session_id` kept as a second,
+  // independent confirmation rather than the source. A caller that has the known id should
+  // never be worse off than one that does not.
+  const dir = tmp();
+  const knownId = 'known-1111-2222-3333-444444444444';
+  const projectDir = join(dir, '.claude', 'projects', realpathSync(dir).replace(/[^A-Za-z0-9]/g, '-'));
+  mkdirSync(projectDir, { recursive: true });
+  writeFileSync(
+    join(projectDir, `${knownId}.jsonl`),
+    JSON.stringify({
+      type: 'assistant',
+      timestamp: '2026-08-01T00:00:00.000Z',
+      message: { model: 'claude-sonnet-5', id: 'm1', usage: { input_tokens: 500 } },
+    }) + '\n',
+  );
+
+  const workerLog = JSON.stringify({
+    type: 'result',
+    session_id: knownId,
+    total_cost_usd: 0.01,
+  });
+
+  const record = recordForRun({
+    workerLog,
+    cwd: dir,
+    home: dir,
+    session: { id: knownId, run_id: 'r1' },
+  });
+
+  assert.equal(record.ok, true, `record failed: ${record.error}`);
+  assert.equal(record.session.id, knownId);
+  assert.equal(record.tokens.by_model['claude-sonnet-5'].input, 500);
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test('ADDED: a known id survives even when the worker log is unparseable', () => {
+  // The whole point of pre-generating the id: the transcript path no longer depends on the
+  // log parsing cleanly. A worker killed mid-write leaves a log `sessionFromWorkerLog` cannot
+  // read at all — before this, that meant no id, no path, no record. The known id still
+  // composes one.
+  const dir = tmp();
+  const knownId = 'known-5555-6666-7777-888888888888';
+  const projectDir = join(dir, '.claude', 'projects', realpathSync(dir).replace(/[^A-Za-z0-9]/g, '-'));
+  mkdirSync(projectDir, { recursive: true });
+  writeFileSync(
+    join(projectDir, `${knownId}.jsonl`),
+    JSON.stringify({
+      type: 'assistant',
+      timestamp: '2026-08-01T00:00:00.000Z',
+      message: { model: 'claude-sonnet-5', id: 'm1', usage: { input_tokens: 10 } },
+    }) + '\n',
+  );
+
+  const record = recordForRun({
+    workerLog: '{"type": "result", "session_id": "kn',
+    cwd: dir,
+    home: dir,
+    session: { id: knownId },
+  });
+
+  assert.equal(record.ok, true, `record failed: ${record.error}`);
+  assert.equal(record.session.id, knownId);
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test('ADDED: a known id that disagrees with the log-parsed one is a named gap, not a silent override', () => {
+  // Two independent sources for the same fact, per this project's standing "never trust one
+  // source" rule ([[project_otel_bedrock_verified]]). Agreement is unremarkable; disagreement
+  // means either Alfred's `--session-id` was not honoured for this call or the log belongs to
+  // a different session entirely — either way, worth surfacing rather than swallowing.
+  const dir = tmp();
+  const knownId = 'known-9999-0000-1111-222222222222';
+  const projectDir = join(dir, '.claude', 'projects', realpathSync(dir).replace(/[^A-Za-z0-9]/g, '-'));
+  mkdirSync(projectDir, { recursive: true });
+  writeFileSync(
+    join(projectDir, `${knownId}.jsonl`),
+    JSON.stringify({
+      type: 'assistant',
+      timestamp: '2026-08-01T00:00:00.000Z',
+      message: { model: 'claude-sonnet-5', id: 'm1', usage: { input_tokens: 10 } },
+    }) + '\n',
+  );
+
+  const record = recordForRun({
+    workerLog: JSON.stringify({ type: 'result', session_id: 'a-different-session-entirely' }),
+    cwd: dir,
+    home: dir,
+    session: { id: knownId },
+  });
+
+  assert.equal(record.ok, true, `record failed: ${record.error}`);
+  assert.equal(record.session.id, knownId, 'the known id must still be what the record is filed under');
+  assert.ok(
+    record.gaps.some((g) => g.code === 'session-id-mismatch'),
+    'a disagreement between the known id and the log must be named',
+  );
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test('ADDED: with no known id, recordForRun still falls back to the log-parsed one', () => {
+  // The pre-existing path, unbroken: a caller that does not yet know its own id (the hook
+  // path predates this, and any caller that has not adopted `--session-id`) still gets a
+  // record from what the log carries.
+  const dir = tmp();
+  const loggedId = 'logged-3333-4444-5555-666666666666';
+  const projectDir = join(dir, '.claude', 'projects', realpathSync(dir).replace(/[^A-Za-z0-9]/g, '-'));
+  mkdirSync(projectDir, { recursive: true });
+  writeFileSync(
+    join(projectDir, `${loggedId}.jsonl`),
+    JSON.stringify({
+      type: 'assistant',
+      timestamp: '2026-08-01T00:00:00.000Z',
+      message: { model: 'claude-sonnet-5', id: 'm1', usage: { input_tokens: 10 } },
+    }) + '\n',
+  );
+
+  const record = recordForRun({
+    workerLog: JSON.stringify({ type: 'result', session_id: loggedId }),
+    cwd: dir,
+    home: dir,
+    session: {},
+  });
+
+  assert.equal(record.ok, true, `record failed: ${record.error}`);
+  assert.equal(record.session.id, loggedId);
+  rmSync(dir, { recursive: true, force: true });
 });

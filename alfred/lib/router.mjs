@@ -54,7 +54,15 @@ const DEFAULT_BUDGET_USD = 8;
 // Each tier's brief. These reach the model, so they say what the seat is FOR — a description
 // that does not distinguish the tiers gives the delegating context no basis to pick one, and it
 // will default to whatever it read last.
-const AGENT_BRIEFS = Object.freeze({
+//
+// Exported so lib/prompt.mjs can tell the WORKER these seats exist, byte-identically. `--agents`
+// wires a seat so the CLI will honour a delegated call, but this module's own header is explicit
+// that it only measured the routing effect — nothing about that payload tells the main context a
+// seat is there to be reached for. A worker never told a seat exists has no basis to delegate to
+// it. Same anti-drift reason the marker/ac_map contracts are imported rather than retyped: two
+// copies of "what scan is for" disagree eventually, and the worker reading the stale one
+// delegates on the wrong basis.
+export const AGENT_BRIEFS = Object.freeze({
   scan: {
     description:
       'Mechanical reads with no judgement: list files, grep for a symbol, report what is on ' +
@@ -135,7 +143,7 @@ export function agentsPayload(config) {
   return payload;
 }
 
-export function workerArgv({ config, prompt, appendSystemPrompt, maxTurns } = {}) {
+export function workerArgv({ config, prompt, appendSystemPrompt, maxTurns, sessionId } = {}) {
   // loadConfig's rule applied here: a router that invents its own defaults makes the config
   // file decorative, and the config is what a human reads when the numbers look wrong.
   if (!config) {
@@ -177,14 +185,28 @@ export function workerArgv({ config, prompt, appendSystemPrompt, maxTurns } = {}
     // --mcp-config is what makes the set empty. Alfred's own trusted Jira fetch passes both
     // flags together with a read-only allowlist; the worker gets the strict flag alone.
     '--strict-mcp-config',
-    // Both load-bearing rather than conveniences: the run is priced from the transcript and the
-    // record is parsed from this payload.
-    '--output-format', 'json',
-    // The only ceiling the CLI honours. Post-turn, so it is a backstop on a runaway rather than
-    // a cap on a call — but a run without it has no dollar bound at all.
+    // stream-json rather than the single-object json mode, so the log fills in as the worker
+    // runs rather than staying empty until one object lands at the very end — the operator was
+    // otherwise flying blind for the run's full duration. MEASURED 2026-08-01: `--output-format
+    // stream-json` on its own is a hard CLI error ("requires --verbose"); paired with --verbose
+    // the terminal line of the stream carries the exact same fields the single-object mode's
+    // only line did (session_id, total_cost_usd, num_turns, terminal_reason, subtype, is_error),
+    // so the accounting this project reads (transcript.mjs's two log readers, report.mjs's
+    // workerCostUsd cross-check) needed no change beyond parsing the LAST line rather than the
+    // whole blob.
+    '--output-format', 'stream-json',
+    '--verbose',
     '--max-budget-usd', String(budgetUsdFor(config)),
     '--agents', JSON.stringify(agentsPayload(config)),
   ];
+
+  // A pre-generated id rather than one parsed back out of the log after the fact: the caller
+  // can compose the transcript path deterministically before the worker has written a byte.
+  // Not generated IN HERE — `randomUUID()` on every call would break the purity M5 pins
+  // ("config in, argv array out", asserted by calling twice and deep-equaling the result).
+  if (typeof sessionId === 'string' && sessionId.trim()) {
+    argv.push('--session-id', sessionId);
+  }
 
   if (appendSystemPrompt) argv.push('--append-system-prompt', appendSystemPrompt);
   if (maxTurns !== undefined && maxTurns !== null) argv.push('--max-turns', String(maxTurns));

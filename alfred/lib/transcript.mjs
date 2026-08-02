@@ -48,6 +48,60 @@ export function transcriptPathFor({ cwd, sessionId, home = homedir() } = {}) {
   return join(projectDirFor(cwd, { home }), `${sessionId}.jsonl`);
 }
 
+// Why the worker STOPPED, when it stopped for a reason Alfred did not cause.
+//
+// MEASURED on the first real jira run (TARS-1351, 2026-08-01): the worker spent the whole
+// `--max-budget-usd 8` cap, the CLI terminated it mid-flight, and the run was graded a PASS.
+// `spawnWorker`'s `killed` flag could not catch it and never could — that flag is set by
+// Alfred's own `setTimeout`, so it means "WE stopped it", and a budget kill happens inside the
+// child, which then exits NORMALLY. exit 0, no signal, `killed: false`. Every signal that the
+// run was cut short lives in this file and nowhere else.
+//
+// FOUR FIELDS CARRIED THE SAME FACT and the check reads three of them, because reading only one
+// would rest a finding on whichever field the vendor renames first:
+//   is_error: true | subtype: error_max_budget_usd | terminal_reason: budget_exhausted
+// `errors` is used for the DETAIL rather than the decision — an array whose contents are prose
+// is the right thing to quote to an operator and the wrong thing to branch on.
+//
+// GENERAL, NOT BUDGET-SPECIFIC. Any `is_error` result means the CLI is reporting its own run as
+// failed, and a gate that only knew about budgets would pass the next terminal reason there is.
+// `reason` is returned verbatim so the finding names what actually happened rather than a
+// category this function guessed.
+export function terminalErrorFromWorkerLog(text) {
+  if (typeof text !== 'string' || text.trim() === '') return null;
+
+  // The LAST line that parses, not the whole file. Single-object `--output-format json` is one
+  // line and satisfies this identically, so the same reader also survives `stream-json`, where
+  // the result object is the final event of many.
+  const lines = text.trim().split('\n');
+  let parsed = null;
+  for (let i = lines.length - 1; i >= 0; i -= 1) {
+    try {
+      const candidate = JSON.parse(lines[i]);
+      if (candidate && typeof candidate === 'object') {
+        parsed = candidate;
+        break;
+      }
+    } catch {
+      // Not a complete JSON line. A worker killed mid-write leaves exactly this, and it is the
+      // run whose accounting matters most — keep walking backwards rather than throwing.
+    }
+  }
+  if (!parsed) return null;
+
+  const reason = parsed.terminal_reason ?? parsed.subtype ?? null;
+  if (parsed.is_error !== true && !reason) return null;
+  if (parsed.is_error !== true && reason === 'success') return null;
+
+  const errors = Array.isArray(parsed.errors) ? parsed.errors.filter((e) => typeof e === 'string') : [];
+  return {
+    reason: typeof reason === 'string' ? reason : 'unknown',
+    errors,
+    turns: typeof parsed.num_turns === 'number' ? parsed.num_turns : null,
+    cost_usd: typeof parsed.total_cost_usd === 'number' ? parsed.total_cost_usd : null,
+  };
+}
+
 // The CLI's own account of the run, out of the log we told it to write.
 //
 // `total_cost_usd` is carried alongside the id for one reason: it is an INDEPENDENT second
@@ -59,14 +113,27 @@ export function sessionFromWorkerLog(text) {
   const none = { session_id: null, total_cost_usd: null };
   if (typeof text !== 'string' || text.trim() === '') return none;
 
-  let parsed;
-  try {
-    parsed = JSON.parse(text);
-  } catch {
-    // A worker killed at the wall cap is exactly the run whose accounting matters most, and it
-    // leaves a half-written object. Throwing here turns the most interesting run into a crash.
-    return none;
+  // The LAST line that parses, not the whole file — same reader as terminalErrorFromWorkerLog
+  // above, for the same reason. Single-object `--output-format json` is one line and satisfies
+  // this identically; `stream-json` writes several lines first (hook context, tool init, the
+  // assistant's own messages) and the result object — the one carrying session_id — is the
+  // final line. A whole-blob `JSON.parse` throws on that shape and every stream-json run would
+  // report as unmeasurable.
+  const lines = text.trim().split('\n');
+  let parsed = null;
+  for (let i = lines.length - 1; i >= 0; i -= 1) {
+    try {
+      const candidate = JSON.parse(lines[i]);
+      if (candidate && typeof candidate === 'object') {
+        parsed = candidate;
+        break;
+      }
+    } catch {
+      // A worker killed at the wall cap leaves exactly this on its last line, and it is the run
+      // whose accounting matters most — keep walking backwards rather than giving up or throwing.
+    }
   }
+  if (!parsed) return none;
 
   const id = parsed?.session_id;
   // An error result is still valid JSON with no id. Returning `undefined` would compose
