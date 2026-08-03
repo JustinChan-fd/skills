@@ -26,8 +26,6 @@
 // out: `--dryrun` silently ignored is a real run the operator believed was a rehearsal, and the
 // bill arrives before the misunderstanding does.
 
-import { relative } from 'node:path';
-
 import { CONFIG_RELATIVE_PATH, loadConfig } from './config.mjs';
 import { DEFAULT_WALL_CAP_MS, executeWork, newRunDir, spawnWorker } from './run.mjs';
 import { composeWorkerPrompt, standingRules } from './prompt.mjs';
@@ -497,11 +495,4 @@ async function dryRun({ parsed, config, repoRoot, out, err }) {
     out(`  [${i}] ${shown}`);
   }
   return EXIT.pass;
-}
-
-// A path shown relative when it is inside the repo and absolute when it is not. Kept because the
-// run dir is deliberately outside and that is worth being able to see at a glance.
-export function displayPath(path, repoRoot) {
-  const rel = relative(repoRoot, path);
-  return rel.startsWith('..') ? path : rel;
 }

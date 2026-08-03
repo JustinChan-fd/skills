@@ -96,10 +96,34 @@ export const RECORD_FILENAME = 'record.json';
 // the multi-agent runner, and relabelling them would destroy the very contrast being measured.
 export const ARM = ARM_IDS.THIN;
 
-// 25 minutes, the same number THRESHOLDS.armC.wallCapMs carries, and for the same reason: arm B
-// ran 24.6 minutes and produced no PR, so a cap below that would kill runs before they can fail
-// honestly and a cap far above it makes an unattended tick unbounded.
-export const DEFAULT_WALL_CAP_MS = 25 * 60 * 1000;
+// 45 minutes. RAISED FROM 25 ON MEASURED EVIDENCE, 2026-08-03. It no longer matches
+// THRESHOLDS.armC.wallCapMs, and that divergence is deliberate: eval/armcost.mjs defines the
+// conditions a frozen experiment was run under, so moving it would rewrite history rather than
+// change behaviour. This constant governs live runs and is free to move.
+//
+// WHAT THE 10-RECORD SINK SHOWS. Exactly ONE run ever hit the 25-minute cap
+// (20260803T141200Z-7, jarvis#7, killed at 1500264ms). It was not thrashing: 148 turns, 12 edits
+// already applied, first edit at turn 85, and its last words were "Now writing the failing test
+// for the frontend button" — a run mid-stride, not a run in a loop. The next-longest run
+// (20260803T151017Z-11) COMPLETED at 23.98 minutes, i.e. with 61 seconds of headroom against a
+// 25-minute cap, which makes that success closer to luck than to margin. 45 clears the one
+// observed overrun and leaves the one observed success genuinely uncrowded.
+//
+// WHY 45 AND NOT 60, WHICH WAS ASKED FOR. The clock is not what binds these runs — the context
+// window is. Peak context on the two long runs was 167027 and 146538 (84% and 73% of sonnet-5's
+// 200k), and the KILLED one had ALREADY COMPACTED ONCE while the completing one never did. So a
+// cap generous enough to permit routine compaction does not buy proportionally more work; it buys
+// a run that survives with a degraded evidence trail, because compaction is where the
+// ac_map-to-evidence chain gets dropped — the exact material the gate grades. A cap kill is loud
+// and leaves a local commit behind (69a59c8 survived this one; only the PUSH is gated). Silent
+// evidence loss is neither. 45 sits above the observed need and below routine compaction.
+//
+// AND LENGTH IS NOT WHAT MAKES A RUN EXPENSIVE, which is the intuition this change has to correct.
+// Cost per minute FALLS as runs lengthen: $0.85/min at 9 minutes against $0.24/min at 25, because
+// cache reads amortise across a long single session. Raising the cap therefore does not scale cost
+// with the ceiling the way it appears to — the ~$6 both long runs landed on was set by the work,
+// not by the clock.
+export const DEFAULT_WALL_CAP_MS = 45 * 60 * 1000;
 
 // One env var per model family. Named as a frozen list so a test asserts against the same set
 // the writer uses rather than against a second copy of three strings.

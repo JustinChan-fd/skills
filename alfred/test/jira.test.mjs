@@ -33,7 +33,7 @@ import { test } from 'node:test';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 
-import { fetchArgv, extractPayload, issueToItem, isWorkable } from '../lib/jira.mjs';
+import { FETCH_TOOLS, fetchArgv, extractPayload, issueToItem, isWorkable } from '../lib/jira.mjs';
 import { extractAcceptanceCriteria } from '../lib/item.mjs';
 
 const FIXTURE = fileURLToPath(new URL('./fixtures/jira-tars-1353.md', import.meta.url));
@@ -93,6 +93,40 @@ test('the fetch is allowlisted to READ tools — it cannot write the ticket it i
   ]) {
     assert.ok(!allowed.includes(forbidden), `${forbidden} is reachable from the fetch`);
   }
+
+  // ADDED 2026-08-03: THE ALLOWLIST THE FLAG CARRIES IS THE ONE `FETCH_TOOLS` DECLARES.
+  //
+  // Every assertion above this line reads `--allowedTools` and checks its SHAPE — a regex, then
+  // three names. `FETCH_TOOLS`'s own comment says it is enumerated "so that adding a tool is a
+  // visible edit here and the test that asserts read-only-ness has something to check", and that
+  // was FALSE when written: no test referenced the constant. The read-only property was checked by
+  // a second, independent copy of the rule living in this file.
+  //
+  // Which is this project's recorded `feedback_mutate_to_prove_a_falsifier` shape — a shared rule
+  // NAME is not a shared code path. Without this line `fetchArgv` could stop reading `FETCH_TOOLS`
+  // altogether — build its flag from a hardcoded string — and every assertion above would pass.
+  //
+  // WHAT THIS DOES NOT CATCH, stated because the first version of this comment claimed it did and
+  // three mutants proved otherwise. Adding a tool to `FETCH_TOOLS` that the regex above admits
+  // (`getVisibleJiraProjects`) does NOT fail this test: the flag is BUILT from the constant, so
+  // widening moves both sides together and deepEqual still holds. 24/24 stayed green under exactly
+  // that mutant. A silent widening of this security boundary is therefore still unguarded here —
+  // the only thing standing between a new `get*` tool and the fetch is the regex, and the regex
+  // admits every read-shaped name. Guarding it needs a declared expected SET (the
+  // `feedback_denominator_asymmetry` rule: declare the set, never derive it), which is a bigger
+  // change than this one and is not smuggled in here.
+  //
+  // So the precise claim: this asserts the flag and the constant are the SAME source, and nothing
+  // more. Mutant that kills it: change the flag to drop `searchJiraIssuesUsingJql` — verified
+  // failing, `not ok 2`.
+  //
+  // deepEqual, not a subset check: the constant is the whole declared surface, so an extra tool in
+  // the flag is exactly as much a finding as a missing one.
+  assert.deepEqual(
+    allowed,
+    [...FETCH_TOOLS],
+    'the --allowedTools flag and FETCH_TOOLS have diverged: one of them is no longer the source',
+  );
 });
 
 test('the fetch asks for markdown, which is what makes the existing extractor sufficient', () => {
