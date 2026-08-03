@@ -324,6 +324,17 @@ real system cron invoking `claude -p` headlessly.
   only the first is true today. This is by design — Alfred writes raw metrics, metadata,
   and snapshots; all KPI analysis and heavy calculation belongs in `alfred-telemetry` as a
   separation of concerns — but the second half of that split is not built.
+- **One run exists in TWO sinks, under one `run_id`, with different contents.** Found
+  2026-08-03 while fixing the backfill's evidence loss. `20260802T082954Z-TARS-1351` is in both
+  `~/.harness/telemetry/log/webtarsthree/` (its `sink` field says so — that config predates the
+  move) and `~/Desktop/Repos/alfred-telemetry/log/webtarsthree/`. The copies are **not**
+  byte-identical: the old one lacks `cost.vendor_by_model` and `provenance` entirely, because it
+  was written before either existed. Anything aggregating across both directories double-counts
+  that run and reads its cost from the pre-fix ledger. Not reconciled here, deliberately — the
+  old sink holds **1732** records on a completely different schema (`run_id`/`phases`/
+  `skill_metrics`, the harness-core shape) against this sink's nine, so merging them is its own
+  piece of work and not a footnote to Phase D. What is fixed is that the `sink` field now
+  survives a rebuild, so which sink a record was routed to is answerable at all.
 - **The record is per-invocation, not per-terminal-session.** A fresh session id is
   generated on every `alfred work`, so two back-to-back runs are two transcripts and two
   records. That is correct for cost-per-ticket comparison and wrong for *"this epic cost
