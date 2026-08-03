@@ -597,6 +597,56 @@ differ by two contracts. **Do not report any arm C vs arm A prompt comparison as
 exact**, and do not read an arm C `gate_pass: true` as evidence arm A would have failed
 to verify — arm A was never asked.
 
+*The reason above was voided on 2026-08-03, and the contract outlived it.* The AC-join
+gate rules — `ac_unmapped`, `mapping_implausible`, `ac_failed`, `ac_unsatisfiable`,
+`unverifiable_no_reason` — were deleted from `lib/gate.mjs`. Six real runs, ~$20.6, zero
+gate passes: on `jarvis#8` a worker spent 67 tool calls and made **zero edits** hunting for
+a command that could observe *"UI adapts as new data types are added"*, and on `jarvis#11`
+delivered work was failed by `mapping_implausible` on a stopword-filtered word-overlap of
+an AC against a `-t` test description. So **the whole paragraph two above — "`ac_unmapped`
+fires per criterion, therefore withholding the contract makes `gate_pass` a constant" — no
+longer describes any rule that exists.** The asymmetry was accepted to make an instrument
+discriminate; the instrument is gone.
+
+*What that changes here, and what it deliberately does not.* `eval/run-armc.mjs` still
+composes `acMapContract()` and still **records** the filed map (`ac_map_state`,
+`ac_map_problem`), but `runGate` no longer reads it — the call spreads `gateInputs`, so
+`acMap` and `ac_map_state` now arrive as ignored extra keys. Three consequences, stated
+separately because they have different weights:
+
+1. **Arm C records straddling 2026-08-03 are not comparable on `gate_pass`**, and no field
+   on a record says which gate produced it. The stamped `suite_version` does not
+   disambiguate them either: neither `lib/gate.mjs` nor `lib/prompt.mjs` is a
+   `SUITE_MEMBER`, so the digest did not move when the rules were deleted. Two records can
+   carry `2026-07-31.2` and have been graded by different gates. Read the commit date, not
+   the stamp. (`#8`'s `gate_sha` addresses this **going forward only** — it cannot label
+   records already written.)
+2. **The pass bar (next section) and `fixtures/sandbox-b`'s trap 4 both still hold, and
+   were checked rather than assumed.** The bar rests on `markerContract()` and
+   `.alfred/blocked.json`, which are untouched. Trap 4 is settled by *reading the recorded
+   command string* — a human scoring step — and `run-armc.mjs` still writes it. Trap 4's
+   `gate_coverage` already said **"NOT COVERED — MEASURED HOLE"**, so it never depended on
+   a rule that has now been deleted; the deletion takes nothing from it.
+3. **Neither the member nor the manifest was edited, on purpose.** Both are still accurate,
+   and `docs/SANDBOX.md` §"Additive-only" is the reason the bar for touching them is high
+   even when they are not: arm C's n=3 result is stamped `2026-07-31.1`, already scored and
+   closed, and an in-place edit to a member silently rebases every number taken against it.
+   Recording the change in this non-member section is the cheaper and more honest option.
+
+*The coverage genuinely lost, named rather than argued away.* Per-criterion AC coverage is
+gone from the gate entirely — `config.verify` (`npx vitest run`) plus the diff is now the
+whole grade. `blocked_reason` lost its only producer (`ac_unsatisfiable`) and is now a
+constant `null`, so §8.5's blocked path rests entirely on `blocked.mjs`'s marker contract —
+which is precisely why *that* contract stayed in the prompt when this one left it. And
+`test/eval-run-armc.test.mjs`'s absent-map falsifier, which protected §4's reading, was
+**inverted** and relabelled `COVERAGE LOST 2026-08-03` rather than left green: after the
+rules were deleted it would have passed because nothing reads the map, not because a good
+map satisfied anything. A test green for the wrong reason is worse than a red one.
+
+This is a deliberate step backward to obtain a baseline — n=0 passes means there is no
+evidence the AC mechanism works, and no evidence can be gathered while it stops every run
+from finishing. It is **not** a finding that AC coverage does not matter.
+
 ### arm C's pass bar — restated before the run
 
 This section is a **suite member** (`lib/suite.mjs` `SUITE_MEMBERS`), so editing it

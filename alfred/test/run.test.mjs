@@ -1453,7 +1453,12 @@ test('the argv handed to the worker comes from the router and carries the compos
 
   assert.equal(argv[0], '-p');
   assert.ok(argv[1].includes('make the retry backoff configurable'), 'the prompt is not the ticket');
-  assert.ok(argv[1].includes('.alfred/ac-map.json'), 'the ac_map contract did not reach the worker');
+  // A CONTRACT, not just the ticket text — the point of this assertion is that the composed
+  // prompt arrived rather than a bare ref. The ac_map contract was the probe until 2026-08-03;
+  // it was removed with the rules that read it, so the marker contract is the probe now. It is
+  // the same proposition (composeWorkerPrompt's output, not the ref, is what got spawned) and
+  // the substitution is not a weakening: `.alfred/blocked.json` appears nowhere in the ref.
+  assert.ok(argv[1].includes('.alfred/blocked.json'), 'the composed contracts did not reach the worker');
   assert.ok(!argv.includes('--max-budget-usd'), 'measured to freeze cache-breakpoint advancement — see lib/router.mjs');
   assert.ok(argv.includes('--fallback-model'), 'an unattended tick has no fallback');
   // The standing rules travel as a system prompt, not folded into the ticket text.

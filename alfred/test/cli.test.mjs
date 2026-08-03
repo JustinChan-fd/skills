@@ -1005,19 +1005,31 @@ test('ADDED B3: a PASSING run through bin/alfred pushes for real and opens a DRA
 
 test('ADDED B3: a FAILING run through bin/alfred pushes NOTHING and opens no pr', () => {
   // The falsifier, and the one with real consequences: if delivery ignored the verdict, Alfred would
-  // push every run it ever made. `exit 1` on AC2 makes the gate fail on `check_failed` while the
-  // worker still does real work — so there IS something to push, and it must not be pushed.
+  // push every run it ever made. The worker still does real work — so there IS something to push,
+  // and it must not be pushed.
+  //
+  // THE FAILING RULE CHANGED ON 2026-08-03, AND THE VACUITY HAZARD DID NOT. This used to fail via
+  // `ac_failed`: a worker-declared ac_map command exiting non-zero. That rule was deleted with the
+  // AC join, so the failure is now sourced from `config.verify` — the rule that survived and is the
+  // primary signal. `check_failed` is exactly what the ORIGINAL comment here predicted the wrong
+  // rule would be, which is worth stating plainly rather than quietly reversing: it was the wrong
+  // rule then because a different one was under test, and it is the right one now because it is the
+  // only one left that can fail a run for its work rather than its paperwork.
+  //
+  // WHAT MUST NOT BE LOST is the reason that comment existed. The first draft of this test passed
+  // for a vacuous reason — both criteria came back `ac_unmapped`, so nothing was pushed by a run
+  // that could never have passed under any circumstances. A no-push test whose subject cannot pass
+  // proves nothing about delivery reading the verdict. So the positive assertion below names the
+  // rule, and the passing sibling test above proves this same wiring CAN push.
   const gh = ghDeliveryStub({ body: AC_ISSUE_BODY });
-  const { dir, bare } = repoWithRemote();
-  // AC1 as in the passing case; AC2 greps for a symbol the worker never wrote, so it exits non-zero
-  // for a real reason and still names its own subject terms. `exit 1` would draw
-  // `mapping_implausible` instead of `ac_failed` and the run would fail for the wrong rule.
-  const stub = deliveringWorkerStub({
-    acs: [
-      PASSING_AC_MAP[0],
-      { ac: 'AC2', command: 'grep -q vitest src/backoff.js # the suite passes under npx vitest run' },
-    ],
+  // A verify command that exits non-zero over real bytes: it greps the file the worker writes for a
+  // symbol the worker never puts there. `false` would fail too, but a check that cannot succeed
+  // regardless of the tree is the rubber stamp inverted, and it would keep passing this test if the
+  // gate stopped running verify commands at all.
+  const { dir, bare } = repoWithRemote({
+    config: { ...CONFIG, verify: { check: 'grep -q vitest src/backoff.js' } },
   });
+  const stub = deliveringWorkerStub({ acs: PASSING_AC_MAP });
 
   const r = spawnSync(BIN, ['work', '#9', '--worker-bin', stub.path, '--run-root', mktemp('runs')], {
     cwd: dir,
@@ -1027,17 +1039,13 @@ test('ADDED B3: a FAILING run through bin/alfred pushes NOTHING and opens no pr'
 
   assert.equal(r.status, EXIT.gate_failed, `expected gate_failed, got ${r.status}\n${r.stdout}\n${r.stderr}`);
 
-  // IT FAILED FOR THE REASON THIS TEST IS ABOUT. Without this line the test passes when the ac_map is
-  // not read at all — which is exactly what happened on the first draft: both criteria came back
-  // `ac_unmapped`, nothing was pushed, and the assertion below was satisfied by a run that could
-  // never have passed under any circumstances. A no-push test whose subject can't pass is vacuous.
-  // `ac_failed` IS THE RULE, not `check_failed`: this is a worker-declared ac_map command exiting
-  // non-zero, which is a different rule from a config `verify` command failing. Both are asserted
-  // NEGATIVELY too, because either of the two ways this test can pass vacuously — an unread map, or a
-  // map the gate judged a rubber stamp — leaves nothing to push for reasons unrelated to the verdict.
-  assert.match(r.stdout + r.stderr, /ac_failed/, 'the run failed for some other reason than AC2');
-  assert.doesNotMatch(r.stdout + r.stderr, /ac_unmapped/, 'the ac_map was not read, so this proves nothing');
-  assert.doesNotMatch(r.stdout + r.stderr, /mapping_implausible/, 'the map was rejected, not run');
+  // IT FAILED FOR THE REASON THIS TEST IS ABOUT, and names the check so a gate that failed for any
+  // other reason cannot satisfy this. The deleted rules are asserted absent too — if one is ever
+  // reinstated and fires here, this test would otherwise keep passing while measuring something else.
+  assert.match(r.stdout + r.stderr, /check_failed/, 'the run failed for some other reason than the check');
+  for (const gone of ['ac_unmapped', 'ac_failed', 'mapping_implausible']) {
+    assert.doesNotMatch(r.stdout + r.stderr, new RegExp(gone), `${gone} was deleted 2026-08-03`);
+  }
 
   assert.equal(git(bare, ['branch', '--list', 'alfred/*']).trim(), '', 'a FAILED run reached the remote');
 

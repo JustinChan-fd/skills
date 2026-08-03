@@ -26,16 +26,34 @@
 // stop declaring gaps, which produces exactly the confident-and-wrong artifact the
 // gate exists to catch.
 //
-// FIVE STATES, AND SILENCE IS NOT ONE OF THEM (§5 rule 2). Each AC resolves to
-// `passed` / `failed` / `unverifiable(reason)` / `unsatisfiable(evidence)`. A fifth
-// does not exist, so an AC nobody mapped is a finding.
+// THE AC↔ac_map JOIN WAS REMOVED 2026-08-03, AND THIS IS THE HONEST ACCOUNT OF WHY.
 //
-// THE CONFLICT OF INTEREST IS NAMED, NOT SOLVED (§8.1). The worker proposes the
-// ac_map — it is authoring input to its own grading. Two mechanical mitigations: the
-// gate RUNS the proposed command itself and ignores the worker's claimed result, so a
-// dishonest map can propose a command but cannot fake an exit code; and a command that
-// does not mention the AC's subject is `mapping_implausible` rather than a pass, which
-// is what stops `biome check` from settling "no behavior changes."
+// The five-state rule (§5 rule 2 — each AC resolves to passed/failed/unverifiable/
+// unsatisfiable, and silence is a finding) is GONE from this gate, along with the five
+// rules that implemented it: `ac_unmapped`, `ac_failed`, `ac_unsatisfiable`,
+// `unverifiable_no_reason`, `mapping_implausible`.
+//
+// MEASURED, over six real runs and ~$20.6: the join never once produced a true pass.
+// Two runs finished with working code and both were failed by these rules — one on
+// `mapping_implausible` comparing WORD LISTS between a criterion and a test's `-t`
+// description (they shared only stopwords, so a delivered 5-file diff failed), one on a
+// sibling rule. Four never finished. The worst instance is the cost BEFORE the verdict:
+// asked for a command that exits 0 per criterion, a worker handed "Search result UI
+// adapts as new data types are added (designed for extensibility)" spent 67 tool calls
+// and $1.19 hunting for a seam that cannot exist, and made ZERO edits. The contract
+// pointed the work at verification archaeology instead of at the code.
+//
+// WHAT THIS COSTS, STATED PLAINLY RATHER THAN BURIED. Per-criterion coverage is no
+// longer checked at all. Ticket-skepticism is a founding pillar of this project and this
+// weakens it. It is a deliberate step backward taken to get a baseline — at n=0 passes
+// there is no evidence the mechanism works, and no evidence can be gathered while it
+// stops every run from finishing. It is NOT a finding that AC coverage does not matter.
+//
+// WHAT REPLACES IT: nothing, yet. `config.verify` (the operator's own commands, run by
+// the gate) is the primary signal, and `evidence_weakened` / `instrument_modified` remain
+// as the anti-faking pair. `graded_criteria` is therefore 0 on every verdict now, and
+// says so — see `runGate`. A gate that reported criteria SEEN as criteria GRADED would
+// reproduce #13's defect at a larger scale than #13 found it.
 
 import { execFile } from 'node:child_process';
 // #68 reads ONE file, `<repoRoot>/package.json`, to resolve `npm run lint` to the script it
@@ -107,13 +125,15 @@ function gateSha() {
 // A closed set, same reasoning as `blocked.mjs` REASONS and `gaps.mjs` GAP_CODES: a
 // rule string invented at a call site is invisible to any aggregate over findings, so
 // "what does the gate actually catch" stops being answerable from telemetry.
+//
+// FIVE NAMES REMOVED 2026-08-03 and deliberately NOT re-added as aliases: `ac_unmapped`,
+// `ac_failed`, `ac_unsatisfiable`, `unverifiable_no_reason`, `mapping_implausible`. Old
+// records in the sink still carry them, which is the point of a closed set — the names
+// are historical facts about verdicts already written, not live rules. An aggregate over
+// telemetry must be able to see that the set CHANGED, and a retained-but-unreachable name
+// would read as a rule that simply stopped firing.
 export const GATE_RULES = Object.freeze({
   check_failed: 'check_failed',
-  ac_unmapped: 'ac_unmapped',
-  ac_failed: 'ac_failed',
-  ac_unsatisfiable: 'ac_unsatisfiable',
-  unverifiable_no_reason: 'unverifiable_no_reason',
-  mapping_implausible: 'mapping_implausible',
   unbacked_claim: 'unbacked_claim',
   scope_violation: 'scope_violation',
   off_limits: 'off_limits',
@@ -160,16 +180,12 @@ const STOPWORDS = new Set([
   'there', 'these', 'this', 'to', 'was', 'were', 'when', 'which', 'with', 'without',
 ]);
 
-// Subjects a command cannot settle no matter what it exits, because the property is
-// not observable from one exit code. TARS-1339 AC #2 is the measured instance: 147
-// files, 526 insertions, 435 deletions, and both arms plus I left it unverified. A
-// gate that passes it on a green formatter reproduces the bug being fixed.
-const NOT_COMMAND_SETTLEABLE = [
-  /\bno\s+(?:behavio(?:u)?r|functional|semantic)\s+changes?\b/i,
-  /\bbehavio(?:u)?r\s+(?:is\s+)?unchanged\b/i,
-  /\bno\s+regressions?\b/i,
-];
-
+// `NOT_COMMAND_SETTLEABLE` lived here until 2026-08-03 — the patterns for subjects no
+// single exit code observes ("no behaviour changes", "no regressions"). It served only
+// `implausibleReason`, which went with the AC join. The OBSERVATION it encoded is still
+// true and is the strongest argument for eventually rebuilding per-criterion coverage:
+// TARS-1339 AC #2 (147 files, 526 insertions, 435 deletions) is unverifiable by command,
+// and a gate that passes it on a green formatter reproduces the bug being fixed.
 const words = (text) =>
   String(text ?? '')
     .toLowerCase()
@@ -201,15 +217,15 @@ async function defaultRun(command, cwd) {
 // failing `npm test` printed on this machine is what leaves it — and a push is not undone by editing
 // the file afterwards, because the bytes are already in a commit somebody may have fetched.
 //
-// AT THE CONSTRUCTOR, NOT AT THE FOUR CALL SITES. `runChecks`, the ac_map path, `runDeclaredChecks`,
-// and `unbacked_claim` all funnel command output through here. Bounding it at each site would be
-// four copies of a rule that has to agree, and the fifth site someone adds next month would be
-// unbounded by default — which is the wrong default for something that publishes. Here, a new
-// finding is bounded because it is a finding.
+// AT THE CONSTRUCTOR, NOT AT THE CALL SITES. Every finding funnels its evidence through here —
+// two sites as of 2026-08-03 (`runChecks` and `unbacked_claim`), where it was four before the AC
+// join was removed. That the number shrank is the argument for this placement, not against it:
+// bounding at each site would be N copies of a rule that has to agree, and the site someone adds
+// next month would be unbounded by default. Here, a new finding is bounded because it is a finding.
 //
 // NOT IN `defaultRun`, which was the first instinct and is wrong twice over: an INJECTED runner
-// (every test, and the ac_map path) would bypass it entirely, and `unbacked_claim`'s evidence is
-// worker-authored report text that never passes through a runner at all.
+// (every test) would bypass it entirely, and `unbacked_claim`'s evidence is worker-authored report
+// text that never passes through a runner at all.
 
 // 6 KB. A failing check's diagnosis is in its first lines — the assertion and the frame that raised
 // it. What follows is the rest of the suite restating the same failure, and 4 MB of it was measured
@@ -291,248 +307,6 @@ async function runChecks({ config, repoRoot, run, findings }) {
       );
     }
   }
-}
-
-// #73: THE JOIN THAT COULD NOT SUCCEED, and the narrowest thing that makes it possible.
-//
-// MEASURED. Three sonnet-5 runs under suite `2026-07-31.2` each filed a schema-valid
-// three-entry ac_map, one entry per criterion, each with a real command — and each drew
-// `ac_unmapped` on all three criteria, because the lookup was `entry.ac === ac.id` and the
-// ids were never rendered into the ticket those runs read. Every worker keyed by criterion
-// TEXT, correctly, and the join could not succeed on any input that prompt could produce.
-// `pass = findings.length === 0` was therefore false on a flawless diff exactly as on a
-// fabricated green — #63's shape, one layer out, and what #67 left behind after making the
-// contract reachable.
-//
-// WHY NORMALIZED AND NOT RAW. Runs 1 and 2 stripped the criterion's markdown
-// (`npm test passes.`); run 3 kept it (`` `npm test` passes. ``). Either raw form matches one
-// group and misses the other, so a fallback on exact text still fails 2 of 3.
-//
-// AND WHY IT STAYS THIS TIGHT. Whole-string equality after four reversible transforms —
-// nothing that could match two DIFFERENT criteria. No substring: `npm test` is contained in
-// '`npm test` passes.' and is not that criterion, and crediting containment would let a
-// worker settle an AC by quoting one word of it. No fuzzy distance, no token overlap. The
-// property being preserved is the one `runDeclaredChecks` states below in its own words —
-// "a worker cannot satisfy AC1 by declaring an entry named something else" — and a looser
-// match trades #73 (a rule that always fires) for its mirror image (one that never does).
-const acKey = (value) =>
-  String(value ?? '')
-    .toLowerCase()
-    .split('`').join('')
-    .replace(/\s+/g, ' ')
-    .trim()
-    .replace(/\.$/, '');
-
-// THE LABEL FORM (#21). Measured on the first real github-sourced run: $1.831013, worker exit
-// 0, `npm test` green, a correct diff, a schema-valid ac_map whose four commands all pass by
-// hand — failed with `ac_unmapped` x4. The ticket's prose numbered its criteria `**AC-1:**`;
-// ids are minted POSITIONALLY as `AC1..ACn`; `AC-1 !== AC1`.
-//
-// `acKey` above could not rescue it and was not built to: it keys an entry's `ac` against the
-// criterion's TEXT, so it only helps a worker that pasted a whole criterion as its id. A worker
-// that wrote a LABEL — the ordinary thing to do — misses both indexes.
-//
-// NOT A TICKET-FORMAT PROBLEM. Seven prose styles were measured (no labels, `**AC-1:**`,
-// `**AC1:**`, `AC 1`, `1.`, `- [ ]`, Given/When/Then) and all mint `AC1, AC2`. Minting is
-// already format-independent, so the ids stay positional and the JOIN takes the extra index.
-//
-// THE DIGITS SURVIVE, and that is the entire safety property. Only a leading `ac` and the
-// separators between it and the number are removed, so `ac-1`, `AC 1`, `ac_1`, `AC1` collapse to
-// `ac1` while `AC1` and `AC2` cannot collapse into each other on any input. A normalizer that
-// dropped or ignored the digits would credit one criterion with another's evidence — worse than
-// the false FAIL being fixed here, because a bar reported as met by evidence for a different
-// bar is indistinguishable from a bar actually met.
-//
-// RETURNS NULL for anything not label-shaped, so an arbitrary string cannot become a third
-// chance to match. `null` is never inserted into the index and never looked up.
-const acLabel = (value) => {
-  const m = /^ac[\s._:#-]*(\d+)$/i.exec(String(value ?? '').split('*').join('').replace(/[\s:.]+$/, '').trim());
-  return m ? `ac${Number(m[1])}` : null;
-};
-
-// Resolves each AC to exactly one of the four states. Silence is a finding.
-async function resolveAcs({ acs, acMap, repoRoot, run, findings, unverified }) {
-  const byAc = new Map();
-  // A SECOND INDEX, not a replacement for the first. The id lookup stays exact and stays
-  // primary: lib/prompt.mjs does render `AC1: <text>` and names the ids as the keys, so a
-  // worker that used them must not be re-resolved through a normalizer.
-  const byText = new Map();
-  // A THIRD INDEX, ranked last. See `acLabel`: this is the label form (`AC-1` for `AC1`), and it
-  // is consulted only after the exact id and the criterion text have both missed.
-  const byLabel = new Map();
-  for (const entry of acMap ?? []) {
-    // First mapping wins, and a duplicate is not silently merged: two entries for one
-    // AC where the second says `unverifiable` would otherwise let a worker append an
-    // opt-out after proposing a command.
-    if (!byAc.has(entry?.ac)) byAc.set(entry?.ac, entry);
-    const key = acKey(entry?.ac);
-    if (key && !byText.has(key)) byText.set(key, entry);
-    const label = acLabel(entry?.ac);
-    if (label && !byLabel.has(label)) byLabel.set(label, entry);
-  }
-
-  // Which entries answered a criterion someone SET. The rest are the worker's own, and are
-  // handled below — see `runDeclaredChecks`.
-  const claimed = new Set();
-
-  for (const ac of acs ?? []) {
-    const id = ac?.id ?? null;
-    const text = ac?.text ?? '';
-    // Id first, then the criterion's own text, then the label form of the id. Order matters
-    // where a map carries several: the id is what the operator's manifest declared, the text
-    // index is the fallback for a caller that never showed the worker an id, and the label index
-    // is last because it is the loosest of the three — an exact match must never be re-resolved
-    // through a normalizer.
-    //
-    // The label is derived from the ID, never from the text. Deriving it from the criterion's
-    // prose would read `**AC-1:**` out of the sentence and match on the ticket's own numbering,
-    // which is the authorship-dependent behaviour `acLabel` exists to avoid.
-    // NO SENTINEL. An earlier draft passed a placeholder string when `acLabel` returned null,
-    // which meant the lookup depended on that placeholder never equalling a real `ac<digits>`
-    // key. The null is checked instead, so there is no magic value to collide with.
-    const label = acLabel(id);
-    const entry =
-      byAc.get(id) ?? byText.get(acKey(text)) ?? (label === null ? undefined : byLabel.get(label));
-    if (entry) claimed.add(entry);
-
-    if (!entry) {
-      findings.push(
-        finding(
-          GATE_RULES.ac_unmapped,
-          `${id} has no ac_map entry and no unverifiable marker`,
-          // Silence is fail (§5 rule 2). Not unverified[] — that list is for declared
-          // gaps with reasons, and letting silence land there makes the honest channel
-          // the default one.
-          text,
-        ),
-      );
-      continue;
-    }
-
-    if (entry.unsatisfiable) {
-      // Not a failure of the work: a conflict in the ticket. Reported as its own rule
-      // so the loop can act on it — §8.5 says stop, comment, label — rather than
-      // sending the worker back to satisfy something unsatisfiable, which on 1339
-      // would mean editing off-limits vendor code to reach 0 warnings.
-      const evidence = String(entry.evidence ?? '').trim();
-      findings.push(
-        finding(
-          GATE_RULES.ac_unsatisfiable,
-          `${id} cannot be satisfied as written: ${text}`,
-          evidence || 'no evidence supplied',
-        ),
-      );
-      continue;
-    }
-
-    if (entry.unverifiable) {
-      const reason = String(entry.reason ?? '').trim();
-      if (!reason) {
-        // Without this, `unverifiable: true` is a one-word opt-out of the whole gate.
-        findings.push(
-          finding(GATE_RULES.unverifiable_no_reason, `${id} is marked unverifiable with no reason`, text),
-        );
-        continue;
-      }
-      unverified.push({ ac: id, reason });
-      continue;
-    }
-
-    const command = String(entry.command ?? '').trim();
-    if (!command) {
-      findings.push(finding(GATE_RULES.ac_unmapped, `${id} has an ac_map entry with no command`, text));
-      continue;
-    }
-
-    // PLAUSIBILITY BEFORE EXIT CODE (§8.1). Checked first because the exit code is the
-    // thing that misleads: `npm run lint` exits 0 on a tree whose behaviour nobody
-    // examined, and a gate that read the code first would have already decided pass.
-    const implausible = implausibleReason(text, command);
-    if (implausible) {
-      findings.push(finding(GATE_RULES.mapping_implausible, `${id} is mapped to a command that cannot settle it: ${command}`, implausible));
-      // And into unverified[], per the frozen name: the AC is not settled either way,
-      // and that is what the honest channel is for. The finding is what fails the run;
-      // the unverified entry is what tells a human which AC still needs looking at.
-      unverified.push({ ac: id, reason: implausible });
-      continue;
-    }
-
-    const { code, output } = await run(command, repoRoot);
-    if (code !== 0) {
-      findings.push(
-        finding(GATE_RULES.ac_failed, `${id} failed its own check: ${command}`, `exit ${code}\n${String(output ?? '').trim()}`),
-      );
-    }
-  }
-
-  await runDeclaredChecks({ entries: [...byAc.values()].filter((e) => !claimed.has(e)), repoRoot, run, findings, unverified });
-}
-
-// #72: THE ENTRIES NOBODY ASKED FOR, WHICH IS MOST OF THEM ON A PROMPT-SOURCED ITEM.
-//
-// The loop above iterates the ITEM'S criteria. A prompt-sourced item has none — §2.1 invents
-// none, because a fabricated criterion is a bar nobody set — so on every such item the loop
-// body never ran and the ac_map was read but never EXECUTED. The first real run declared
-// `grep -L "from './retry.mjs'" src/{email,push,sms}.mjs` as the command proving all three
-// channels shared the helper, and that command was never run: the PASS rested on
-// `config.verify` alone. "The gate runs the commands itself, in a separate process" is the
-// property that makes a verdict unarguable, and here there was a command and no run.
-//
-// LABELLED, NOT PROMOTED. A worker-authored green is weak evidence — the worker could write
-// `true`. A worker-authored RED is strong: it is a worker reporting its own work incomplete,
-// and swallowing that is strictly worse than never having asked. That asymmetry is the whole
-// reason to run them, and it is also why the OTHER rules do not apply: `unverifiable_no_reason`
-// and `mapping_implausible` are defects against a bar someone set, and failing a run over a
-// volunteered entry would teach a worker to volunteer nothing.
-//
-// `ac_unmapped` is untouched by this. An entry answering no declared criterion is not credited
-// against one, so a worker cannot satisfy AC1 by declaring an entry named something else.
-async function runDeclaredChecks({ entries, repoRoot, run, findings, unverified }) {
-  for (const entry of entries) {
-    const label = String(entry?.ac ?? '').trim() || 'an unnamed check';
-
-    // A reasoned gap is carried; an unreasoned one is simply not evidence, and is dropped
-    // rather than made a finding. Marked `worker_declared` so nobody reading the list takes
-    // it for a criterion out of the ticket.
-    if (entry?.unverifiable) {
-      const reason = String(entry.reason ?? '').trim();
-      if (reason) unverified.push({ ac: label, reason, worker_declared: true });
-      continue;
-    }
-
-    const command = String(entry?.command ?? '').trim();
-    if (!command) continue;
-
-    const { code, output } = await run(command, repoRoot);
-    if (code !== 0) {
-      findings.push(
-        finding(
-          GATE_RULES.ac_failed,
-          `a worker-declared check failed: ${label} (${command})`,
-          `exit ${code}\n${String(output ?? '').trim()}`,
-        ),
-      );
-    }
-  }
-}
-
-// Why a command cannot settle an AC, or null if it plausibly can.
-function implausibleReason(text, command) {
-  for (const pattern of NOT_COMMAND_SETTLEABLE) {
-    if (pattern.test(text)) {
-      return `"${String(text).trim()}" asserts an absence of change, which no single exit code observes — ${command} exiting 0 says the command ran, not that behaviour held`;
-    }
-  }
-
-  // §8.1: "An ac_map entry whose command does not mention the AC's subject at all is a
-  // finding." Overlap on any subject word is enough — the check is for a command that
-  // is unrelated, not for one phrased differently.
-  const subject = words(text);
-  if (subject.length === 0) return null;
-  const inCommand = new Set(words(command));
-  if (subject.some((w) => inCommand.has(w))) return null;
-
-  return `${command} mentions none of the AC's subject terms (${subject.slice(0, 6).join(', ')})`;
 }
 
 // §5 rule 4. Every claim carrying verification language must join to a recorded command
@@ -658,7 +432,7 @@ const countsOf = (entry) => {
   return parts.length ? ` (${parts.join(', ')})` : '';
 };
 
-function checkEvidence({ diffstat, config, acMap, findings }) {
+function checkEvidence({ diffstat, config, findings }) {
   // Absent is UNOBSERVED, not clean — and this rule cannot tell the two apart, which is a
   // real limit rather than a safe default. A caller that passes nothing gets no finding and
   // no assurance. `runGate` does not currently publish which it was, so the CALLER owes that
@@ -676,13 +450,19 @@ function checkEvidence({ diffstat, config, acMap, findings }) {
     }));
   if (weakened.length === 0) return;
 
-  // Conjunct 2. Both sources, because the dependency is a property of the RUN and not of the
-  // ac_map's phrasing — mapping every AC to a lint command while `config.verify` still runs
-  // the suite must not be a way out of the rule.
-  const suiteCommands = [
-    ...Object.entries(config?.verify ?? {}).map(([name, command]) => ({ source: `verify.${name}`, command })),
-    ...(acMap ?? []).map((entry) => ({ source: `ac_map ${entry?.ac ?? '?'}`, command: entry?.command })),
-  ].filter((c) => c.command && RUNS_SUITE.test(String(c.command)));
+  // Conjunct 2: does this run's green actually LEAN on the suite? Deleting test lines is
+  // untidy when nothing reads them and a defect when a green rests on them, and the rule
+  // must not conflate the two.
+  //
+  // ONE SOURCE NOW, DOWN FROM TWO. The ac_map was the second, and it went with the join on
+  // 2026-08-03. The narrowing is real and worth naming: an operator whose `config.verify`
+  // declares no suite-running command has no `evidence_weakened` coverage at all, where
+  // before a worker's own ac_map entry could supply the dependency. Alfred's own configs all
+  // declare `npx vitest run`, so the rule is live on every repo it currently runs against —
+  // but that is a property of those configs, not of this rule.
+  const suiteCommands = Object.entries(config?.verify ?? {})
+    .map(([name, command]) => ({ source: `verify.${name}`, command }))
+    .filter((c) => c.command && RUNS_SUITE.test(String(c.command)));
 
   if (suiteCommands.length === 0) return;
 
@@ -849,7 +629,7 @@ function scriptsAt(repoRoot) {
   }
 }
 
-function checkInstruments({ diffstat, config, acMap, repoRoot, findings }) {
+function checkInstruments({ diffstat, config, repoRoot, findings }) {
   // Absent is UNOBSERVED, not clean — the same limit `checkEvidence` records. A caller that
   // passes nothing gets no finding and no assurance.
   if (!Array.isArray(diffstat)) return;
@@ -866,13 +646,17 @@ function checkInstruments({ diffstat, config, acMap, repoRoot, findings }) {
 
   const scripts = scriptsAt(repoRoot);
 
-  // Conjunct 2. Both sources, because the dependency is a property of the RUN: mapping every
-  // AC away from the linter while `config.verify` still runs it must not be a way out, and a
-  // run declaring no checks at all must not escape by putting the linter in its ac_map.
-  const commands = [
-    ...Object.entries(config?.verify ?? {}).map(([name, command]) => ({ source: `verify.${name}`, command })),
-    ...(acMap ?? []).map((entry) => ({ source: `ac_map ${entry?.ac ?? '?'}`, command: entry?.command })),
-  ].filter((c) => c.command);
+  // Conjunct 2: does a command this run is GRADED ON actually invoke the edited file? An
+  // edit to a file no verification command reaches is ordinary source work.
+  //
+  // ONE SOURCE NOW, same narrowing as `checkEvidence` and same reason (the ac_map join went
+  // on 2026-08-03). The case specifically lost: a run that declared no `config.verify` checks
+  // and put its linter in the ac_map instead. That escape now costs the worker nothing —
+  // which matters only for an operator whose config declares no checks, and such a run has
+  // no `check_failed` coverage either.
+  const commands = Object.entries(config?.verify ?? {})
+    .map(([name, command]) => ({ source: `verify.${name}`, command }))
+    .filter((c) => c.command);
 
   const hits = [];
   for (const { source, command } of commands) {
@@ -968,8 +752,12 @@ function checkScope({ config, declaredScope, touched, findings }) {
 export async function runGate({
   config = {},
   repoRoot = null,
+  // STILL ACCEPTED, STILL NOT GRADED. The AC join was removed 2026-08-03 (see the header),
+  // so `acs` now feeds exactly one thing: the `graded_criteria: 0` disclosure below. It is
+  // not dropped from the signature, because a caller that stopped passing criteria would
+  // make a run that graded nothing indistinguishable from a run with nothing to grade —
+  // and that distinction is the whole of #13.
   acs = [],
-  acMap = [],
   declaredScope = null,
   touched = [],
   // NO DEFAULT, deliberately. `[]` would make every existing caller — and every one of the
@@ -988,57 +776,46 @@ export async function runGate({
   const unverified = [];
 
   await runChecks({ config, repoRoot, run, findings });
-  await resolveAcs({ acs, acMap, repoRoot, run, findings, unverified });
   checkClaims({ claims, commands, findings });
   checkScope({ config, declaredScope, touched, findings });
-  checkEvidence({ diffstat, config, acMap, findings });
-  checkInstruments({ diffstat, config, acMap, repoRoot, findings });
+  checkEvidence({ diffstat, config, findings });
+  checkInstruments({ diffstat, config, repoRoot, findings });
 
   // A conjunction over findings, never a score, and deliberately NOT over `unverified`.
   const pass = findings.length === 0;
 
-  // The loop needs to know an unsatisfiable AC is different from failed work: one is
-  // blocked (§8.5 — stop, comment, label), the other is ordinary rework. Carried as a
-  // code from blocked.mjs's closed set rather than left for the loop to infer from
-  // finding prose.
-  const blocked_reason = findings.some((f) => f.rule === GATE_RULES.ac_unsatisfiable)
-    ? 'unsatisfiable-ac'
-    : null;
+  // NOTHING SETS THIS ANY MORE, and it stays on the verdict as `null` rather than being
+  // removed. `ac_unsatisfiable` was the only producer, and it went with the AC join on
+  // 2026-08-03 — so THIS GATE CAN NO LONGER DETECT A BLOCKED ITEM. §8.5's path (stop,
+  // comment, label `alfred:blocked`, skip on later ticks) is not dead: `blocked.mjs`'s
+  // marker file is the other channel and the worker still writes it, which is why the
+  // marker contract stayed in the prompt when the ac_map contract did not.
+  //
+  // THE FIELD OUTLIVES ITS PRODUCER ON PURPOSE. `cli.mjs` and the loop read it, and a
+  // removed key reads as `undefined` — indistinguishable from "not blocked" at every
+  // consumer. An explicit `null` keeps the shape a reader can check.
+  const blocked_reason = null;
 
-  // HOW MANY CRITERIA THIS VERDICT ACTUALLY GRADED (#13). Measured: `acs: []` returned
-  // `pass: true`, `findings: []`, `unverified: []` — byte-identical to a run that satisfied
-  // four real criteria. Nothing on the verdict distinguished them, so a prompt-sourced item
-  // and a ticket whose criteria are a paragraph rather than a list passed MORE easily than a
-  // ticket with criteria, because the AC half of the checklist silently switched off.
+  // ZERO. ALWAYS. AND THAT IS THE POINT (#13, amended 2026-08-03).
   //
-  // NOT A FINDING, deliberately. `pass` is a conjunction over findings and a ticket with no
-  // criteria has broken no rule — failing it would refuse honest prompt-sourced work, which
-  // `item.mjs` supports on purpose. The verdict discloses the condition instead.
+  // #13's defect was a verdict that graded nothing looking identical to one that graded
+  // four. With the AC join deleted, EVERY verdict grades nothing — so reporting the number
+  // of criteria this gate was HANDED would restate #13's defect at full scale: six criteria
+  // shown as graded, none examined. The count is what the gate did, not what it saw.
   //
-  // COUNTS CRITERIA, NEVER COMMANDS. A worker that volunteers checks for an item with no
-  // criteria produces a green run with commands in the log — the most convincing possible
-  // shape for a verdict that graded nothing anybody asked for. Counting executed commands
-  // would report evidence here and hide exactly the case worth disclosing; `runDeclaredChecks`
-  // labels that evidence `worker_declared` for the same reason.
+  // NOT A FINDING, for the reason it never was: `pass` is a conjunction over findings, and
+  // a ticket whose criteria this gate declines to grade has broken no rule. Failing on it
+  // would fail every run unconditionally. The verdict discloses instead.
   //
-  // `item.ac_problem` already carries the operator-facing sentence and `prompt.mjs` already
-  // shows it to the worker. The gate never received it — the one component whose output an
-  // operator reads as the verdict. Not plumbed through here on purpose: the gate must not
-  // depend on an item field to notice it graded nothing, or an absent `ac_problem` would
-  // restore the silence. It counts what it was given.
-  // TWO WAYS TO GRADE NOTHING, and the reason must not conflate them. Zero declared is the
-  // ordinary prompt-sourced case. Declared-but-id-less only arrives from a caller that built
-  // the list itself — `item.mjs` always mints `AC1..ACn` — and `resolveAcs` already fails such
-  // a criterion `ac_unmapped`. Reporting "none were declared" there would have the verdict
-  // overstate what it saw, on the one input where the caller is already known to be wrong.
+  // `declared` is still counted and still reported in the reason, because "this run had 6
+  // criteria and graded 0" and "this run had none" are different facts about a run, and a
+  // single sentence covering both would lose the one an operator needs.
   const declared = (acs ?? []).length;
-  const graded_criteria = (acs ?? []).filter((ac) => ac?.id != null).length;
+  const graded_criteria = 0;
   const ungraded_reason =
-    graded_criteria > 0
-      ? null
-      : declared === 0
-        ? 'no acceptance criteria were graded: none were declared'
-        : `no acceptance criteria were graded: ${declared} declared but could not be graded`;
+    declared === 0
+      ? 'no acceptance criteria were graded: none were declared'
+      : `no acceptance criteria were graded: ${declared} declared, but this gate no longer grades criteria individually`;
 
   return {
     pass,

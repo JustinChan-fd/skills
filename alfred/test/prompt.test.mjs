@@ -7,9 +7,21 @@
 // not have been better. A prompt that omits a contract the gate grades against is not a
 // missing nicety; it is a gate that cannot return true.
 //
-// So the load-bearing tests here are the two that assert the contracts arrive BYTE-IDENTICALLY
-// from the modules that own them. Asserting against a copied string would pass forever while
+// So the load-bearing tests here are the ones asserting each contract arrives BYTE-IDENTICALLY
+// from the module that owns it. Asserting against a copied string would pass forever while
 // the real contract drifted — which is the same shape as the defect, one level up.
+//
+// TWO CONTRACTS BECAME ONE ON 2026-08-03, and #67's rule is what decided WHICH test replaced
+// the ac_map one. The five gate rules that read the map were deleted, so the live risk
+// inverted: not a prompt missing a contract the gate grades, but a prompt demanding a
+// contract no rule reads. #67 says a prompt/gate mismatch is invisible to a suite that only
+// ever asserts what the prompt says — so the byte-identity test for the ac_map contract
+// became a byte-level test for its ABSENCE, rather than being deleted. Reinstating the
+// contract in the prompt while the rules stay deleted now fails a named test.
+//
+// The marker contract stayed, and the asymmetry is deliberate rather than leftover: a worker
+// declaring itself blocked reports its own work INCOMPLETE, which is strong evidence, where a
+// worker-authored green was weak. §8.5's blocked path rests on that contract alone now.
 //
 // WHY THIS IS NOT eval/run-armc.mjs's `composePrompt`. That one reads a fixture manifest and
 // strips an answer-key footer, and test/isolation.test.mjs forbids lib/ reaching outside
@@ -25,7 +37,11 @@ import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 
 import { MARKER_PATH, REASONS, markerContract } from '../lib/blocked.mjs';
-import { AC_MAP_PATH, acMapContract } from '../lib/acmap.mjs';
+// AC_MAP_PATH is imported to assert the prompt does NOT contain it. The module survives for
+// eval/run-armc.mjs, which must keep reproducing arm C's frozen prompt byte-for-byte; nothing
+// in lib/ reads it any more. Importing the path rather than retyping the string is deliberate:
+// a hardcoded './alfred/ac-map.json' here would keep passing if the real path ever changed.
+import { AC_MAP_PATH } from '../lib/acmap.mjs';
 import { AGENT_BRIEFS, AGENT_SEATS } from '../lib/router.mjs';
 import { composeWorkerPrompt, standingRules } from '../lib/prompt.mjs';
 import { preflightContract } from '../lib/preflight.mjs';
@@ -89,10 +105,32 @@ test('the prompt carries markerContract() byte-identically, not a copy of its te
   }
 });
 
-test('the prompt carries acMapContract() byte-identically — #67, the contract the gate grades', () => {
+test('the prompt does NOT ask for an ac_map — the contract was removed 2026-08-03', () => {
+  // INVERTED, NOT DELETED, and the inversion is the point of keeping the test at all.
+  //
+  // This asserted the opposite until 2026-08-03: that the prompt carried `acMapContract()`
+  // byte-identically, because #67 was a prompt missing a contract the gate graded. The five
+  // rules that read the map were deleted, so the mirror-image defect is now the live one — a
+  // prompt DEMANDING a contract no rule reads. Measured before the removal: asked for a
+  // command that exits 0 per criterion, a worker handed "designed for extensibility" spent
+  // 67 tool calls and $1.19 on verification archaeology and made zero edits.
+  //
+  // WHY A GUARD AND NOT AN ABSENCE. Deleting this test would leave nothing stopping the
+  // contract from being reinstated in the prompt while the rules that consume it stay
+  // deleted — which is #67 exactly, and it took a $6 run to find the first time. The
+  // asymmetry is worth stating: a prompt/gate mismatch is invisible to every other test in
+  // this file, because they all assert what the prompt SAYS, never what no longer reads it.
   const p = compose();
-  assert.ok(p.includes(acMapContract()), 'prompt does not carry the ac_map contract verbatim');
-  assert.ok(p.includes(AC_MAP_PATH), 'prompt must name where the ac_map is written');
+  assert.ok(!p.includes(AC_MAP_PATH), `prompt still names the ac_map path: ${AC_MAP_PATH}`);
+  assert.ok(!/ac[-_ ]?map/i.test(p), 'prompt still mentions an ac_map in some spelling');
+
+  // AND THE BAR IS STILL DISCLOSED. The criteria themselves must survive the removal — a
+  // prompt that stopped showing them would be asking for work against an unstated standard,
+  // which is a different and worse failure than the one being fixed. Asserted here so the
+  // two facts cannot drift apart: no machinery demanded, the bar still stated.
+  for (const ac of TICKET.acceptance_criteria) {
+    assert.ok(p.includes(ac.id), `prompt omits criterion id ${ac.id}`);
+  }
 });
 
 test('a prompt-sourced item with no acceptance criteria produces no invented criteria', () => {
@@ -236,7 +274,7 @@ test('the ticket body is fenced and labelled as filed content, not as instructio
 
   // And the contracts — Alfred's own words — come after it, so the last instructions in the
   // prompt are the ones Alfred wrote.
-  assert.ok(p.indexOf(acMapContract()) > closed, 'the contracts are buried above the ticket body');
+  assert.ok(p.indexOf(markerContract()) > closed, 'the contracts are buried above the ticket body');
 });
 
 test('a body carrying the fence markers cannot close the fence early', () => {
@@ -308,9 +346,9 @@ test('ADDED B2: the prompt carries preflightContract() byte-identically', () => 
   );
 });
 
-test('ADDED B2: the preflight contract comes BEFORE the marker and ac_map contracts', () => {
-  // ORDER IS THE WHOLE POINT, and it is the opposite of the other two contracts'. The marker and
-  // ac_map contracts describe what to write when the work is OVER, so they sit last. This one
+test('ADDED B2: the preflight contract comes BEFORE the marker contract', () => {
+  // ORDER IS THE WHOLE POINT, and it is the opposite of the marker contract's. That contract
+  // describes what to write when the work is OVER, so it sits last. This one
   // describes what to write before touching anything, and a worker that reads "restate the criteria
   // first" after two paragraphs about how to report completion has been handed the steps out of
   // order. `run.mjs` reads the FIRST turn, so an attestation the worker defers is an attestation
@@ -319,7 +357,6 @@ test('ADDED B2: the preflight contract comes BEFORE the marker and ac_map contra
   const pre = p.indexOf(preflightContract({ criteria: TICKET.acceptance_criteria }));
   assert.ok(pre !== -1, 'the preflight contract is absent');
   assert.ok(pre < p.indexOf(markerContract()), 'the preflight contract must precede the marker contract');
-  assert.ok(pre < p.indexOf(acMapContract()), 'the preflight contract must precede the ac_map contract');
 });
 
 test('ADDED B2: the preflight contract still sits AFTER the fenced ticket body', () => {

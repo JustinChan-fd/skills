@@ -3,15 +3,21 @@
 // WHAT PLAN.md §2.3 SAYS ALFRED'S CONTRIBUTION IS: "what it hands over, not orchestration."
 // This module is that handover, and it is the only place the worker learns anything.
 //
-// #67 IS WHY THE CONTRACTS ARE IMPORTED RATHER THAN WRITTEN HERE. Arm C's worker was handed
-// the blocked contract and not the ac_map contract, so it had nowhere to record how it had
-// verified anything. lib/gate.mjs's `resolveAcs` read silence, raised `ac_unmapped` once per
-// criterion, and `pass = findings.length === 0` was therefore FALSE ON A FLAWLESS DIFF. A
-// prompt missing a contract the gate grades against is not an omission; it is a gate that
-// cannot return true. Copying the text here would reintroduce that failure by a slower route:
-// two copies of a contract drift, and the drift is invisible until a run is graded against the
-// half nobody updated. So both contracts arrive by import, byte for byte, and a test asserts
-// the composed prompt `includes()` the imported function's own output.
+// #67 IS WHY A CONTRACT IS IMPORTED RATHER THAN WRITTEN HERE. Arm C's worker was handed the
+// blocked contract and not the ac_map contract, so it had nowhere to record how it had verified
+// anything, and the gate failed a flawless diff. A prompt missing a contract the gate grades
+// against is not an omission; it is a gate that cannot return true. Copying contract text here
+// would reintroduce that by a slower route — two copies drift, invisibly, until a run is graded
+// against the half nobody updated. So contracts arrive by import, byte for byte, and a test
+// asserts the composed prompt `includes()` the imported function's own output.
+//
+// THE AC_MAP CONTRACT WAS REMOVED 2026-08-03, and #67's lesson is the reason the removal had to
+// be symmetrical. #67 was a prompt missing a contract the gate graded; the mirror-image defect
+// is a prompt DEMANDING a contract no rule reads. Measured before the removal: asked for a
+// command that exits 0 per criterion, a worker handed "designed for extensibility" spent 67 tool
+// calls and $1.19 on verification archaeology and made zero edits. The five gate rules that
+// consumed the map went in the same commit — see lib/gate.mjs's header for the full account and
+// for what that costs.
 //
 // WHY NOT THE EXPERIMENT RUNNER'S OWN `composePrompt`. (Named by role, not by filename: the arm C
 // test file's §9 guard refuses any mention of that runner's path from lib/ and stays deliberately
@@ -35,7 +41,6 @@
 // be read as one — the gate running commands itself, in a separate process, is what actually
 // does not care what the body said.
 
-import { AC_MAP_PATH, acMapContract } from './acmap.mjs';
 import { MARKER_PATH, markerContract } from './blocked.mjs';
 import { preflightContract } from './preflight.mjs';
 import { AGENT_BRIEFS, AGENT_SEATS } from './router.mjs';
@@ -117,18 +122,22 @@ export function composeWorkerPrompt({ item, config, repoRoot } = {}) {
     '',
   ];
 
-  // ACCEPTANCE CRITERIA, WITH THE IDS THE GATE KEYS ON. `resolveAcs` looks entries up by
-  // `entry.ac === ac.id`, where the ids are lib/item.mjs's AC1..ACn. Listing the criteria as
-  // bare bullets would leave the worker to invent its own labels, every lookup would miss, and
-  // `ac_unmapped` would fire on a perfect diff — #67's defect reached by dropping the id
-  // instead of the contract. So id and text go on one line, and the ids are named as the keys.
+  // ACCEPTANCE CRITERIA, STILL RENDERED, AND NO LONGER A KEY INTO ANYTHING.
+  //
+  // The ids were here because `resolveAcs` looked entries up by `entry.ac === ac.id`. That join
+  // is gone (2026-08-03) and nothing keys on them now — but they stay, for two reasons. The ids
+  // are how a worker refers to a criterion in its own report and in a blocked marker, and they
+  // are what `graded_criteria` counts as DECLARED. More importantly: the criteria are the bar
+  // the work is judged against by a human even when no rule mechanizes them, and a prompt that
+  // stopped showing them would be asking for work against an unstated standard.
+  //
+  // WHAT IS NO LONGER SAID: the sentence directing the worker to use these ids as keys in a map
+  // file. The bar is disclosed; no machinery is demanded about it.
   if (criteria.length > 0) {
     lines.push(
-      'Acceptance criteria, with the ids used to refer to them:',
+      'Acceptance criteria for this work:',
       '',
       ...criteria.map((ac) => `  ${ac.id}: ${defang(ac.text)}`),
-      '',
-      `Use these ids exactly when you write \`${AC_MAP_PATH}\`.`,
       '',
     );
   } else {
@@ -142,7 +151,7 @@ export function composeWorkerPrompt({ item, config, repoRoot } = {}) {
       `  ${item.ac_problem ?? 'no acceptance criteria were declared'}`,
       '',
       'Do not invent criteria to fill the gap. If you can state what would make the work',
-      `demonstrably done, record that in \`${AC_MAP_PATH}\` as described below.`,
+      'demonstrably done, say so in your report.',
       '',
     );
   }
@@ -187,23 +196,30 @@ export function composeWorkerPrompt({ item, config, repoRoot } = {}) {
     );
   }
 
-  // THE PREFLIGHT CONTRACT, BEFORE THE OTHER TWO AND BY IMPORT (B2).
+  // THE PREFLIGHT CONTRACT, BEFORE THE MARKER CONTRACT AND BY IMPORT (B2).
   //
-  // ITS ORDER IS THE OPPOSITE OF THEIRS, and that is deliberate rather than incidental. The marker
-  // and ac_map contracts describe what to write when the work is OVER, which is why they sit last —
-  // the final instruction a worker reads should be about reporting. This one describes what to write
-  // before touching anything, and `run.mjs` reads the worker's FIRST turn, so an attestation the
-  // worker defers is an attestation Alfred never sees.
+  // ITS ORDER IS THE OPPOSITE, and that is deliberate rather than incidental. The marker contract
+  // describes what to write when the work is OVER, which is why it sits last — the final
+  // instruction a worker reads should be about reporting. This one describes what to write before
+  // touching anything, and `run.mjs` reads the worker's FIRST turn, so an attestation the worker
+  // defers is an attestation Alfred never sees.
   //
   // STILL AFTER THE FENCE, like everything else here. A contract inserted above the quoted body
   // would be talking to a worker that has not read the criteria yet, and a hostile body could then
   // answer it.
   lines.push(preflightContract({ criteria }), '');
 
-  // BOTH CONTRACTS, LAST, BY IMPORT. They answer different questions — "I could not do this"
-  // versus "here is how you can check what I did" — and #67 is what a worker handed only the
-  // first produces. Their order is stable so the prompt is deterministic.
-  lines.push(markerContract(), '', acMapContract());
+  // THE MARKER CONTRACT, LAST, BY IMPORT. One contract now, not two: it answers "I could not do
+  // this", and the ac_map contract that answered "here is how you can check what I did" was
+  // removed 2026-08-03 along with the rules that read it.
+  //
+  // THIS ONE STAYS, AND THE ASYMMETRY IS THE POINT. A worker declaring itself blocked is
+  // reporting its own work incomplete — the same asymmetry the old `runDeclaredChecks` named: a
+  // worker-authored green is weak evidence, a worker-authored RED is strong. Removing the channel
+  // for the strong kind would be a different act from removing the one for the weak kind, and
+  // §8.5's blocked path (stop, comment, label, skip on later ticks) now rests on it ALONE —
+  // `blocked_reason` on the gate verdict lost its only producer with `ac_unsatisfiable`.
+  lines.push(markerContract());
 
   // `MARKER_PATH` is referenced so this module fails to load rather than silently drifting if
   // blocked.mjs renames it; the contract text carries the path itself.

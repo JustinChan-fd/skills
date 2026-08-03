@@ -5,15 +5,20 @@
 // directions: treating a prompt as a ticket fetches nothing and works on an empty body,
 // treating a ticket as a prompt works on the URL text and never reads the issue.
 //
-// THE ONE THING THIS MODULE MUST NOT DO is fill in acceptance criteria. lib/gate.mjs raises
-// `ac_unmapped` once per criterion, so a criterion is not a note — it is a bar the run is
-// graded against. Inventing one manufactures a bar nobody set, and then either fails a good
-// run against it or (worse) passes a run for satisfying a requirement the ticket never made.
-// A prompt therefore carries `acceptance_criteria: []` plus an `ac_problem` string saying so,
-// because "none were given" and "none were found" are different facts and the record should
-// distinguish them.
+// THE ONE THING THIS MODULE MUST NOT DO is fill in acceptance criteria. A criterion is not a
+// note — it is a bar the run is judged against. Inventing one manufactures a bar nobody set, and
+// then either fails a good run against it or (worse) passes a run for satisfying a requirement
+// the ticket never made. A prompt therefore carries `acceptance_criteria: []` plus an
+// `ac_problem` string saying so, because "none were given" and "none were found" are different
+// facts and the record should distinguish them.
 //
-// Like lib/blocked.mjs and lib/acmap.mjs this is an ENVELOPE: it decides whether a work item
+// THE ENFORCEMENT MOVED, THE RULE DID NOT. lib/gate.mjs used to raise `ac_unmapped` once per
+// criterion; that join was deleted 2026-08-03 and no rule now grades criteria individually. The
+// criteria still reach the worker's prompt and still set `graded_criteria`/`ungraded_reason` on
+// the verdict — so a fabricated one is still a fabricated bar on the record, and is now HARDER
+// to catch rather than easier, because nothing downstream tests it against a command.
+//
+// Like lib/blocked.mjs this is an ENVELOPE: it decides whether a work item
 // could be resolved and whether the payload is readable. It does not judge whether the ticket
 // is any good. That judgement is the worker's — the standing rule is that a false premise in a
 // ticket is a finding, not an obstacle — and a module that pre-screened tickets would take that

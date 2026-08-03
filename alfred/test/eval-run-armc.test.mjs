@@ -2420,6 +2420,13 @@ test('a known-good ac_map on a clean tree can reach a PASSING verdict', async ()
   // what `bin/alfred` needs in order to branch on it at all. A gate that returns false on
   // every possible input blocks everything, and an operator who learns that ignores it.
   //
+  // WEAKENED 2026-08-03, AND SAYING SO HERE BECAUSE ITS GREEN NOW MEANS LESS THAN IT DID.
+  // The five rules that read an ac_map were deleted. This test still passes, but no longer
+  // because a well-formed map satisfied them — it passes because nothing reads the map. The
+  // `acMap.length === 3` and `ac_map_state === 'valid'` assertions below still test
+  // `gateInputsFor`/`readAcMap`, which do survive; the `verdict.pass === true` assertion no
+  // longer distinguishes a good map from no map. Its inverted sibling below carries that.
+  //
   // Driven through the real `runGate` and the real `gateInputsFor` rather than a hand-built
   // config, because a fixture of the wiring would pass while the wiring stayed broken — that
   // is the mocked-seam failure this project has already been bitten by once.
@@ -2459,11 +2466,27 @@ test('a known-good ac_map on a clean tree can reach a PASSING verdict', async ()
   }
 });
 
-test('the SAME wiring still FAILS when the ac_map is absent — the rule was not weakened', async () => {
-  // The other half, and the one that protects EXPERIMENT-2.md §4: "a gate patched to catch a
-  // trap it is about to be graded on measures nothing." Making `pass` reachable is only a fix
-  // if `ac_unmapped` still fires on silence. Same inputs, same stub runner, no map filed —
-  // and the verdict must still be false, for that reason and not some other.
+test('COVERAGE LOST 2026-08-03: an absent ac_map no longer fails the run', async () => {
+  // THIS TEST WAS INVERTED, AND THE INVERSION IS A LOSS BEING RECORDED, NOT A FIX.
+  //
+  // It asserted the other half of #67 and protected EXPERIMENT-2.md §4 — "a gate patched to
+  // catch a trap it is about to be graded on measures nothing." Making `pass` REACHABLE was
+  // only a fix if `ac_unmapped` still fired on silence, so this asserted three findings on an
+  // empty tree. The AC join was deleted on 2026-08-03 and `ac_unmapped` no longer exists, so
+  // silence about every criterion is now a PASS.
+  //
+  // WHY IT IS INVERTED RATHER THAN DELETED. Deleting it would leave the suite with no record
+  // that arm C's gate stopped checking per-criterion coverage, and the sibling test above —
+  // which asserts a PASSING verdict is reachable — would then be the only surviving statement
+  // about this wiring. That test now passes for a reason it was not written to test: not
+  // "a well-formed map satisfies the rules" but "no rule looks at the map at all." A suite
+  // where the positive test went vacuous and the negative test was deleted reads as coverage.
+  //
+  // WHAT THIS MEANS FOR ARM C's SCORES. Every scored arm C record was graded by a gate that
+  // had these rules. This one does not, and no field on a record says which gate produced it
+  // (#8's `gate_sha` addresses that going forward). So arm C results from before and after
+  // this date are NOT comparable on `gate_pass`, and `lib/acmap.mjs` is kept alive solely so
+  // eval/run-armc.mjs can still reproduce arm C's frozen prompt byte-for-byte.
   const root = mkdtempSync(join(tmpdir(), 'alfred-armc-stillfails-'));
   try {
     const verdict = await runGate({
@@ -2473,9 +2496,23 @@ test('the SAME wiring still FAILS when the ac_map is absent — the rule was not
       diffstat: [],
       run: async () => ({ code: 0, stdout: '', stderr: '' }),
     });
-    assert.equal(verdict.pass, false);
-    const unmapped = verdict.findings.filter((f) => f.rule === 'ac_unmapped');
-    assert.equal(unmapped.length, 3, 'every unmapped criterion must still be a finding');
+    // The measured consequence, asserted so it cannot change without someone noticing.
+    assert.equal(verdict.pass, true, 'no rule fails an unmapped criterion any more');
+    assert.deepEqual(
+      verdict.findings.filter((f) => /^ac_/.test(f.rule)),
+      [],
+      'an ac_-prefixed rule fired, so the join is partly back and this test must be revisited',
+    );
+    // AND THE DISCLOSURE MUST CARRY WHAT THE RULE NO LONGER DOES. This is the only thing left
+    // standing between "three criteria went ungraded" and a verdict that looks clean: #13's
+    // field. If this assertion ever fails, an operator reading a green arm C verdict has no
+    // way at all to learn the criteria were never checked.
+    assert.equal(verdict.graded_criteria, 0, 'the verdict must not claim it graded criteria');
+    assert.match(
+      verdict.ungraded_reason ?? '',
+      /3 declared/,
+      `the verdict must disclose the three ungraded criteria: ${JSON.stringify(verdict.ungraded_reason)}`,
+    );
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

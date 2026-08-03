@@ -1023,10 +1023,11 @@ export async function executeWork({
   const verdict = await gateFn({
     config: cfg,
     repoRoot: root,
+    // STILL PASSED, AND NO LONGER GRADED. The gate stopped joining criteria to an ac_map on
+    // 2026-08-03, so this now feeds only its `graded_criteria`/`ungraded_reason` disclosure.
+    // Passing it remains load-bearing for exactly that: a caller that stopped would make a run
+    // with six ungraded criteria indistinguishable from a run that declared none.
     acs: item.acceptance_criteria ?? [],
-    // The ac_map is read from the tree the worker wrote. Absent is `absent`, not clean —
-    // `readAcMap`'s distinction, and the gate raises `ac_unmapped` from it.
-    acMap: await readAcMapFrom(root),
     touched: observed.touched,
     diffstat: observed.diffstat,
   });
@@ -1361,18 +1362,4 @@ function readLogText(logPath) {
   } catch {
     return null;
   }
-}
-
-// Reads the ac_map the worker filed, if it filed one. Kept here rather than in acmap.mjs because
-// that module is deliberately I/O-free — it parses text and says what it found.
-async function readAcMapFrom(repoRoot) {
-  const { AC_MAP_PATH, readAcMap } = await import('./acmap.mjs');
-  const { readFileSync } = await import('node:fs');
-  let text = null;
-  try {
-    text = readFileSync(join(repoRoot, AC_MAP_PATH), 'utf8');
-  } catch {
-    // Absent. `readAcMap(null)` returns state 'absent', which is what the gate should see.
-  }
-  return readAcMap(text).entries;
 }
