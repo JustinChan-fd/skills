@@ -154,3 +154,105 @@ export function sessionFromWorkerLog(text) {
     total_cost_usd: typeof cost === 'number' && Number.isFinite(cost) ? cost : null,
   };
 }
+
+// The worker's FIRST TURN, out of a log that is still being written.
+//
+// WHY THIS EXISTS AND WHY IT IS HERE. `lib/preflight.mjs` checks an attestation the worker writes
+// before it touches anything. That check is only worth its own existence if it can happen WHILE
+// the worker runs: a refusal computed after a 25-minute run has already paid the full price of
+// the thing it was meant to prevent — this project's computed-and-discarded shape (#63, #69,
+// #72, #73) with a dollar figure on it. `--output-format stream-json` is what makes the early
+// read possible, and it is already in the worker's argv for an unrelated reason (lib/router.mjs:
+// so the operator is not flying blind for the run's duration). This module already owns "read
+// facts out of the worker's log", so the reader lives beside the other two rather than in
+// preflight.mjs, which is deliberately I/O-free and knows nothing about log formats.
+//
+// MEASURED, on the real 301-line stream-json log at
+// `.alfred-runs/20260802T142320Z-7/worker.log`: 175 `assistant` events, 113 `user`, 12 `system`,
+// 1 `result`. The first `user` event is line 6, and the three content blocks before it are
+// `thinking`, `text`, `tool_use` in that order. So the first turn is the assistant text emitted
+// before the first `user` event — and it is on disk within seconds of the spawn, long before the
+// run ends.
+//
+// THREE STATES, and `in_progress` is the load-bearing one. A poller reading 200ms in sees
+// assistant text and no `user` event yet: the turn is still being written, and refusing there
+// would fire on a worker that was about to answer correctly. A false refusal costs a spawn and
+// teaches the operator to route around the mechanism, which is worse than no mechanism. Same
+// absent/invalid/incomplete discipline as `readMarker` and `parseAttestation`.
+//
+// `thinking` IS NOT TEXT. It is the model reasoning toward an answer rather than the answer, and
+// an attestation found only in a thinking block is one the worker never committed to. `tool_use`
+// has no text to read.
+//
+// NEVER THROWS. Same rule as the two readers above: the mechanism that reports a problem must not
+// become the problem, and this one runs against a file another process is appending to.
+export function firstTurnFromWorkerLog(text) {
+  const none = { state: 'absent', text: null };
+  // `typeof` ONLY, and the blank-string half of this guard was DELETED rather than kept. It was
+  // written as `|| text.trim() === ''`, and a mutant removing that clause survived the suite — so
+  // it was traced rather than re-pinned: a whitespace-only log is already dropped line-by-line by
+  // the `!line.trim()` skip below and returns `none` through the empty-`parts` clause at the end.
+  // No input can distinguish the two forms, which makes it unearned code rather than an untested
+  // guard, and a guard that cannot fire is indistinguishable from one that passed — this project's
+  // recurring shape. The `typeof` half stays and is load-bearing: `(42).split` does not exist, so
+  // dropping it turns a hostile input into the throw this function promises never to do.
+  if (typeof text !== 'string') return none;
+
+  const parts = [];
+  let sawUser = false;
+  let sawResult = false;
+
+  for (const line of text.split('\n')) {
+    if (!line.trim()) continue;
+    let event;
+    try {
+      event = JSON.parse(line);
+    } catch {
+      // A torn line, and it can appear ANYWHERE in a file being appended to — not only at the
+      // tail. Treating one as the turn boundary would truncate the attestation and refuse on a
+      // partial quote, so it is skipped and the scan continues.
+      continue;
+    }
+    if (!event || typeof event !== 'object') continue;
+
+    if (event.type === 'result') {
+      sawResult = true;
+      break;
+    }
+
+    // THE BOUNDARY. A `user` event is a tool result coming back, which means the worker has
+    // stopped talking and started acting. Everything after it belongs to a later turn.
+    if (event.type === 'user') {
+      sawUser = true;
+      break;
+    }
+
+    if (event.type !== 'assistant') continue;
+
+    // A SUBAGENT'S WORDS ARE NOT THE WORKER'S. MEASURED: every assistant event on the real log
+    // carried `parent_tool_use_id: null`, because that run delegated to nothing. A run that DOES
+    // delegate interleaves the subagent's messages into the same stream tagged with the tool_use
+    // id that spawned them — and reading those as the attestation would grade a context that was
+    // never handed the contract.
+    if (event.parent_tool_use_id) continue;
+
+    const content = event.message?.content;
+    if (!Array.isArray(content)) continue;
+    for (const block of content) {
+      if (!block || typeof block !== 'object') continue;
+      if (block.type !== 'text') continue;
+      if (typeof block.text !== 'string') continue;
+      parts.push(block.text);
+    }
+  }
+
+  if (parts.length === 0) return none;
+  return {
+    // A `result` event means the CLI says the run is over, so the turn cannot grow. Without that
+    // clause a worker that answered and stopped — no tool calls at all — would poll as
+    // `in_progress` forever and the caller would wait out the wall cap on a run that finished in
+    // ten seconds.
+    state: sawUser || sawResult ? 'complete' : 'in_progress',
+    text: parts.join('\n'),
+  };
+}
