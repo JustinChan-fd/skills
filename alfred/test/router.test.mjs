@@ -3,14 +3,8 @@
 // PLAN.md M5 freezes four names; they appear below verbatim as the first four tests. The rest
 // are ADDED: and each names what it measures.
 //
-// TWO THINGS MEASURED AGAINST THE LIVE CLI before these tests were written, because the
+// A THING MEASURED AGAINST THE LIVE CLI before these tests were written, because the
 // alternative was encoding a guess about a flag and calling it a control:
-//
-//   `--max-budget-usd 0.001` on a 40-line counting prompt returned
-//   `is_error: true, subtype: 'error_max_budget_usd', terminal_reason: 'budget_exhausted'`
-//   and `total_cost_usd: 0.0351519`. So the ceiling is REAL and ENFORCED BY THE CLI, and it
-//   is enforced AFTER a turn rather than before it — a cap of $0.001 still spent 3.5 cents.
-//   It bounds a runaway; it does not bound the first turn.
 //
 //   `--agents '{"probe":{"description":"d","prompt":"p","bogus_key_xyz":1}}'` ran to
 //   `end_turn` with no complaint. The flag SILENTLY IGNORES unknown keys. So does
@@ -18,20 +12,23 @@
 //   subagent verifiably ran (`modelUsage` carried both `anthropic.claude-sonnet-5` and
 //   `claude-haiku-4-5`, which is the same probe proving the `model` key IS honoured).
 //
-// That second finding is why NO token ceiling goes in --agents: not `token_budget` and not
+// That finding is why NO token ceiling goes in --agents: not `token_budget` and not
 // `maxTokens`. Either would read in the config like a spend cap while having no effect, which
 // is worse than no cap because the file looks protected. PLAN.md §M5's frozen name asks for
 // "per-tier ceilings" in that payload; the CLI cannot do it, so the name is kept and what it
-// asserts follows the measurement. The $11.98 lesson rests on `--max-budget-usd` for dollars
-// and on `seatBudgets()` for tokens — the latter Alfred's own accounting, which does not
-// pretend the vendor is checking it.
+// asserts follows the measurement.
+//
+// `--max-budget-usd` is NOT in workerArgv (see lib/router.mjs's header): it was also measured
+// to be the specific cause of a cache-breakpoint freeze, and a dollar cap that roughly
+// quadruples the dollars it caps is not a net safety win. The $11.98 lesson now rests on
+// `seatBudgets()` alone — Alfred's own accounting, which does not pretend the vendor is
+// checking it — plus `--max-turns` and the external wall-cap kill as the runaway bounds.
 
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
-import { THRESHOLDS } from '../eval/armcost.mjs';
 import { SEATS } from '../lib/models.mjs';
-import { AGENT_SEATS, agentsPayload, budgetUsdFor, seatBudgets, workerArgv } from '../lib/router.mjs';
+import { AGENT_SEATS, agentsPayload, seatBudgets, workerArgv } from '../lib/router.mjs';
 
 const CONFIG = Object.freeze({
   version: 1,
@@ -127,34 +124,11 @@ test('ADDED: the prompt is an argv element, never interpolated into a string', (
   assert.equal(argv.filter((x) => x === hostile).length, 1);
 });
 
-test('ADDED: --max-budget-usd is present, because it is the only ceiling the CLI enforces', () => {
-  // Probed live: a $0.001 cap returned subtype error_max_budget_usd / terminal_reason
-  // budget_exhausted. This is the $11.98 bound with teeth. A run without it has no bound at
-  // all, so it is not optional.
-  const argv = argvOf();
-  const budget = Number(flag(argv, '--max-budget-usd'));
-  assert.ok(Number.isFinite(budget));
-  assert.ok(budget > 0);
-});
-
-test('ADDED: the budget comes from config when stated and refuses a nonsense value', () => {
-  assert.equal(flag(argvOf({ budget_usd: 7.5 }), '--max-budget-usd'), '7.5');
-  for (const bad of [0, -1, 'lots', Number.NaN, Number.POSITIVE_INFINITY]) {
-    assert.throws(() => budgetUsdFor({ budget_usd: bad }), /budget/i, String(bad));
-  }
-});
-
-test('ADDED: the default budget is the pre-registered KILL cap, not the acceptance mean', () => {
-  // The distinction armcost.mjs is explicit about: spendCapUsd $8 kills a run, acceptMeanUsd
-  // $4 fails it on acceptance. --max-budget-usd aborts, so it is the kill number. Defaulting
-  // to $4 would be exactly the collapse that comment warns against — it "would kill every run
-  // that was about to produce the evidence that makes its own cost figure meaningful."
-  assert.equal(budgetUsdFor({}), THRESHOLDS.armC.spendCapUsd);
-  assert.equal(budgetUsdFor(undefined), THRESHOLDS.armC.spendCapUsd);
-  assert.notEqual(THRESHOLDS.armC.spendCapUsd, THRESHOLDS.armC.acceptMeanUsd);
-  // lib/ may not import eval/, so router.mjs holds its own copy of the number. This is the
-  // cross-check that keeps the copy from drifting silently.
-  assert.equal(budgetUsdFor({}), 8);
+test('ADDED: --max-budget-usd is absent — measured to freeze cache-breakpoint advancement', () => {
+  // See lib/router.mjs's header: identical freeze at $8 and $1000 (presence, not value, is the
+  // mechanism), removing it restored normal climbing cache_read. This is the falsifier for
+  // that fix — if the flag creeps back in, this fails first.
+  assert.ok(!argvOf().includes('--max-budget-usd'));
 });
 
 test('ADDED: --permission-mode bypassPermissions and --output-format stream-json are both present', () => {

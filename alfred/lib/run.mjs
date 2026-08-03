@@ -21,10 +21,10 @@
 //   2. A LAUNCH FAILURE IS NOT A COMPLETED RUN. `spawn` reports ENOENT on a later tick, so
 //      `child.pid` is undefined and a naive wait reports a worker that never started as one
 //      that finished having delivered nothing.
-//   3. A WALL CAP THAT FIRES FROM OUTSIDE THE CHILD. `--max-budget-usd` is real but enforced
-//      POST-TURN — a $0.001 cap let $0.0352 through — so it bounds a runaway across turns and
-//      bounds nothing inside one. SIGTERM, not SIGKILL: the transcript the run is priced from
-//      has to flush.
+//   3. A WALL CAP THAT FIRES FROM OUTSIDE THE CHILD. It is now the PRIMARY runaway bound, not a
+//      supplement to a dollar cap — `--max-budget-usd` was removed from the worker's own argv
+//      (see lib/router.mjs's header) after it was measured to freeze cache-breakpoint
+//      advancement. SIGTERM, not SIGKILL: the transcript the run is priced from has to flush.
 //
 // THE SEAT ENV, WHICH IS MEASURED RATHER THAN ASSUMED. `~/.zshrc:42-44` exports the three
 // `ANTHROPIC_DEFAULT_*` seats and there is no `.zshenv`, `.zprofile`, or `.zlogin` — so
@@ -56,6 +56,7 @@ import { runGate } from './gate.mjs';
 import { SEATS } from './models.mjs';
 import { composeWorkerPrompt, standingRules } from './prompt.mjs';
 import { workerArgv } from './router.mjs';
+import { syncRecord } from './telemetry.mjs';
 import { terminalErrorFromWorkerLog } from './transcript.mjs';
 
 const execFileAsync = promisify(execFile);
@@ -388,6 +389,11 @@ export async function executeWork({
   // real run cost $1.0671732 and produced no record at all. The path was always computable — see
   // lib/transcript.mjs — so what was missing was the wiring, not the information.
   report: reportFn = recordForRun,
+  // Same injection pattern as `report`/`spawn`/`gate`: real default is `syncRecord`, so a real
+  // run really pushes to the configured sink, and a test can substitute a stub without touching
+  // git. See lib/telemetry.mjs's header for why this is a fresh implementation and not an import
+  // of harness-core's `syncRun`.
+  sync: syncFn = syncRecord,
   env = process.env,
   // Injected only so a test can put a transcript somewhere and have the composed path find it.
   // An environment fact rather than a module boundary, which is the point: with `report` left at
@@ -606,6 +612,20 @@ export async function executeWork({
     }
   }
 
+  // Step 7c. Sync to the real sink. A THIRD sidecar, same reason as record_error/record_write_error
+  // above: the graded run already happened, so a sink outage (network down, remote renamed, disk
+  // full) must read as "the sync failed" and never as "the run failed". `syncFn` itself never
+  // throws (see lib/telemetry.mjs), but this is still caught — a stub or a future change to that
+  // contract must not be the thing that turns a successful run into a refusal.
+  let sync = null;
+  if (record) {
+    try {
+      sync = syncFn({ runDir, telemetry: cfg.telemetry ?? null, record });
+    } catch (err) {
+      sync = { synced: false, reason: `sync_threw: ${String(err?.message ?? err)}` };
+    }
+  }
+
   return {
     ok: true,
     error: null,
@@ -621,6 +641,9 @@ export async function executeWork({
     // Named rather than swallowed. A record that is absent for a reason nobody wrote down is
     // indistinguishable from a run nobody asked to report on.
     record_error: recordError,
+    // Whether the record made it to the telemetry sink — `{ synced, reason? }` from `syncFn`, or
+    // null when there was no record to sync in the first place.
+    sync,
     observed_error: observed.error ?? null,
   };
 }

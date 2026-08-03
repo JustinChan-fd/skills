@@ -32,6 +32,5 @@
     "alfred/docs/exp2-evidence/",
     ".alfred/config.json",
     "package-lock.json"
-  ],
-  "budget_usd": 8
+  ]
 }

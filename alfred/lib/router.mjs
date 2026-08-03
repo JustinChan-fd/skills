@@ -1,18 +1,12 @@
 // router — config in, argv array out. No spawn, no model call, no I/O.
 //
 // PLAN.md §6: "A table and two flags. Not a service, not a phase, not a model call." The table
-// is lib/models.mjs. This is the two flags, and the honest count is five.
+// is lib/models.mjs. This is the two flags.
 //
 // WHAT THE CLI ACTUALLY ENFORCES, measured against the live gateway rather than read off the
 // help text, because three of this project's last four defects were controls that could not
 // fire and encoding a flag's semantics on faith is how a fourth gets written:
 //
-//   --max-budget-usd    REAL. A $0.001 cap returned `is_error: true`,
-//                       `subtype: error_max_budget_usd`, `terminal_reason: budget_exhausted`.
-//                       Enforced POST-TURN, though: that run had already spent $0.0352 against
-//                       the $0.001 cap. So it bounds a runaway over several turns; it does not
-//                       bound the first one. Stated rather than glossed, because a ceiling
-//                       believed to be pre-flight is a ceiling trusted for the wrong thing.
 //   --agents `model`    REAL. Forced a delegation and `modelUsage` came back with two entries,
 //                       `anthropic.claude-sonnet-5` and `claude-haiku-4-5` — the subagent was
 //                       billed at the tier named here.
@@ -27,12 +21,26 @@
 // PLAN.md §M5 asks for "per-tier ceilings" in that payload; that is not a thing the CLI can do,
 // and the frozen test name is kept while what it asserts follows the measurement.
 //
-// So the $11.98 lesson (an unbounded subagent burning 3.9M tokens) rests on TWO separate things
-// and neither is that payload: `--max-budget-usd` for the dollar bound the CLI honours, and
+// `--max-budget-usd` WAS HERE, AND WAS REMOVED (2026-08-02). It is a real, CLI-enforced dollar
+// ceiling — measured: a $0.001 cap returned `is_error: true, subtype: error_max_budget_usd,
+// terminal_reason: budget_exhausted`. But a from-scratch isolation experiment (a synthetic
+// 12-file task, one Alfred-specific flag varied at a time) found it is ALSO the specific cause
+// of a cache-breakpoint freeze: with it present, `cache_creation_input_tokens` was 0 on every
+// turn and `cache_read_input_tokens` stayed pinned at its first-turn value for the run's entire
+// duration, forcing every later turn to resend the whole growing context uncached. Identical
+// freeze at $8 and at $1000, so it is the flag's PRESENCE and not its value. Removing it —
+// `--agents`, `--append-system-prompt`, and `--session-id` all still present — restored normal
+// climbing `cache_read`. On the real TARS-1351 run, this flag is the likely majority cause of
+// $6.10 of $7.49 being uncached input. A dollar cap that roughly quadruples the dollars it caps
+// is not a net safety win, so it is gone; `--max-turns` and `--wall-cap-minutes` (lib/run.mjs's
+// external kill) remain as the runaway bounds. Neither is a dollar cap — that gap is accepted
+// rather than hidden, and `config.budget_usd` is gone with it rather than left as a setting that
+// reads as applied and no longer is.
+//
+// So the $11.98 lesson (an unbounded subagent burning 3.9M tokens) rests on ONE thing now:
 // SEATS[seat].token_budget as Alfred's own accounting, enforced by whoever is watching the
 // subagent — exported here as `seatBudgets` so it is available to be enforced rather than
-// implied. An unenforced budget in a flag and an unenforced budget in a variable are different:
-// the second does not pretend the vendor is checking it.
+// implied. An unenforced budget in a variable does not pretend the vendor is checking it.
 
 import { SEATS, ceilingFor, normalizeModelId } from './models.mjs';
 
@@ -40,16 +48,6 @@ import { SEATS, ceilingFor, normalizeModelId } from './models.mjs';
 // context rather than subagents. `adjudicator` is absent so that opus cannot be arrived at by
 // omission — PLAN.md §4: "models.agents has no opus entry by default. Escalation is explicit."
 export const AGENT_SEATS = Object.freeze(['scan', 'reason']);
-
-// THRESHOLDS.armC.spendCapUsd, which was pre-registered before arm C ran. Deliberately the KILL
-// number and not `acceptMeanUsd: 4`: armcost.mjs states that collapsing the two "would kill
-// every run that was about to produce the evidence that makes its own cost figure meaningful."
-// A run may legitimately cost $6, fail acceptance, and still be worth finishing.
-//
-// Copied rather than imported, because eval/ is experiment scaffolding and lib/ is the runtime;
-// test/router.test.mjs cross-checks this against the eval constant so the copy cannot drift
-// silently.
-const DEFAULT_BUDGET_USD = 8;
 
 // Each tier's brief. These reach the model, so they say what the seat is FOR — a description
 // that does not distinguish the tiers gives the delegating context no basis to pick one, and it
@@ -82,19 +80,6 @@ export const AGENT_BRIEFS = Object.freeze({
       'work around. Say what you are uncertain about rather than resolving it silently.',
   },
 });
-
-export function budgetUsdFor(config) {
-  const stated = config?.budget_usd;
-  if (stated === undefined || stated === null) return DEFAULT_BUDGET_USD;
-  // Not coerced. `budget_usd: "lots"` becoming NaN and then reaching the flag as the string
-  // "NaN" is the kind of thing the CLI would accept and ignore, and then there is no cap.
-  if (typeof stated !== 'number' || !Number.isFinite(stated) || stated <= 0) {
-    throw new Error(
-      `budget_usd must be a positive finite number of dollars, got ${JSON.stringify(stated)}`,
-    );
-  }
-  return stated;
-}
 
 // Alfred's own per-seat accounting, which is NOT in the argv because the CLI does not enforce
 // it. Exported so a caller can enforce it by stopping the subagent; returning it from here
@@ -196,7 +181,10 @@ export function workerArgv({ config, prompt, appendSystemPrompt, maxTurns, sessi
     // whole blob.
     '--output-format', 'stream-json',
     '--verbose',
-    '--max-budget-usd', String(budgetUsdFor(config)),
+    // NO --max-budget-usd. It was here, and measured to be the specific cause of a
+    // cache-breakpoint freeze — see the header. `--max-turns` and lib/run.mjs's external
+    // wall-cap kill are the runaway bounds now; neither is a dollar cap, and that gap is
+    // accepted rather than papered over with a flag that quadruples the dollars it caps.
     '--agents', JSON.stringify(agentsPayload(config)),
   ];
 

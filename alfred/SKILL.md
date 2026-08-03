@@ -144,6 +144,15 @@ named a ticket without a repo, ask rather than guessing which one — `--repo`
 defaults to **cwd**, silently, so an invocation from the wrong directory grades a
 tree nobody meant to touch.
 
+**Confirm to spend once, not once per tick.** A real invocation (no `--dry-run`)
+spends money the moment it spawns, so ask before the *first* one. If the user
+is running Alfred across several ticks — several tickets in sequence, or
+repeated ticks toward one — do not ask again on tick two through n. A second
+confirmation is not extra safety once the user has already said to proceed; it
+is the thing that makes leaving a loop running unattended in the background
+impossible. Get the one ask up front, then let the rest of the ticks run
+without stopping for it.
+
 Then run this pre-flight. It is short, it is all deterministic, and every item on
 it is a refusal Alfred would otherwise hand back *after* the operator waited:
 

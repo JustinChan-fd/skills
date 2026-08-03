@@ -33,7 +33,6 @@
 import { readFileSync } from 'node:fs';
 import { isAbsolute, join, relative, sep } from 'node:path';
 
-import { budgetUsdFor } from './router.mjs';
 import { matchesPathPattern } from './paths.mjs';
 
 export const CONFIG_RELATIVE_PATH = join('.alfred', 'config.json');
@@ -112,14 +111,23 @@ const SCHEMA = {
     },
   },
   off_limits: { type: 'array', required: true },
-  // Reachable at last (#70). `lib/router.mjs`'s `budgetUsdFor` has always read this key and
-  // handed it to `--max-budget-usd` — the only ceiling the CLI was measured to enforce — but it
-  // was absent here, so the unknown-key rule refused every config that set it and the only
-  // budget a real run could use was the router's hardcoded default. Two modules each correct in
-  // isolation, and the gap only appeared when a real fixture was validated.
-  budget_usd: { type: 'number' },
   models: { type: 'object' },
-  telemetry: { type: 'object', keys: { sink: { type: 'string' }, repo_slug: { type: 'string' } } },
+  telemetry: {
+    type: 'object',
+    keys: {
+      sink: { type: 'string' },
+      repo_slug: { type: 'string' },
+      // #32: what `lib/telemetry.mjs`'s `syncRecord` needs to actually push a record
+      // somewhere, as opposed to `sink`/`repo_slug`, which are carried into the record
+      // as data and never acted on (see `lib/report.mjs`).
+      remote: { type: 'string' },
+      dir: { type: 'string' },
+      commit_identity: {
+        type: 'object',
+        keys: { name: { type: 'string' }, email: { type: 'string' } },
+      },
+    },
+  },
 };
 
 const typeOf = (v) => (Array.isArray(v) ? 'array' : v === null ? 'null' : typeof v);
@@ -264,17 +272,12 @@ function validateSemantics(raw) {
     }
   }
 
-  // ASKED OF THE ROUTER RATHER THAN RE-STATED. `budgetUsdFor` already refuses a non-positive or
-  // non-finite dollar figure, and a second copy of that rule here is the drift this key's own
-  // absence was a case of. What the loader adds is WHERE it is refused: the router throws, and
-  // at the top of an unattended tick an exception is a dead tick with no record, so it is caught
-  // and reported as an error string like every other one in this file.
-  if (!nullish(raw.budget_usd)) {
-    try {
-      budgetUsdFor(raw);
-    } catch (e) {
-      return `budget_usd: ${e.message}`;
-    }
+  // #32: a config with one but not the other looks configured and isn't — `syncRecord`
+  // treats either missing as `telemetry_not_configured` and silently no-ops, so a typo
+  // that drops one of the pair would otherwise read as "sync is on" while nothing syncs.
+  const telemetry = raw.telemetry ?? null;
+  if (telemetry && !nullish(telemetry.remote) !== !nullish(telemetry.dir)) {
+    return 'telemetry.remote and telemetry.dir must be set together — one without the other silently syncs nothing';
   }
 
   if (!nullish(raw.loop?.poll_interval_minutes)) {

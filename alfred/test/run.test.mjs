@@ -221,9 +221,10 @@ test('stdio goes to a FILE, so a child past the 64KB pipe buffer still exits', a
 });
 
 test('the wall cap fires from outside the child and reports the kill', async () => {
-  // A worker that hangs is otherwise unbounded: `--max-budget-usd` is enforced POST-TURN, so it
-  // bounds a runaway across turns and bounds nothing at all inside one. SIGTERM rather than
-  // SIGKILL, because the transcript the run is priced from has to flush.
+  // A worker that hangs is otherwise unbounded — Alfred's own argv carries no dollar ceiling
+  // (see lib/router.mjs's header), so this wall cap is the only thing standing between a
+  // stuck worker and an unattended tick that never ends. SIGTERM rather than SIGKILL, because
+  // the transcript the run is priced from has to flush.
   const dir = mktemp('cap');
   const outcome = await spawnWorker(['-e', 'setTimeout(() => {}, 60000)'], {
     bin: NODE,
@@ -914,6 +915,51 @@ test('a clean run is NOT reported as terminated — the guard can tell the diffe
   assert.equal(result.gate.pass, true, `a clean run did not pass: ${JSON.stringify(result.gate.findings)}`);
 });
 
+test('a real successful run is NOT reported as terminated — terminal_reason is "completed", not "success"', async () => {
+  // MEASURED ON THE FIRST REAL JIRA RUN, TARS-1351, 2026-08-01. The falsifier above never
+  // exercised this shape because its fixture omits `terminal_reason` entirely, so `reason` falls
+  // through to `subtype` and happens to equal `'success'`. The real CLI writes BOTH fields on a
+  // genuine finish, and `terminal_reason` is `'completed'` — a different string from `subtype`,
+  // preferred by the `??` in terminalErrorFromWorkerLog. The old exemption only recognised the
+  // literal string `'success'`, so a fully successful, verified 58-turn run was reported as
+  // `check_failed` with detail "the worker did not finish: the CLI reported completed after
+  // $7.488232 and 58 turns" — a false positive on a clean tree.
+  const repo = repoWithCommit();
+
+  const result = await executeWork({
+    ref: 'a job that finishes, reported the way the real CLI reports it',
+    config: CONFIG,
+    repoRoot: repo,
+    runRoot: mktemp('runs'),
+    stamp: '20260801T033853Z',
+    spawn: stubSpawn((argv, opts) => {
+      writeFileSync(
+        opts.logPath,
+        `${JSON.stringify({
+          is_error: false,
+          terminal_reason: 'completed',
+          subtype: 'success',
+          stop_reason: 'end_turn',
+          session_id: 'e0de647e-0000-0000-0000-000000000000',
+          total_cost_usd: 7.488232499999999,
+          num_turns: 58,
+          type: 'result',
+        })}\n`,
+      );
+      return { exit: 0, killed: false, signal: null, wall_ms: 540000, log: opts.logPath };
+    }),
+    report: () => null,
+  });
+
+  assert.ok(result.ok, result.error);
+  assert.deepEqual(
+    result.gate.findings.filter((f) => /did not finish/.test(f.detail ?? '')),
+    [],
+    'a completed run reporting terminal_reason:"completed" was reported as terminated',
+  );
+  assert.equal(result.gate.pass, true, `a clean run did not pass: ${JSON.stringify(result.gate.findings)}`);
+});
+
 test('the argv handed to the worker comes from the router and carries the composed prompt', async () => {
   // §2.1 step 4. Asserted on the argv the spawn actually received, because a router called and
   // then ignored is the same as no router — and the flags a run used have to be recoverable
@@ -937,7 +983,7 @@ test('the argv handed to the worker comes from the router and carries the compos
   assert.equal(argv[0], '-p');
   assert.ok(argv[1].includes('make the retry backoff configurable'), 'the prompt is not the ticket');
   assert.ok(argv[1].includes('.alfred/ac-map.json'), 'the ac_map contract did not reach the worker');
-  assert.ok(argv.includes('--max-budget-usd'), 'the one ceiling the CLI honours is absent');
+  assert.ok(!argv.includes('--max-budget-usd'), 'measured to freeze cache-breakpoint advancement — see lib/router.mjs');
   assert.ok(argv.includes('--fallback-model'), 'an unattended tick has no fallback');
   // The standing rules travel as a system prompt, not folded into the ticket text.
   const at = argv.indexOf('--append-system-prompt');
@@ -1299,4 +1345,123 @@ test('a record that cannot be written does not fail the run it was recording', a
   // for a record that built fine and suppress the cost line with it — see the cli test.
   assert.match(result.record_write_error, /ENOTDIR|not a directory|could not write/i);
   assert.equal(result.record_error, null, 'blamed the reporter for a filesystem failure');
+});
+
+// --- step 7c: the record reaches the telemetry sink ---
+//
+// Same injection pattern as spawn/gate/report: `sync` defaults to the real `syncRecord`
+// (exercised for real in telemetry.test.mjs against a fixture clone), and here a stub proves
+// the wiring — that `cfg.telemetry` and the built record actually reach it, and that a throw
+// from it cannot fail the run — without touching git.
+
+test('cfg.telemetry reaches syncFn unchanged, alongside the record just built', async () => {
+  const repo = repoWithCommit();
+  const telemetry = { remote: 'https://example.invalid/x.git', dir: '/tmp/does-not-matter' };
+  let received = null;
+
+  const result = await executeWork({
+    ref: 'sync wiring',
+    config: { ...CONFIG, telemetry },
+    repoRoot: repo,
+    runRoot: mktemp('runs'),
+    stamp: '20260802T090000Z',
+    spawn: stubSpawn((argv, opts) => ({
+      exit: 0, killed: false, signal: null, wall_ms: 1, log: opts.logPath,
+    })),
+    report: () => ({ ok: true, error: null, gaps: [], cost: { total_usd: 1 } }),
+    sync: (args) => {
+      received = args;
+      return { synced: true, path: '/tmp/fake' };
+    },
+  });
+
+  assert.ok(received, 'syncFn was never called');
+  assert.deepEqual(received.telemetry, telemetry, 'cfg.telemetry did not reach syncFn unchanged');
+  assert.equal(received.record, result.record, 'syncFn did not receive the same record the run built');
+  assert.equal(received.runDir, result.run_dir);
+  assert.deepEqual(result.sync, { synced: true, path: '/tmp/fake' });
+});
+
+test('a run with no telemetry configured still calls syncFn, with telemetry: null', () => {
+  return (async () => {
+    const repo = repoWithCommit();
+    let received = 'not called';
+
+    const result = await executeWork({
+      ref: 'no telemetry configured',
+      config: CONFIG,
+      repoRoot: repo,
+      runRoot: mktemp('runs'),
+      stamp: '20260802T090100Z',
+      spawn: stubSpawn((argv, opts) => ({
+        exit: 0, killed: false, signal: null, wall_ms: 1, log: opts.logPath,
+      })),
+      report: () => ({ ok: true, error: null, gaps: [], cost: { total_usd: 1 } }),
+      sync: (args) => {
+        received = args.telemetry;
+        return { synced: false, reason: 'telemetry_not_configured' };
+      },
+    });
+
+    assert.equal(received, null, 'a config with no telemetry block must reach syncFn as null, not undefined-and-skipped');
+    assert.deepEqual(result.sync, { synced: false, reason: 'telemetry_not_configured' });
+  })();
+});
+
+test('syncing cannot fail the run: a syncFn that throws is caught and named on its own field', async () => {
+  // The same sidecar rule as record_error/record_write_error, at the third seam. A sink outage
+  // must read as "the sync failed", never as "the run failed" — and never blamed on report_error
+  // or record_write_error, which is why this asserts a field of its own rather than reusing
+  // either of those.
+  const repo = repoWithCommit();
+  const result = await executeWork({
+    ref: 'sync explodes',
+    config: { ...CONFIG, telemetry: { remote: 'https://example.invalid/x.git', dir: '/tmp/x' } },
+    repoRoot: repo,
+    runRoot: mktemp('runs'),
+    stamp: '20260802T090200Z',
+    spawn: stubSpawn((argv, opts) => ({
+      exit: 0, killed: false, signal: null, wall_ms: 1, log: opts.logPath,
+    })),
+    report: () => ({ ok: true, error: null, gaps: [], cost: { total_usd: 1 } }),
+    sync: () => {
+      throw new Error('the sink is unreachable');
+    },
+  });
+
+  assert.equal(result.ok, true, 'a broken syncFn failed the run it was reporting on');
+  assert.ok(result.record, 'the record was discarded because syncing threw');
+  assert.equal(result.record_error, null, 'blamed the reporter for a sync failure');
+  assert.equal(result.record_write_error, null, 'blamed the record write for a sync failure');
+  assert.match(result.sync.reason, /sync_threw.*the sink is unreachable/);
+});
+
+test('when there is no record to sync, syncFn is never called at all', async () => {
+  // Step 7c reads `if (record)` — a run whose reporter itself threw has nothing to sync, and
+  // calling syncFn with `record: null` would either need its own null-guard or silently sync
+  // nothing meaningful. Asserting syncFn is uncalled pins which of those two this is.
+  const repo = repoWithCommit();
+  let called = false;
+
+  const result = await executeWork({
+    ref: 'nothing to sync',
+    config: { ...CONFIG, telemetry: { remote: 'https://example.invalid/x.git', dir: '/tmp/x' } },
+    repoRoot: repo,
+    runRoot: mktemp('runs'),
+    stamp: '20260802T090300Z',
+    spawn: stubSpawn((argv, opts) => ({
+      exit: 0, killed: false, signal: null, wall_ms: 1, log: opts.logPath,
+    })),
+    report: () => {
+      throw new Error('the reporter exploded');
+    },
+    sync: () => {
+      called = true;
+      return { synced: true };
+    },
+  });
+
+  assert.equal(result.record, null);
+  assert.equal(called, false, 'syncFn ran with nothing built to sync');
+  assert.equal(result.sync, null);
 });

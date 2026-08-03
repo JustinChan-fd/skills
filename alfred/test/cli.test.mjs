@@ -225,8 +225,8 @@ test('a flag missing its value refuses rather than swallowing the following flag
 
 test('a non-numeric --max-turns refuses instead of passing the string "NaN" through', () => {
   // Measured precedent, and the reason this refusal exists at all: the CLI accepts unknown and
-  // malformed `--agents` keys silently. `budgetUsdFor` refuses a non-number for the same
-  // reason. A `--max-turns NaN` that the CLI ignores is an unbounded run wearing a limit.
+  // malformed `--agents` keys silently. A `--max-turns NaN` that the CLI ignores is an
+  // unbounded run wearing a limit.
   assert.throws(() => parseArgv(['work', '#4', '--max-turns', 'lots']), /max-turns/);
   assert.throws(() => parseArgv(['work', '#4', '--max-turns', '0']), /max-turns/);
   assert.equal(parseArgv(['work', '#4', '--max-turns', '12']).maxTurns, 12);
@@ -427,7 +427,7 @@ test('--dry-run composes everything and spawns nothing, and says so', () => {
   // The argv it would have used is shown, including the model, because the point of a
   // rehearsal is checking the flags.
   assert.match(r.stdout, /--model/);
-  assert.match(r.stdout, /--max-budget-usd/);
+  assert.doesNotMatch(r.stdout, /--max-budget-usd/);
 });
 
 test('the worker is handed the composed prompt and the standing rules, asserted on the real argv', () => {

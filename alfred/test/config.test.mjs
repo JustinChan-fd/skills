@@ -39,9 +39,6 @@ import { test } from 'node:test';
 
 import { loadConfig, resolveBase, isOffLimits, DEFAULT_POLL_INTERVAL_MINUTES } from '../lib/config.mjs';
 import { BLOCKED_LABEL } from '../lib/blocked.mjs';
-// Imported into the CONFIG test on purpose: the defect below is that each module was right
-// on its own. See the #70 test at the bottom of this file.
-import { budgetUsdFor } from '../lib/router.mjs';
 
 // A minimal config that VALIDATES — every required field and nothing more. Tests that
 // probe one field spread this and override, so a test about the poll interval cannot
@@ -525,39 +522,14 @@ test('ADDED: the escape check survives the shared matcher (#69)', () => {
   assert.equal(isOffLimits({ off_limits: ['src/../../etc'] }, '/abs/other/etc/passwd', '/abs/repo'), false);
 });
 
-test('ADDED: budget_usd is a settable key, because lib/router.mjs already reads it (#70)', () => {
-  // TWO MODULES EACH CORRECT ALONE, PRODUCING A SETTING THAT CANNOT BE SET. `budgetUsdFor`
-  // reads `config.budget_usd` and hands it to `--max-budget-usd` — the one ceiling the CLI was
-  // MEASURED to enforce, and half of what the $11.98 lesson rests on. test/router.test.mjs
-  // asserts a config of `{ budget_usd: 7.5 }` reaches the flag as 7.5. But that test passes a
-  // bare object; nothing put one through `loadConfig`, whose SCHEMA never listed the key and
-  // whose unknown-key rule therefore REFUSED it. So the only budget any real run could use was
-  // the hardcoded default, and an operator writing a cap into their config got a refusal
-  // instead of a cap — the drift shape of #67, one layer out, found by validating a real
-  // fixture rather than by a test of either module.
-  //
-  // Asserted as a ROUND TRIP through both modules on purpose. A test that only checked
-  // `loadConfig` accepted the key would pass a build in which the router had renamed it.
+test('ADDED: budget_usd is an unknown key — the config concept was dropped with the flag', () => {
+  // #70's key existed only because lib/router.mjs's budgetUsdFor read it and handed it to
+  // --max-budget-usd. That flag is gone (measured to freeze cache-breakpoint advancement —
+  // see lib/router.mjs's header), and the config key went with it rather than being left as
+  // a setting that reads as applied and no longer is.
   const loaded = loadConfig(repoWith({ ...VALID, budget_usd: 2 }));
-  assert.equal(loaded.ok, true, loaded.error);
-  assert.equal(loaded.config.budget_usd, 2);
-  assert.equal(budgetUsdFor(loaded.config), 2);
-
-  // And the type check still applies. `budgetUsdFor` throws on a non-number, which at the top
-  // of a tick is an exception where a reported refusal belongs — so the loader must catch it
-  // first, before any run directory exists.
-  const bad = loadConfig(repoWith({ ...VALID, budget_usd: '2' }));
-  assert.equal(bad.ok, false);
-  assert.match(bad.error, /budget_usd/);
-
-  // A NEGATIVE NUMBER IS A NUMBER, so the type check alone leaves it to the router to throw.
-  // Zero matters for its own reason: `--max-budget-usd 0` is a run that aborts having spent
-  // nothing, which reads in a log as a broken worker rather than as the config it is.
-  for (const value of [0, -3]) {
-    const nonPositive = loadConfig(repoWith({ ...VALID, budget_usd: value }));
-    assert.equal(nonPositive.ok, false, `budget_usd: ${value}`);
-    assert.match(nonPositive.error, /budget_usd/);
-  }
+  assert.equal(loaded.ok, false);
+  assert.match(loaded.error, /unknown key/);
 });
 
 // ---------------------------------------------------------------------------
@@ -701,4 +673,69 @@ test('#21: a jira config still needs SOMETHING to poll — epic or epics, not ne
   const r = loadConfig(repoWith({ ...VALID, ...jiraSource({ project: 'TARS' }) }));
   assert.equal(r.ok, false);
   assert.match(r.error, /epic/);
+});
+
+// ---------------------------------------------------------------------------
+// #32/#33 — telemetry.remote/dir/commit_identity, the keys lib/telemetry.mjs's
+// syncRecord needs to actually reach a sink, as opposed to sink/repo_slug, which are
+// carried into the record as data and never acted on.
+// ---------------------------------------------------------------------------
+
+test('ADDED: telemetry.remote/dir/commit_identity are accepted and typed', () => {
+  const r = loadConfig(repoWith({
+    ...VALID,
+    telemetry: {
+      sink: 'harness-telemetry',
+      repo_slug: 'webtarsthree',
+      remote: 'https://github.com/JustinChan-fd/harness-telemetry.git',
+      dir: '~/.harness/telemetry',
+      commit_identity: { name: 'Alfred Bot', email: 'alfred@example.invalid' },
+    },
+  }));
+  assert.equal(r.ok, true, r.error);
+  assert.equal(r.config.telemetry.remote, 'https://github.com/JustinChan-fd/harness-telemetry.git');
+  assert.equal(r.config.telemetry.dir, '~/.harness/telemetry');
+  assert.equal(r.config.telemetry.commit_identity.name, 'Alfred Bot');
+  assert.equal(typeof r.config.telemetry.commit_identity.email, 'string');
+});
+
+test('ADDED: telemetry with no remote/dir at all still validates — sync is simply not configured', () => {
+  const r = loadConfig(repoWith({ ...VALID, telemetry: { sink: 'harness-telemetry', repo_slug: 'webtarsthree' } }));
+  assert.equal(r.ok, true, r.error);
+});
+
+test('ADDED: telemetry.remote and telemetry.dir must be set together, or neither', () => {
+  // The measured reason this rule exists: `syncRecord` treats either missing as
+  // `telemetry_not_configured` and silently no-ops. A typo that drops one of the pair would
+  // otherwise validate clean and read as "sync is on" while nothing ever syncs.
+  const remoteOnly = loadConfig(repoWith({ ...VALID, telemetry: { remote: 'https://example.invalid/x.git' } }));
+  assert.equal(remoteOnly.ok, false);
+  assert.match(remoteOnly.error, /telemetry\.remote and telemetry\.dir/);
+
+  const dirOnly = loadConfig(repoWith({ ...VALID, telemetry: { dir: '~/.harness/telemetry' } }));
+  assert.equal(dirOnly.ok, false);
+  assert.match(dirOnly.error, /telemetry\.remote and telemetry\.dir/);
+
+  // Both together, or both absent, still validate — the falsifier for the two refusals above.
+  const both = loadConfig(repoWith({
+    ...VALID,
+    telemetry: { remote: 'https://example.invalid/x.git', dir: '~/.harness/telemetry' },
+  }));
+  assert.equal(both.ok, true, both.error);
+
+  const neither = loadConfig(repoWith({ ...VALID, telemetry: { sink: 'harness-telemetry' } }));
+  assert.equal(neither.ok, true, neither.error);
+});
+
+test('ADDED: an unknown key under telemetry.commit_identity is refused, not ignored', () => {
+  const r = loadConfig(repoWith({
+    ...VALID,
+    telemetry: {
+      remote: 'https://example.invalid/x.git',
+      dir: '~/.harness/telemetry',
+      commit_identity: { name: 'Alfred Bot', email: 'alfred@example.invalid', bogus: true },
+    },
+  }));
+  assert.equal(r.ok, false);
+  assert.match(r.error, /telemetry\.commit_identity\.bogus/);
 });

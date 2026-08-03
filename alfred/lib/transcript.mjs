@@ -91,7 +91,14 @@ export function terminalErrorFromWorkerLog(text) {
 
   const reason = parsed.terminal_reason ?? parsed.subtype ?? null;
   if (parsed.is_error !== true && !reason) return null;
-  if (parsed.is_error !== true && reason === 'success') return null;
+  // BOTH FIELDS ARE WRITTEN ON A GENUINE FINISH, AND THEY DISAGREE. MEASURED ON TARS-1351,
+  // 2026-08-01: `terminal_reason: 'completed'` alongside `subtype: 'success'` — two different
+  // strings for the same clean stop. The `??` above prefers `terminal_reason`, so checking only
+  // `reason === 'success'` missed this exactly and reported a healthy 58-turn run as
+  // `check_failed`. `subtype` is checked directly, not folded into `reason`, because `reason` is
+  // also the string a real failure's `terminal_reason` carries (`budget_exhausted`,
+  // `context_exhausted`) and this exemption must not fire on those.
+  if (parsed.is_error !== true && (reason === 'success' || parsed.subtype === 'success')) return null;
 
   const errors = Array.isArray(parsed.errors) ? parsed.errors.filter((e) => typeof e === 'string') : [];
   return {
