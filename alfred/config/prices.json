@@ -1,0 +1,55 @@
+{
+  "version": "2026-07-30.2",
+  "copied_from": {
+    "path": "harness-core/config/routing.json",
+    "key": "model_prices_usd_per_mtok",
+    "version": "2026-07-29.1",
+    "copied_on": "2026-07-30",
+    "why": "PLAN.md §1: values are copied, not linked. A duplicated table is cheaper than a coupling to harness-core, which is untouched evidence for the experiments. The cost of copying is drift, and this block is the only defence — it names the upstream revision these rates came from so a mismatch is discoverable.",
+    "drift_check": "diff these rates against harness-core/config/routing.json's model_prices_usd_per_mtok. A difference means one of the two is stale; neither file's version stamp alone can tell you which."
+  },
+  "source_url": "https://platform.claude.com/docs/en/about-claude/pricing",
+  "units": "USD per million tokens",
+  "columns": {
+    "in": "uncached input",
+    "out": "output",
+    "cache_read": "cache hit, 0.1x input",
+    "cache_write": "cache write at the 5-minute TTL, 1.25x input. The default and the overwhelmingly common case: this session's gateway applies a 5m TTL unless a request explicitly asks otherwise.",
+    "cache_write_1h": "cache write at the 1-hour TTL, 2x input. CHARGED whenever a record's own counts report a 1h portion. The first version of this file called the column unreachable and declined to charge it; that was measured false on 2026-07-30. With the anthropic-beta extended-cache-ttl-2025-04-11 header, a sonnet-5 request carrying cache_control ttl 1h returned ephemeral_1h_input_tokens 25204 against this gateway. The narrower statement, and the limit of what was actually observed: the gateway HONOURS an explicit 1h breakpoint on a direct API call. That does not establish that Claude Code's own requests ever set one, and prior evidence in this project was that its breakpoints get rejected — so 5m stays the default and this column is reached only by a record that reports a 1h count. Pricing a 1h portion at the 5m rate understates it by 1.6x.",
+    "how_the_two_write_columns_split": "MEASURED, not assumed: the flat cache_creation_input_tokens field is the TOTAL ACROSS TTL BUCKETS, not the 5-minute portion. The same response reporting 25204 flat also reported ephemeral_5m_input_tokens 0 and ephemeral_1h_input_tokens 25204. So charging the flat field at the 5m rate and then adding the 1h column bills the same tokens twice. lib/prices.mjs derives the 5m portion as total minus 1h unless the record states an explicit 5m count, and refuses (complete:false) rather than clamping when a 1h portion exceeds the total it belongs to."
+  },
+  "billing_assumption": "First-party Claude API, standard (non-batch) list rates, inference_geo global (no 1.1x data-residency multiplier), fast mode off. Batch (-50%), fast mode (Opus $10/$50), and US-only residency (1.1x) stack on top and are NOT reflected here.",
+  "unpriced_by_design": {
+    "long_context": "Ids carrying a [1m] marker (observed: claude-opus-4-8[1m], anthropic.claude-opus-4-6-v1[1m]) are the 1M-context variants. Their rates are above the standard row past 200k and are not published here, so they are reported as unpriced rather than charged at the standard rate. A premium call billed at the standard rate is a plausible figure that is quietly too low, which is worse than a hole."
+  },
+  "rate_changes": {
+    "claude-sonnet-5": {
+      "introductory_until": "2026-08-31",
+      "standard_from": "2026-09-01",
+      "introductory": { "in": 2, "out": 10, "cache_read": 0.2, "cache_write": 2.5, "cache_write_1h": 4 },
+      "applied": "standard",
+      "policy": "DECIDED BY THE USER 2026-07-30: the model row below carries the STANDARD $3/$15, and the introductory rate above is recorded but NOT applied. Two reasons, both comparability: every Alfred figure stays directly comparable to Experiment 2 arm B's recorded $18.483, which was measured on sonnet-4-6 at $3/$15; and no figure changes meaning when the step-up arrives on 2026-09-01. Cost of the choice, stated so nobody later 'fixes' it back: until 2026-09-01 every reported dollar figure runs 1.5x ABOVE what was actually billed. That is a deliberate conservative bias — an estimate that overstates is safe, one that flatters is not — and it is the opposite of this table's governing failure mode, where an unpriced model made a run look cheap.",
+      "why_recorded_at_all": "A rate we decline to charge is still a fact about the world. Dropping it would make this decision indistinguishable from never having noticed the step-up — the difference between a choice and an oversight."
+    }
+  },
+  "models": {
+    "claude-opus-5": { "in": 5, "out": 25, "cache_read": 0.5, "cache_write": 6.25, "cache_write_1h": 10 },
+    "claude-opus-4-8": { "in": 5, "out": 25, "cache_read": 0.5, "cache_write": 6.25, "cache_write_1h": 10 },
+    "claude-opus-4-7": { "in": 5, "out": 25, "cache_read": 0.5, "cache_write": 6.25, "cache_write_1h": 10 },
+    "claude-opus-4-6": { "in": 5, "out": 25, "cache_read": 0.5, "cache_write": 6.25, "cache_write_1h": 10 },
+    "claude-opus-4-5": { "in": 5, "out": 25, "cache_read": 0.5, "cache_write": 6.25, "cache_write_1h": 10 },
+    "claude-opus-4-1": { "in": 15, "out": 75, "cache_read": 1.5, "cache_write": 18.75, "cache_write_1h": 30 },
+    "claude-opus-4-0": { "in": 15, "out": 75, "cache_read": 1.5, "cache_write": 18.75, "cache_write_1h": 30 },
+    "claude-fable-5": { "in": 10, "out": 50, "cache_read": 1, "cache_write": 12.5, "cache_write_1h": 20 },
+    "claude-mythos-5": { "in": 10, "out": 50, "cache_read": 1, "cache_write": 12.5, "cache_write_1h": 20 },
+    "claude-sonnet-5": { "in": 3, "out": 15, "cache_read": 0.3, "cache_write": 3.75, "cache_write_1h": 6 },
+    "claude-sonnet-4-6": { "in": 3, "out": 15, "cache_read": 0.3, "cache_write": 3.75, "cache_write_1h": 6 },
+    "claude-sonnet-4-5": { "in": 3, "out": 15, "cache_read": 0.3, "cache_write": 3.75, "cache_write_1h": 6 },
+    "claude-sonnet-4-0": { "in": 3, "out": 15, "cache_read": 0.3, "cache_write": 3.75, "cache_write_1h": 6 },
+    "claude-haiku-4-5": { "in": 1, "out": 5, "cache_read": 0.1, "cache_write": 1.25, "cache_write_1h": 2 },
+    "<synthetic>": { "in": 0, "out": 0, "cache_read": 0, "cache_write": 0, "cache_write_1h": 0 }
+  },
+  "free_by_design": {
+    "<synthetic>": "Not a billable model. It is the recorded model value for assistant entries that carry no model id, and it exists so those entries stop forcing cost.complete:false. It is the one id for which $0 is the honest figure, so it must not be reported as unpriced."
+  }
+}

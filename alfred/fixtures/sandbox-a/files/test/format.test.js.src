@@ -1,0 +1,40 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+
+import { formatMessage } from '../src/format.js';
+import { mergeFields, listTokens } from '../src/legacy/mergeFields.js';
+
+test('formatMessage substitutes the recipient name into the salutation', () => {
+  const out = formatMessage('your order shipped', { id: 'u1', name: 'Ada' }, 'email');
+  assert.equal(out, 'Hello Ada, your order shipped');
+});
+
+test('formatMessage falls back to a generic salutation with no recipient name', () => {
+  const out = formatMessage('your order shipped', { id: 'u1' }, 'email');
+  assert.equal(out, 'Hello there, your order shipped');
+});
+
+test('formatMessage substitutes tokens in the message body too', () => {
+  const out = formatMessage('order {{id}} shipped', { id: 'u7', name: 'Ada' }, 'sms');
+  assert.equal(out, 'Ada: order u7 shipped');
+});
+
+test('formatMessage omits the salutation for push, which has none', () => {
+  const out = formatMessage('order shipped', { id: 'u1', name: 'Ada' }, 'push');
+  assert.equal(out, 'order shipped');
+});
+
+test('formatMessage truncates an sms body to the 160 character limit', () => {
+  const long = 'x'.repeat(400);
+  const out = formatMessage(long, { id: 'u1', name: 'A' }, 'sms');
+  assert.equal(out.length, 160);
+  assert.ok(out.endsWith('…'));
+});
+
+test('mergeFields leaves an unknown token in place rather than emptying it', () => {
+  assert.equal(mergeFields('hi {{nope}}', { name: 'Ada' }), 'hi {{nope}}');
+});
+
+test('listTokens returns every token in the template, in order', () => {
+  assert.deepEqual(listTokens('{{a}} and {{b}} and {{a}}'), ['a', 'b', 'a']);
+});

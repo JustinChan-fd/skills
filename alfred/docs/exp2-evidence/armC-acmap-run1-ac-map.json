@@ -1,0 +1,18 @@
+{
+  "kind": "alfred.ac-map",
+  "map_version": 1,
+  "entries": [
+    {
+      "ac": "All three channels retry up to 3 attempts with exponential backoff.",
+      "command": "node --test test/channels.test.js && node -e \"import('./src/retry.js').then(m=>{const v=[1,2,3].map(m.backoffMs); process.exit(v[1]===v[0]*2 && v[2]===v[1]*2 ? 0 : 1)})\""
+    },
+    {
+      "ac": "npm test passes.",
+      "command": "npm test"
+    },
+    {
+      "ac": "npm run lint reports 0 errors and 0 warnings.",
+      "command": "npm run lint"
+    }
+  ]
+}

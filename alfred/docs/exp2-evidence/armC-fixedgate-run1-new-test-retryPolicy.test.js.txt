@@ -1,0 +1,18 @@
+// retryPolicy.test.js — shared retry policy constants and backoff shape.
+
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+
+import { MAX_ATTEMPTS, backoffMs } from '../src/retryPolicy.js';
+
+test('policy allows exactly three attempts', () => {
+  assert.equal(MAX_ATTEMPTS, 3);
+});
+
+test('backoff grows exponentially between attempts', () => {
+  const first = backoffMs(1);
+  const second = backoffMs(2);
+
+  assert.equal(second, first * 2);
+  assert.ok(second > first);
+});

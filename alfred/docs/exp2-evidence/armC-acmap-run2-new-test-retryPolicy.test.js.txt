@@ -1,0 +1,19 @@
+// retryPolicy — shared policy constants used by every channel.
+
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+
+import { MAX_ATTEMPTS, backoffDelay } from '../src/retryPolicy.js';
+
+test('the shared policy allows exactly three attempts', () => {
+  assert.equal(MAX_ATTEMPTS, 3);
+});
+
+test('backoffDelay grows exponentially between attempts', () => {
+  const first = backoffDelay(1);
+  const second = backoffDelay(2);
+  const third = backoffDelay(3);
+
+  assert.equal(second, first * 2);
+  assert.equal(third, second * 2);
+});

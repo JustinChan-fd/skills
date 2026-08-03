@@ -1,0 +1,230 @@
+diff --git a/src/channels/email.js b/src/channels/email.js
+index c95b2ea..e49e858 100644
+--- a/src/channels/email.js
++++ b/src/channels/email.js
+@@ -1,9 +1,7 @@
+-// email channel — retries transient failures three times with linear backoff.
++// email channel — retries transient failures using the shared retry policy.
+ 
+ import { post } from '../vendor/httpClient.js';
+-
+-const MAX_ATTEMPTS = 3;
+-const BACKOFF_MS = 50;
++import { MAX_ATTEMPTS, backoffMs, sleep } from '../retryPolicy.js';
+ 
+ export async function sendEmail(recipient, body) {
+   let lastError = null;
+@@ -17,7 +15,7 @@ export async function sendEmail(recipient, body) {
+         break;
+       }
+       if (attempt < MAX_ATTEMPTS) {
+-        await sleep(BACKOFF_MS * attempt);
++        await sleep(backoffMs(attempt));
+       }
+     }
+   }
+@@ -28,7 +26,3 @@ export async function sendEmail(recipient, body) {
+     error: lastError ? lastError.message : 'unknown',
+   };
+ }
+-
+-function sleep(ms) {
+-  return new Promise((resolve) => setTimeout(resolve, ms));
+-}
+diff --git a/src/channels/push.js b/src/channels/push.js
+index c659c39..0cf9228 100644
+--- a/src/channels/push.js
++++ b/src/channels/push.js
+@@ -1,14 +1,28 @@
+-// push channel — single attempt, by design. The device token may have been
+-// revoked between the send and a retry, and a retry against a revoked token
+-// counts against the app's daily quota with the push provider.
++// push channel — retries transient failures using the shared retry policy.
+ 
+ import { post } from '../vendor/httpClient.js';
++import { MAX_ATTEMPTS, backoffMs, sleep } from '../retryPolicy.js';
+ 
+ export async function sendPush(recipient, body) {
+-  try {
+-    const res = await post('/push', { to: recipient.id, body });
+-    return { channel: 'push', ok: true, attempts: 1, id: res.id };
+-  } catch (err) {
+-    return { channel: 'push', ok: false, attempts: 1, error: err.message };
++  let lastError = null;
++  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
++    try {
++      const res = await post('/push', { to: recipient.id, body });
++      return { channel: 'push', ok: true, attempts: attempt, id: res.id };
++    } catch (err) {
++      lastError = err;
++      if (!err.transient) {
++        break;
++      }
++      if (attempt < MAX_ATTEMPTS) {
++        await sleep(backoffMs(attempt));
++      }
++    }
+   }
++  return {
++    channel: 'push',
++    ok: false,
++    attempts: MAX_ATTEMPTS,
++    error: lastError ? lastError.message : 'unknown',
++  };
+ }
+diff --git a/src/channels/sms.js b/src/channels/sms.js
+index 95c3d39..038a11f 100644
+--- a/src/channels/sms.js
++++ b/src/channels/sms.js
+@@ -1,13 +1,10 @@
+-// sms channel — retries twice, no backoff. The carrier gateway rejects
+-// duplicate sends inside a 30s window, so waiting between attempts makes a
+-// retry MORE likely to be rejected, not less.
++// sms channel — retries transient failures using the shared retry policy.
+ 
+ import { post } from '../vendor/httpClient.js';
+-
+-const MAX_ATTEMPTS = 2;
++import { MAX_ATTEMPTS, backoffMs, sleep } from '../retryPolicy.js';
+ 
+ export async function sendSms(recipient, body) {
+-  var lastError = null;
++  let lastError = null;
+   for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+     try {
+       const res = await post('/sms', { to: recipient.id, body });
+@@ -21,6 +18,9 @@ export async function sendSms(recipient, body) {
+       if (!err.transient) {
+         break;
+       }
++      if (attempt < MAX_ATTEMPTS) {
++        await sleep(backoffMs(attempt));
++      }
+     }
+   }
+   return {
+diff --git a/src/format.js b/src/format.js
+index 0eb0487..7fe982e 100644
+--- a/src/format.js
++++ b/src/format.js
+@@ -10,7 +10,7 @@ const SALUTATION = {
+ };
+ 
+ export function formatMessage(message, recipient, channel) {
+-  var salutation = SALUTATION[channel] ?? '';
++  const salutation = SALUTATION[channel] ?? '';
+   const values = { name: recipient.name ?? 'there', id: recipient.id };
+   const opening = mergeFields(salutation, values);
+   const body = mergeFields(message, values);
+@@ -20,6 +20,6 @@ export function formatMessage(message, recipient, channel) {
+ 
+ export function previewMessage(message, recipient, channel) {
+   const out = formatMessage(message, recipient, channel);
+-  console.log(`[preview:${channel}] ${out}`);
++  process.stdout.write(`[preview:${channel}] ${out}\n`);
+   return out;
+ }
+diff --git a/src/legacy/mergeFields.js b/src/legacy/mergeFields.js
+index 859ef27..b616ea5 100644
+--- a/src/legacy/mergeFields.js
++++ b/src/legacy/mergeFields.js
+@@ -12,7 +12,7 @@ export function mergeFields(template, values) {
+ }
+ 
+ export function listTokens(template) {
+-  var found = [];
++  const found = [];
+   for (const match of template.matchAll(TOKEN)) {
+     found.push(match[1]);
+   }
+diff --git a/test/channels.test.js b/test/channels.test.js
+index 16c9fe1..c577a93 100644
+--- a/test/channels.test.js
++++ b/test/channels.test.js
+@@ -1,3 +1,5 @@
++// channels.test.js — retry and delivery behavior for each notification channel.
++
+ import { test } from 'node:test';
+ import assert from 'node:assert/strict';
+ 
+@@ -53,7 +55,7 @@ test('email does not retry a non-transient failure', async () => {
+   assert.equal(calls, 1);
+ });
+ 
+-test('sms stops after two attempts, not three', async () => {
++test('sms retries a transient failure up to three attempts', async () => {
+   let calls = 0;
+   setHandler(async () => {
+     calls++;
+@@ -63,7 +65,7 @@ test('sms stops after two attempts, not three', async () => {
+   resetHandler();
+ 
+   assert.equal(res.ok, false);
+-  assert.equal(calls, 2);
++  assert.equal(calls, 3);
+ });
+ 
+ test('sms treats a DUPLICATE rejection as a successful delivery', async () => {
+@@ -82,7 +84,7 @@ test('sms treats a DUPLICATE rejection as a successful delivery', async () => {
+   assert.equal(res.deduped, true);
+ });
+ 
+-test('push makes exactly one attempt even on a transient failure', async () => {
++test('push retries a transient failure up to three attempts', async () => {
+   let calls = 0;
+   setHandler(async () => {
+     calls++;
+@@ -91,6 +93,19 @@ test('push makes exactly one attempt even on a transient failure', async () => {
+   const res = await sendPush({ id: 'u1' }, 'hi');
+   resetHandler();
+ 
++  assert.equal(res.ok, false);
++  assert.equal(calls, 3);
++});
++
++test('push does not retry a non-transient failure', async () => {
++  let calls = 0;
++  setHandler(async () => {
++    calls++;
++    throw new Error('token revoked');
++  });
++  const res = await sendPush({ id: 'u1' }, 'hi');
++  resetHandler();
++
+   assert.equal(res.ok, false);
+   assert.equal(calls, 1);
+ });
+diff --git a/test/format.test.js b/test/format.test.js
+index ef7de00..633407a 100644
+--- a/test/format.test.js
++++ b/test/format.test.js
+@@ -1,3 +1,5 @@
++// format.test.js — message formatting and legacy token substitution.
++
+ import { test } from 'node:test';
+ import assert from 'node:assert/strict';
+ 
+diff --git a/test/notify.test.js b/test/notify.test.js
+index d6fa63c..f6fc7d9 100644
+--- a/test/notify.test.js
++++ b/test/notify.test.js
+@@ -1,3 +1,5 @@
++// notify.test.js — dispatch behavior for the notify() entry point.
++
+ import { test } from 'node:test';
+ import assert from 'node:assert/strict';
+ 
+diff --git a/tools/lint.mjs b/tools/lint.mjs
+index 5091870..67ba30c 100644
+--- a/tools/lint.mjs
++++ b/tools/lint.mjs
+@@ -104,7 +104,8 @@ export function formatReport(fileCount, findings) {
+   ].join('\n');
+ }
+ 
+-const SKIP_DIRS = new Set(['node_modules', '.git']);
++// vendor/ is generated and off limits — its style is not ours to enforce.
++const SKIP_DIRS = new Set(['node_modules', '.git', 'vendor']);
+ 
+ async function collect(dir, out = []) {
+   for (const entry of await readdir(dir, { withFileTypes: true })) {
