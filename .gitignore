@@ -9,6 +9,13 @@ node_modules/
 *.log
 *.state
 
+# ...but archived experiment transcripts are EVIDENCE, not runtime artifacts. This
+# negation exists because `*.log` above silently dropped a 344KB rescued transcript that
+# a backfill phase was about to read — the copy succeeded, `git add` reported nothing, and
+# the only surviving copy was still in `/tmp`. Archived logs are append-only history and
+# must be committed by name.
+!alfred/eval/archive/**/*.log
+
 # User-specific harness config (machine-local: repo registry, telemetry sink)
 harness-core/config/user.json
 
