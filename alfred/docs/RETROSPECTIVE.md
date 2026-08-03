@@ -372,6 +372,25 @@ real system cron invoking `claude -p` headlessly.
   Worth recording because the prediction was the confident part and the observation
   contradicted it: the hook is still a live hazard for a run that *doesn't* write a brain
   entry, but it is not what stopped this one. **The gate did.**
+- **The sink supports ONE arm, not three, so the 3-way comparison cannot be computed from
+  it.** Audited 2026-08-03 after Phase D: all ten records carry `provenance.arm ===
+  'alfred-thin'`. The distinct-arm count is 1. The other two arms ran before A5 added the
+  `provenance` field, and the backfill covered only thin-arm runs.
+
+  **And it is not recoverable by backfilling, which was checked before writing this off.**
+  None of the twenty-plus artifacts in `docs/exp2-evidence/` is an Alfred record:
+  `armA.json`/`armB.json` are worktree snapshots (`slug,root,repo,origin,branch,head,tree`),
+  `armB-implement-record.json` is the harness-core schema, and `armC-acmap-n3-record.json`
+  has its own shape (`arm,suite,summary,spent_usd,verdict,thresholds,runs`). Not one carries
+  a `cost` block or a worker transcript, so cost cannot be re-derived for any of them.
+  Stamping an arm onto a record whose cost cannot be re-derived would manufacture the
+  comparison rather than measure it, which is the one thing this whole project is against.
+
+  Consequence for what may be claimed: the cross-arm figures that DO exist — 2.28x on
+  TARS-1351, and cost *reversed* (Alfred 1.7x cheaper) on jarvis#7 — come from hand analysis,
+  not from the sink, and must be cited that way. The two worktrees
+  (`jarvis-issue7-single-agent`, `jarvis-issue7-alfred`) are intact, so a future comparison
+  can be re-run under the current schema; it has not been.
 - **No aggregation exists.** Records land; nothing rolls them up. The dashboard refuses to
   run (`build.js`: *"v2/ was retired on 2026-07-28; log/ is now the only sink"*). Per-run
   metrics being correct and per-epic metrics not existing are two different states, and
