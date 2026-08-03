@@ -169,6 +169,42 @@ const RUNS = [
       'delivery.error/steps fix (3aba45b) exists: a correct no-op and a delivery that blew up ' +
       'before committing were byte-identical on disk before it.',
   },
+  // THE TWO PREFLIGHT REFUSALS. Neither needs its COST re-derived — both were written after
+  // 96cb211, so they already carry cost.vendor_by_model from the live path. They are listed for
+  // the other reason a record gets rebuilt: one of them records a verdict now known to be wrong,
+  // and a record whose verdict is wrong with nothing saying so will be read at face value.
+  {
+    dir: '20260803T150434Z-6',
+    cwd: `${process.env.HOME}/Desktop/Repos/jarvis`,
+    repo: 'jarvis',
+    notes:
+      'Live run 2026-08-03, Phase D, jarvis#6 (mobile textarea scaling). PREFLIGHT REFUSED in the ' +
+      'first turn for $0.224755 — AC6 scored 0.5 against the 0.6 threshold. THE REFUSAL IS ' +
+      'CORRECT and is the more interesting of tonight\'s two: AC6 is "verify fix across common ' +
+      'mobile breakpoints (375px, 390px, 414px)", which the worker has no deterministic way to ' +
+      'check, and it said so rather than claiming the verification. The whole ticket is ' +
+      'visual-confirmation ACs, so it is the wrong SHAPE for this harness rather than a ticket ' +
+      'the harness failed at — and it cost one turn to establish that. First time the confidence ' +
+      'filter has fired on a real ticket. The 7 ac_unmapped gate findings are noise: the worker ' +
+      'was stopped before it could write an ac_map, so they say nothing about the work.',
+  },
+  {
+    dir: '20260803T150555Z-11',
+    cwd: `${process.env.HOME}/Desktop/Repos/jarvis`,
+    repo: 'jarvis',
+    notes:
+      'Live run 2026-08-03, Phase D, jarvis#11 (completed todos resurface in summaries). ' +
+      'PREFLIGHT REFUSED for $0.067002 on quote-not-in-body, AND THE REFUSAL IS WRONG — do not ' +
+      'count this as a worker failure or as evidence about attestation compliance. The ticket ' +
+      'body holds EIGHT LITERAL BACKSLASHES because the author typed escaped quotes into GitHub, ' +
+      'so the bytes on disk are `the AI-generated \\"Today\'s Focus\\"`. The worker quoted that ' +
+      'sentence faithfully, backslashes included; but an attestation arrives as JSON, so parsing ' +
+      'turned its \\" into a bare " and text.includes(quote) compared a body holding \\" against ' +
+      'a quote holding " — refusing a correct quotation as a paraphrase. Verified byte-for-byte ' +
+      'against source.json before the fix was written. Fixed in 9ad6476 (norm() now unescapes on ' +
+      'both sides, with paraphrase and case falsifiers asserted so it does not widen). The ' +
+      'ticket was re-run after the fix; see the later run_id for the real verdict.',
+  },
 ];
 
 // Same tolerance as `run.mjs`'s: an unreadable log is a record that says so, not a crash.
@@ -223,8 +259,50 @@ for (const run of RUNS) {
     gate: before.gate,
     delivery: before.delivery,
     suite: before.suite,
+    // CARRIED FORWARD TOO, and its absence here DESTROYED EVIDENCE before it was noticed. The
+    // first rebuild of 20260803T150555Z-11 turned a full refusal — `{refused: true, reason:
+    // 'quote-not-in-body', detail: ...}` — into `preflight: null`, because `recordForRun` defaults
+    // the parameter to null and this call did not pass it. The record still LOOKED complete: `ok:
+    // true`, cost reproducing to 6dp, 9 gate findings intact. Only the one field explaining WHY
+    // the run stopped was gone.
+    //
+    // That is this tool's own header argument turned back on the tool: a backfill that destroys
+    // the thing it was derived from leaves no way to check the derivation. The `.pre-backfill`
+    // copy is what recovered it, which is the second time that safeguard has paid for itself and
+    // the reason it is not optional. Same computed-and-discarded shape as #63/#69/#72/#73 — the
+    // reader had the value, the writer dropped it.
+    preflight: before.preflight ?? null,
+    // AND `sink`, blanked on SIX records by the same omission — found only because the preflight
+    // loss prompted an audit of every top-level key rather than a fix of the one field noticed.
+    // This one is worse than it looks: `20260802T082954Z-TARS-1351` recorded
+    // `~/.harness/telemetry` while every later run recorded `~/Desktop/Repos/alfred-telemetry`.
+    // That is COHORT INFORMATION — which sink a record was routed to — and nulling it made six
+    // records read as never having been routed anywhere, including the one that went somewhere
+    // else. Carried, never re-resolved: the library deliberately never resolves this field
+    // (PLAN.md deviation 5), so re-deriving it would invent a value the run never had.
+    sink: before.sink ?? null,
     provenance: { arm: ARM_IDS.THIN, backfilled: true, notes: run.notes },
   });
+
+  // DID ANY FIELD GO FROM SOMETHING TO NOTHING? The generalisation of the two-field loss above,
+  // and it is here because fixing only the fields that were noticed would leave the NEXT one to be
+  // found by accident. `preflight` was spotted by hand; `sink` was six records gone and nobody had
+  // looked. The shape is not "I forgot preflight" — it is "this tool reconstructs a record by
+  // enumerating keys, and an un-enumerated key becomes null with no error."
+  //
+  // NON-EMPTY -> EMPTY ONLY, deliberately. Cost and tokens are SUPPOSED to change, so a diff-all
+  // check would fire on every record and be muted — this module already learned that lesson about
+  // absolute cost epsilons. Something-to-nothing is the only direction that is always wrong here:
+  // a backfill cannot legitimately discover that a run had less information than it recorded.
+  const emptied = [];
+  for (const key of Object.keys(before)) {
+    const was = JSON.stringify(before[key]);
+    const now = JSON.stringify(rebuilt[key]);
+    if (was === now) continue;
+    const wasSubstantive = before[key] !== null && was !== '{}' && was !== '[]';
+    const nowEmpty = rebuilt[key] === null || rebuilt[key] === undefined || now === '{}' || now === '[]';
+    if (wasSubstantive && nowEmpty) emptied.push(key);
+  }
 
   // DID THE MONEY REPRODUCE? The one question this script can answer that a hand-edit could
   // not. A mismatch is not necessarily a bug — the pricer has been corrected since some of
@@ -245,7 +323,19 @@ for (const run of RUNS) {
     backfilled: rebuilt.provenance?.backfilled ?? null,
     gaps: (rebuilt.gaps ?? []).map((g) => g.code ?? g),
     pass: rebuilt.gate?.pass ?? null,
+    emptied,
   });
+
+  // A CHECK NOBODY READS IS THE DEFECT AGAIN, so this one refuses the write rather than printing a
+  // warning above 300 lines of output. `emptied` being non-empty means the rebuild knows less than
+  // the record it is about to overwrite, and there is no version of that which should be persisted
+  // — the correct response is to add the missing key to the call above and re-run. Skipped, not
+  // thrown: the other eight records are fine and aborting the job would punish them for this one.
+  if (emptied.length > 0) {
+    results.at(-1).status = 'REFUSED';
+    results.at(-1).error = `would empty ${emptied.join(',')} — add the key to recordForRun above`;
+    continue;
+  }
 
   if (!DRY_RUN) {
     // The original is kept. A backfill that destroys the thing it was derived from leaves no
@@ -271,6 +361,7 @@ for (const r of results) {
   console.log(`  usd: was=${r.old_usd} now=${r.new_usd} drift=${r.drift} vendor=${r.vendor_usd}`);
   console.log(`  arm=${r.arm} backfilled=${r.backfilled} pass=${r.pass}`);
   console.log(`  gaps=${JSON.stringify(r.gaps)}`);
+  if (r.emptied?.length) console.log(`  EMPTIED=${JSON.stringify(r.emptied)} <-- nothing written`);
   if (r.synced !== undefined) console.log(`  synced=${r.synced}`);
 }
 console.log(`\n${results.filter((r) => r.status === 'OK').length}/${results.length} rebuilt cleanly`);
