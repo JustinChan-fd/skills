@@ -50,6 +50,7 @@ import { basename, dirname, join, resolve } from 'node:path';
 import { promisify } from 'node:util';
 
 import { loadConfig } from './config.mjs';
+import { deliver } from './delivery.mjs';
 import { resolveItem } from './item.mjs';
 import { ARM_IDS } from './gaps.mjs';
 import { recordForRun } from './report.mjs';
@@ -82,7 +83,18 @@ export const RECORD_FILENAME = 'record.json';
 // runner ever writes with a cohort of one — recorded as `provenance-arm-unknown` on every run,
 // which is a gap nobody would read as "the constant is misspelled". Referenced by NAME rather than
 // by index, so reordering the list cannot silently re-point it.
-export const ARM = ARM_IDS.MULTI_AGENT;
+// THIN AS OF THIS BRANCH, AND THE CHANGE IS THE POINT OF THE CONSTANT. `gaps.mjs` defines
+// `alfred-thin` as "the single-session runner Phase B builds" and `alfred-multi-agent` as "Alfred as
+// it stood BEFORE the thin rewrite (phase orchestration)". This runner no longer orchestrates
+// phases: one `claude -p`, one session, graded once. Leaving this on MULTI_AGENT would have filed
+// every record from here under the cohort whose defining property — phase orchestration, the thing
+// measured at 4.7x tokens for no PR — this code no longer has, and the comparison those arm ids
+// exist to support would silently pool two different runners into one number.
+//
+// EVERY RECORD FROM THIS COMMIT FORWARD IS `alfred-thin`. Phase C's backfill of historical runs
+// passes `provenance` explicitly and is unaffected: those records describe code that really was
+// the multi-agent runner, and relabelling them would destroy the very contrast being measured.
+export const ARM = ARM_IDS.THIN;
 
 // 25 minutes, the same number THRESHOLDS.armC.wallCapMs carries, and for the same reason: arm B
 // ran 24.6 minutes and produced no PR, so a cap below that would kill runs before they can fail
@@ -804,6 +816,16 @@ export async function executeWork({
   // git. See lib/telemetry.mjs's header for why this is a fresh implementation and not an import
   // of harness-core's `syncRun`.
   sync: syncFn = syncRecord,
+  // B3. Same injection pattern, and the real default really pushes. Injectable for one reason only:
+  // a test of the steps AROUND delivery (the record's shape, the exit code, the console output)
+  // should not need a bare remote and a `gh` on PATH to run.
+  //
+  // WHAT A TEST MUST NOT DO WITH THIS SEAM. Substituting a stub here proves nothing about delivery
+  // itself — `test/delivery.test.mjs` drives the real module against a real git repo and a real
+  // `file://` remote for exactly that reason. This seam exists so that OTHER tests are cheap, not
+  // so that delivery's own behaviour can be asserted against a fake. That distinction is the
+  // mocked-seam lesson: a test injecting a fake at a seam cannot see the seam is missing.
+  deliver: deliverFn = deliver,
   env = process.env,
   // Injected only so a test can put a transcript somewhere and have the composed path find it.
   // An environment fact rather than a module boundary, which is the point: with `report` left at
@@ -892,9 +914,17 @@ export async function executeWork({
     }
   }
 
-  // Step 3 is `resolveBase`, and it belongs to delivery rather than to the worker — nothing here
-  // creates a branch yet. Deliberately not called, so that a base this thin path cannot use is
-  // not resolved and then quietly discarded.
+  // Step 3 is `resolveBase`, and it STILL is not called here — but the reason has changed, so the
+  // comment has to. It used to read "a base this thin path cannot use is not resolved and then
+  // quietly discarded", which was correct while nothing downstream created a branch. B3 added
+  // `lib/delivery.mjs`, so the base is now both resolved and used — inside `deliver`, at Step 8,
+  // which is the only code that can act on it.
+  //
+  // KEPT THERE RATHER THAN MOVED HERE. Resolving at this line would mean carrying a base through
+  // the spawn, the gate and the reporter to reach the one function that uses it, and a value that
+  // travels that far past its point of use is how #63/#69/#72/#73 all happened. `deliver` refusing
+  // on a null base is also the only refusal that can be correct: at this point in the run a
+  // missing base is not yet a problem, because a failed gate may mean nothing is delivered at all.
 
   // Step 4. The prompt and the flags, both from the modules that own them.
   const sessionId = newSessionId();
@@ -1025,6 +1055,54 @@ export async function executeWork({
     pass: findings.length === 0,
   };
 
+  // Step 8. DELIVER — the branch, the commit, and on a pass the push and the draft PR.
+  //
+  // BEFORE STEP 7, THOUGH IT IS NUMBERED AFTER IT. The record has a `delivery` block that has been
+  // `{commits: [], pushed_to: null, pr_url: null}` on every run ever made, because nothing filled
+  // it; delivering after the record was written would leave it that way forever. So the numbering
+  // follows §4's step list and the ORDER follows the data: deliver, then report what delivery did.
+  //
+  // AFTER THE GATE, and this is the part that cannot be reordered. `deliver` reads `gate.pass` to
+  // decide whether to push. Running it earlier would either push ungraded work or need the verdict
+  // it does not yet have.
+  //
+  // ANOTHER SIDECAR, same shape as Steps 7/7b/7c and the same argument with more at stake: the
+  // worker ran, the money is spent, and the gate graded the tree. A `gh` outage or a rejected push
+  // must read as "it was not delivered" and never as "the run failed" — a throw here reaches
+  // `cli.mjs` as exit 2, which a scheduler retries at full price for a run that already happened.
+  // `deliver` is documented never to throw; this is still caught, because a contract is not a
+  // guarantee and the cost of being wrong is a repeated 25-minute run.
+  //
+  // `allowDirty` DOES NOT SUPPRESS DELIVERY, deliberately. A dirty tree already returned above, so
+  // reaching this line with `allowDirty` set means an operator asked for a run against a tree they
+  // know is dirty — and the commit that results is exactly what makes that inspectable afterwards.
+  let delivery = null;
+  try {
+    delivery = await deliverFn({
+      repoRoot: root,
+      config: cfg,
+      item,
+      gate,
+      runId: basename(runDir),
+      preflight,
+      // `recordPath` DOES NOT EXIST YET and is not passed. The PR body would like to name the
+      // record, but the record needs delivery's result — so one of the two has to go first, and
+      // naming a path that has not been written is the worse failure: it sends a reviewer to a file
+      // that is not there. The run id is in the body, and that is the join key to the record.
+      recordPath: null,
+    });
+  } catch (err) {
+    delivery = {
+      committed: false,
+      branch: null,
+      base: null,
+      pushed: false,
+      pr_url: null,
+      steps: [],
+      error: `deliver threw: ${String(err?.message ?? err)}`,
+    };
+  }
+
   // Step 7. Report. A SIDECAR, AND THE try/catch IS THE WHOLE POINT: the work landed, the gate
   // graded it, and an exception in the accounting must not turn that into a refusal. `main` reads
   // a throw as exit 2, which a scheduler retries — at full price, for a run that already
@@ -1067,6 +1145,26 @@ export async function executeWork({
       // reader sees a week from now, and the record is the only thing that outlives the console
       // line — the exact gap between "computed" and "carried" that #63/#69/#72/#73 all are.
       preflight,
+      // B3. WHAT DELIVERY DID. `report.mjs` has held this block since M2 and it has been three
+      // empty fields on every record ever written, because no caller passed anything — its own
+      // header says so: "both keys existed here and both were always empty". This is the caller.
+      //
+      // MAPPED, NOT SPREAD. `deliver` returns `{committed, branch, base, pushed, pr_url, head,
+      // steps, error}` and the record's schema is `{commits, pushed_to, pr_url}`; spreading would
+      // put `branch` and `pushed` into a record that names neither, and `reportRecord` would print
+      // nothing for `pushed_to` while the data sat one key over. `head` is the commit sha, which is
+      // what `commits` means, and it is `[]` rather than `[null]` when nothing was committed —
+      // absent-is-not-zero, and a one-element array holding null reads as "one commit" to anything
+      // that checks length.
+      //
+      // `pushed_to` IS THE BRANCH ONLY IF IT WAS PUSHED. A branch that exists locally is not a
+      // place anything was pushed to, and recording it as one would make a failed push look like a
+      // successful one in the only artifact that outlives the console.
+      delivery: {
+        commits: delivery?.head ? [delivery.head] : [],
+        pushed_to: delivery?.pushed ? delivery.branch : null,
+        pr_url: delivery?.pr_url ?? null,
+      },
     });
   } catch (err) {
     recordError = String(err?.message ?? err);
@@ -1128,6 +1226,11 @@ export async function executeWork({
     // so "we checked and found no false quote" and "we never checked" are distinguishable without
     // inference. `bin/alfred` prints from this and `cli.mjs` decides the exit code from it.
     preflight,
+    // B3. THE FULL DELIVERY RESULT, not the three-field record projection. The record keeps what a
+    // telemetry consumer needs; a caller here needs `branch` and `base` and `steps` too — a failed
+    // push has to tell an operator which local branch holds the work, and `steps[]` is the only
+    // place the sequence is legible. `null` only when delivery never ran at all.
+    delivery,
     record,
     // Where it landed, or null. A caller that printed a path it had not written would send an
     // operator to a file that is not there.

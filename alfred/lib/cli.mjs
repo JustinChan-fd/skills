@@ -247,6 +247,57 @@ export function reportSync(sync, { out }) {
   out(`sink: ${sync.path ?? '(path not reported)'} (${where})`);
 }
 
+// B3. WHERE THE WORK WENT, which is the one thing a run could do that nobody was told about. Found
+// by a test, not by reading: the end-to-end delivery test asserted the PR url appeared in the output,
+// the push had really landed and `gh pr create --draft` had really run, and the output said only
+// `gate: PASS`. Alfred pushed a branch to a remote and opened a pull request, and its own operator
+// had no way to know from the tick's output — they would have to open `record.json` to find out
+// something had been published on their behalf. That is the worst version of the project's
+// computed-and-discarded defect (#63/#69/#72/#73): the value was not dropped from a record, it was
+// dropped from the notification of an outward-facing side effect.
+//
+// FOUR OUTCOMES, EACH ITS OWN LINE, because collapsing them is how "delivered" comes to mean nothing:
+// nothing to deliver, committed but deliberately not pushed, pushed, and pushed-but-the-PR-failed.
+//
+// SILENT WHEN THERE WAS NOTHING TO DELIVER, on the same argument as `reportSync`'s unconfigured sink:
+// a line on every no-op run teaches an operator to skip the line that matters.
+export function reportDelivery(delivery, { out }) {
+  if (!delivery) return;
+
+  // A FAILURE BEFORE ANYTHING HAPPENED still prints, unlike a clean no-op: a refusal or a git error
+  // means the run's diff may exist nowhere, which an operator needs to know now rather than next tick.
+  if (!delivery.committed) {
+    if (delivery.error) out(`delivery: NOT DELIVERED — ${delivery.error}`);
+    return;
+  }
+
+  const where = delivery.branch ?? '(branch not reported)';
+  if (!delivery.pushed) {
+    // THE VERDICT IS THE REASON, and saying so matters: an operator seeing "not pushed" under a
+    // failed gate should read it as the rule working, not as delivery breaking.
+    const why = delivery.error ? `— ${delivery.error}` : '— the gate did not pass, so nothing was pushed';
+    out(`delivery: committed to ${where} locally ${why}`);
+    return;
+  }
+
+  if (delivery.pr_url) {
+    out(`delivery: pushed ${where} — DRAFT pr ${delivery.pr_url}`);
+    return;
+  }
+  // PUSHED WITH NO PR. Either `mode: 'push'` (no PR was ever wanted) or `gh` failed after the push
+  // landed — and the second is the case this line exists for, because the bytes are on the remote
+  // whether or not a pull request wraps them.
+  //
+  // "NOT opened" AND "no pr requested" ARE FAR APART ON PURPOSE. The first draft said "but NO pr:"
+  // for the failure, and the falsifier test caught that `/NO pr/i` matches "(no pr requested)" too —
+  // so the two opposite outcomes were one case-insensitive regex apart. That is the shared-name /
+  // distinct-path hazard in prose: a reader skimming for "no pr" could not tell a healthy `push`-mode
+  // run from a PR that failed to open. Fixed in the strings rather than in the assertion, because the
+  // assertion was reporting a real ambiguity in the output an operator reads.
+  if (delivery.error) out(`delivery: pushed ${where} — the pr was NOT opened: ${delivery.error}`);
+  else out(`delivery: pushed ${where} (no pr requested)`);
+}
+
 // The verdict, printed for whoever reads the tick's output. Findings first: an operator reading
 // a failure wants the rule that fired, not the run's plumbing.
 export function reportVerdict(gate, { out }) {
@@ -395,6 +446,10 @@ export async function main(
     recordWriteError: result.record_write_error ?? null,
   });
   reportSync(result.sync ?? null, { out });
+  // BEFORE THE VERDICT, deliberately. The verdict is the last thing printed because it is what an
+  // operator scans for; a delivery line after it would be read as a footnote to the verdict rather
+  // than as the run's outward-facing side effect.
+  reportDelivery(result.delivery ?? null, { out });
   reportVerdict(result.gate ?? { pass: false, findings: [] }, { out });
 
   return result.gate?.pass ? EXIT.pass : EXIT.gate_failed;

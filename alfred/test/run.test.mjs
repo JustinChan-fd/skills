@@ -35,7 +35,7 @@ import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { after, test } from 'node:test';
 
 import { SEATS, normalizeModelId } from '../lib/models.mjs';
@@ -55,6 +55,39 @@ import {
 } from '../lib/run.mjs';
 
 const NODE = process.execPath;
+
+// THE BACKSTOP CAP FOR THE WATCH TESTS, AND WHY IT IS NOT 20 SECONDS ANY MORE.
+//
+// Three of the B2 watch tests below want the WATCH to stop the child; the wall cap is only there so
+// a broken watch fails the run instead of hanging the suite. At `wallCapMs: 20000` the top one
+// failed roughly once per full-suite run and passed every time in isolation, which read like a
+// timing margin and was not. MEASURED, with a diagnostic that printed what the watch had actually
+// seen at the moment the cap fired:
+//
+//   killed: true, signal: SIGTERM, wall_ms: 20003, logExists: true, logLen: 0
+//
+// Zero bytes in twenty seconds, from a `node -e` whose FIRST STATEMENT is a write. The event loop
+// was healthy — the cap itself fired 3ms late — so the 25ms poll had run some 800 times against a
+// file that was still empty. The child had not reached its first line.
+//
+// Then measuring `node -e "write"` time-to-first-byte directly, against the same file-fd stdio, while
+// a full suite ran: 8 concurrent → 104ms max; 16 → 207ms; 24 → **26,060ms**. At 24 the numbers
+// clustered inside 75ms of each other (min 25985, max 26060), so all of them were blocked on one
+// shared resource and released together rather than scheduled independently. A later repeat of the
+// same n=24 came back at 126ms. The cliff tracks TOTAL MACHINE LOAD, not this suite's concurrency.
+//
+// SO A THRESHOLD CANNOT BE DERIVED, and that is the point: process startup latency here is unbounded
+// under contention, so there is no "safe" cap, only one far enough from the interesting number that
+// the test asks its own question. 120s is ~4.6x the worst startup observed. It costs nothing on a
+// passing run — the watch fires in 54ms idle, 108ms under CPU load — and a genuinely broken watch
+// still fails rather than hanging forever.
+//
+// THE WALL CAP'S OWN TESTS ARE NOT TOUCHED. They use `wallCapMs: 400` against a child that only
+// sleeps, and they ASSERT the kill, so slow startup can only ever make them more true. Raising the
+// number here weakens no coverage of the cap; it stops three tests about the WATCH from being
+// silently converted into tests about how fast this machine can fork node.
+const WATCH_BACKSTOP_MS = 120_000;
+
 const temps = [];
 const mktemp = (prefix) => {
   const dir = mkdtempSync(join(tmpdir(), `alfred-run-${prefix}-`));
@@ -2023,7 +2056,7 @@ test('ADDED B2: a watch that returns a stop reason kills the worker and reports 
       bin: NODE,
       cwd: dir,
       logPath: log,
-      wallCapMs: 20000,
+      wallCapMs: WATCH_BACKSTOP_MS,
       pollMs: 25,
       watch: (text) => (text.includes('REFUSE ME') ? { reason: 'quote-not-in-body', detail: 'AC2 was confabulated' } : null),
     },
@@ -2037,7 +2070,15 @@ test('ADDED B2: a watch that returns a stop reason kills the worker and reports 
   // that set the same flag would be reported to the operator as a timeout, which is a different
   // diagnosis with a different fix.
   assert.equal(outcome.killed, false, 'a watch stop is not a wall-cap kill');
-  assert.ok(outcome.wall_ms < 20000, 'the worker was not stopped early');
+  // THE CAP WAS NOT WHAT STOPPED IT. Written against the constant rather than a literal, because
+  // this line used to read `< 20000` and would have gone on passing unexamined once the cap moved to
+  // 120s — a bound 4.6x looser than the one the author checked, still green, and no longer testing
+  // anything. `killed: false` above already proves the WATCH fired; this proves the RACE was not
+  // close, which is the part a moving cap can quietly invalidate.
+  assert.ok(
+    outcome.wall_ms < WATCH_BACKSTOP_MS,
+    `the wall cap fired instead of the watch (wall_ms=${outcome.wall_ms})`,
+  );
 });
 
 test('ADDED B2: a watch that never fires leaves the worker completely alone', async () => {
@@ -2104,7 +2145,7 @@ test('ADDED B2: the watch sees the log GROWING, not one snapshot of it', async (
     bin: NODE,
     cwd: dir,
     logPath: join(dir, 'w.log'),
-    wallCapMs: 20000,
+    wallCapMs: WATCH_BACKSTOP_MS,
     pollMs: 25,
     watch: (text) => {
       seen.push(text.length);
@@ -2158,7 +2199,7 @@ test('ADDED B2: a watch fires at most ONCE, even on a child that ignores SIGTERM
     bin: NODE,
     cwd: dir,
     logPath: join(dir, 'w.log'),
-    wallCapMs: 20000,
+    wallCapMs: WATCH_BACKSTOP_MS,
     pollMs: 25,
     watch: (text) => {
       if (!text.includes('FIRST REASON')) return null;
@@ -2583,6 +2624,316 @@ test('ADDED B2: the preflight verdict reaches the RECORD, not just the result', 
   assert.ok(reported.preflight, 'the record was built without the preflight verdict');
   assert.equal(reported.preflight.refused, true);
   assert.equal(reported.preflight.reason, 'quote-not-in-body');
+});
+
+// --- B3: DELIVERY IS WIRED --------------------------------------------------------------------
+//
+// WHY THESE TESTS EXIST AT ALL, given `test/delivery.test.mjs` covers the module. Adding the
+// `deliver` call to `executeWork` did not turn a single one of the 81 tests below red — they all
+// passed before the wiring and all passed after it, because none of them looks at delivery. That is
+// the `feedback_unfalsifiable_conjunct` shape: green here was never evidence the call was made, the
+// arguments were right, or the result went anywhere. So these assert the WIRING, which is the only
+// thing the module's own tests cannot see.
+//
+// THE FIRST ONE USES THE REAL `deliver`. A stub would confirm that `executeWork` calls whatever it
+// was handed; only the real module against a real remote confirms the composed call works.
+
+// A repo with a real bare remote, so real delivery can really push. `repoWithCommit` has no remote
+// by design — most tests want none — so this wraps it rather than changing it.
+function repoWithRemote() {
+  const dir = repoWithCommit();
+  const bare = mktemp('remote');
+  git(bare, ['init', '--quiet', '--bare']);
+  git(dir, ['remote', 'add', 'origin', `file://${bare}`]);
+  git(dir, ['push', '--quiet', 'origin', 'main']);
+  return { dir, bare };
+}
+
+// A worker that actually edits the tree, so there is something to commit. Every delivery assertion
+// downstream is vacuous against a worker that changed nothing — `deliver` correctly does nothing.
+const workerThatWrites = (repo, file = 'src/delivered.js') =>
+  stubSpawn((argv, opts) => {
+    mkdirSync(join(repo, dirname(file)), { recursive: true });
+    writeFileSync(join(repo, file), 'export const delivered = true;\n');
+    return { exit: 0, killed: false, signal: null, wall_ms: 1200, log: opts.logPath };
+  });
+
+// `mode: 'push'` FOR THE REAL-DELIVER TESTS, AND WHY THAT IS NOT A DODGE. A first draft of the test
+// below ran the real `deliver` under `mode: 'pr'` and failed with the real `gh`'s real complaint:
+// "none of the git remotes configured for this repository point to a known GitHub host". That is
+// correct behaviour from every component — a `file://` bare repo is not GitHub — and it exposed that
+// `executeWork` has TWO DIFFERENT `gh` SEAMS that are easy to confuse: its own `gh` param is the
+// ITEM FETCHER, while `deliver`'s `gh` is the CLI, and `run.mjs` deliberately does not thread the
+// latter through. So at this level the honest proposition is "the composed call really reaches a
+// real remote", which `push` mode tests completely. The `--draft` argv proposition is argv-shaped
+// and belongs where it is already asserted: `delivery.test.mjs`, against an injected recorder, plus
+// the `bin/alfred` end-to-end below with a `gh` shim on PATH.
+const PUSH_CONFIG = Object.freeze({ ...CONFIG, delivery: { mode: 'push', never_merge: true } });
+
+test('ADDED B3: a PASSING run reaches the remote through the REAL deliver, and the record says where', async () => {
+  const { dir: repo, bare } = repoWithRemote();
+  let reported = null;
+
+  const result = await executeWork({
+    ref: '#9',
+    config: PUSH_CONFIG,
+    repoRoot: repo,
+    runRoot: mktemp('runs'),
+    stamp: '20260802T130000Z',
+    gh: ghIssue(AC_BODY),
+    spawn: workerThatWrites(repo),
+    gate: () => ({ pass: true, findings: [], unverified: [], graded_criteria: 1, ungraded_reason: null, gate_sha: 'x' }),
+    // `deliver` IS NOT INJECTED. It is left at its real default, so the real module runs against the
+    // real repo and a real remote. A stub here would only prove `executeWork` calls what it was
+    // handed — see the seam caveat in `run.mjs`'s param list.
+    report: (args) => {
+      reported = args;
+      return { ok: true, gaps: [] };
+    },
+    sync: () => null,
+  });
+
+  assert.ok(result.delivery, 'the result carries no delivery block');
+  assert.equal(result.delivery.error, null, `delivery failed: ${result.delivery.error}`);
+  assert.equal(result.delivery.committed, true);
+  assert.equal(result.delivery.pushed, true);
+  assert.equal(result.delivery.base, 'main', 'the base came from config.base.rules');
+
+  // OBSERVED ON THE REMOTE, not read back from the return value. This is the assertion that a stub
+  // could never make and the one that proves the composed call actually delivers.
+  assert.notEqual(git(bare, ['branch', '--list', result.delivery.branch]).trim(), '', 'nothing reached the remote');
+  assert.match(git(bare, ['show', '--name-only', '--format=', result.delivery.branch]), /src\/delivered\.js/);
+
+  // AND IT REACHED THE RECORD. `report.mjs`'s delivery block has been three empty fields on every
+  // record ever written; this is the falsifier for that.
+  assert.ok(reported, 'the reporter was never called');
+  assert.deepEqual(reported.delivery.commits, [result.delivery.head], 'the commit sha is in the record');
+  assert.equal(reported.delivery.pushed_to, result.delivery.branch);
+});
+
+test('ADDED B3: when the PUSH lands and the PR does NOT, the run says the branch is out there', async () => {
+  // THIS TEST IS THE FIRST DRAFT'S FAILURE, KEPT. Running the real `deliver` in `pr` mode against a
+  // `file://` remote makes the real `gh` fail after a successful push, which is the exact partial
+  // state an operator most needs told: the bytes ARE on the remote. Reporting `pushed: false` here
+  // — or letting the gh error stand unrewritten as "gh: HTTP 422" — would leave a pushed branch
+  // that the record denies exists. Not a mock of that scenario; the scenario.
+  const { dir: repo, bare } = repoWithRemote();
+  let reported = null;
+
+  const result = await executeWork({
+    ref: '#9',
+    config: CONFIG, // mode: 'pr', and `gh pr create` cannot succeed against file://
+    repoRoot: repo,
+    runRoot: mktemp('runs'),
+    stamp: '20260802T130800Z',
+    gh: ghIssue(AC_BODY),
+    spawn: workerThatWrites(repo),
+    gate: () => ({ pass: true, findings: [], unverified: [], graded_criteria: 1, ungraded_reason: null, gate_sha: 'x' }),
+    report: (args) => {
+      reported = args;
+      return { ok: true, gaps: [] };
+    },
+    sync: () => null,
+  });
+
+  assert.equal(result.ok, true, 'a missing PR must not fail a graded run');
+  assert.equal(result.delivery.pushed, true, 'the push happened and must be reported as such');
+  assert.equal(result.delivery.pr_url, null);
+  assert.match(result.delivery.error, /branch was pushed but no PR was opened/);
+  // And the remote agrees with the claim, which is the point of asserting on it rather than the
+  // return value: `pushed_to` names a ref an operator can actually go and look at.
+  assert.equal(reported.delivery.pushed_to, result.delivery.branch);
+  assert.notEqual(git(bare, ['branch', '--list', result.delivery.branch]).trim(), '');
+});
+
+test('ADDED B3: a FAILING run commits locally, pushes NOTHING, and the record does not claim a push', async () => {
+  const { dir: repo, bare } = repoWithRemote();
+  let reported = null;
+
+  const result = await executeWork({
+    ref: '#9',
+    config: CONFIG,
+    repoRoot: repo,
+    runRoot: mktemp('runs'),
+    stamp: '20260802T130100Z',
+    gh: ghIssue(AC_BODY),
+    spawn: workerThatWrites(repo),
+    gate: () => ({ pass: false, findings: [{ rule: 'test_failed', detail: 'npm test exited 1' }], unverified: [], graded_criteria: 1, ungraded_reason: null, gate_sha: 'x' }),
+    report: (args) => {
+      reported = args;
+      return { ok: true, gaps: [] };
+    },
+    sync: () => null,
+  });
+
+  assert.equal(result.delivery.committed, true, 'the work must be committed — the diff is its only copy');
+  assert.equal(result.delivery.pushed, false);
+  assert.equal(result.delivery.error, null, 'a failed gate is not a delivery failure');
+  assert.equal(git(bare, ['branch', '--list', result.delivery.branch]).trim(), '', 'a failed run reached the remote');
+
+  // `pushed_to: null` WHILE `commits` IS NON-EMPTY. The two fields disagreeing is the point: a
+  // record that named the local branch under `pushed_to` would make this look like a push.
+  assert.deepEqual(reported.delivery.commits, [result.delivery.head]);
+  assert.equal(reported.delivery.pushed_to, null, 'a local branch is not somewhere anything was pushed');
+  assert.equal(reported.delivery.pr_url, null);
+});
+
+test('ADDED B3: the tree is CLEAN after a run, so the next tick is not refused by its own predecessor', async () => {
+  // The consequence that makes "commit always" load-bearing rather than tidy. `executeWork` refuses
+  // a dirty tree at Step 2b, so a run that left its edits uncommitted would block the NEXT tick —
+  // and the operator would see a refusal naming files they never touched.
+  const { dir: repo } = repoWithRemote();
+
+  await executeWork({
+    ref: '#9',
+    config: CONFIG,
+    repoRoot: repo,
+    runRoot: mktemp('runs'),
+    stamp: '20260802T130200Z',
+    gh: ghIssue(AC_BODY),
+    spawn: workerThatWrites(repo),
+    gate: () => ({ pass: false, findings: [{ rule: 'test_failed', detail: 'x' }], unverified: [], graded_criteria: 1, ungraded_reason: null, gate_sha: 'x' }),
+    report: () => ({ ok: true, gaps: [] }),
+    sync: () => null,
+  });
+
+  assert.equal(git(repo, ['status', '--porcelain']).trim(), '', 'the worker’s edits were left uncommitted');
+  // And the proof that this is what Step 2b cares about: a second run is not refused.
+  const second = await executeWork({
+    ref: '#9',
+    config: CONFIG,
+    repoRoot: repo,
+    runRoot: mktemp('runs'),
+    stamp: '20260802T130300Z',
+    gh: ghIssue(AC_BODY),
+    spawn: stubSpawn((argv, opts) => ({ exit: 0, killed: false, signal: null, wall_ms: 10, log: opts.logPath })),
+    gate: () => ({ pass: true, findings: [], unverified: [], graded_criteria: 1, ungraded_reason: null, gate_sha: 'x' }),
+    report: () => ({ ok: true, gaps: [] }),
+    sync: () => null,
+  });
+  assert.equal(second.ok, true, `the second tick was refused: ${second.error}`);
+});
+
+test('ADDED B3: a delivery failure does NOT fail the graded run — it is a sidecar', async () => {
+  // §7's rule at a new site, and the one with the most money behind it: the worker ran, the tokens
+  // are spent, the gate graded the tree. A `gh` outage turning that into `ok: false` would reach
+  // `cli.mjs` as exit 2, which a scheduler retries at full price for a run that already happened.
+  const repo = repoWithCommit();
+
+  const result = await executeWork({
+    ref: '#9',
+    config: CONFIG,
+    repoRoot: repo,
+    runRoot: mktemp('runs'),
+    stamp: '20260802T130400Z',
+    gh: ghIssue(AC_BODY),
+    spawn: workerThatWrites(repo),
+    gate: () => ({ pass: true, findings: [], unverified: [], graded_criteria: 1, ungraded_reason: null, gate_sha: 'x' }),
+    deliver: async () => { throw new Error('the remote refused the connection'); },
+    report: () => ({ ok: true, gaps: [] }),
+    sync: () => null,
+  });
+
+  assert.equal(result.ok, true, 'a delivery failure must not fail a graded run');
+  assert.equal(result.gate.pass, true, 'and must not change the verdict');
+  assert.match(result.delivery.error, /deliver threw.*refused the connection/);
+  assert.equal(result.delivery.committed, false);
+});
+
+test('ADDED B3: delivery runs BEFORE the record, or the record could never carry it', async () => {
+  // An ordering test, because the ordering is the defect that was already latent: `report.mjs` has
+  // held a `delivery` block since M2 and it was `{commits: [], pushed_to: null, pr_url: null}` on
+  // every record ever written. Delivering after Step 7 would leave it that way forever, and no
+  // assertion on the final result would notice.
+  const repo = repoWithCommit();
+  const order = [];
+
+  await executeWork({
+    ref: '#9',
+    config: CONFIG,
+    repoRoot: repo,
+    runRoot: mktemp('runs'),
+    stamp: '20260802T130500Z',
+    gh: ghIssue(AC_BODY),
+    spawn: workerThatWrites(repo),
+    gate: () => ({ pass: true, findings: [], unverified: [], graded_criteria: 1, ungraded_reason: null, gate_sha: 'x' }),
+    deliver: async () => {
+      order.push('deliver');
+      return { committed: true, branch: 'alfred/x', base: 'main', pushed: true, pr_url: 'https://x.invalid/pr/1', head: 'abc1234', steps: [], error: null };
+    },
+    report: () => {
+      order.push('report');
+      return { ok: true, gaps: [] };
+    },
+    sync: () => {
+      order.push('sync');
+      return null;
+    },
+  });
+
+  assert.deepEqual(order, ['deliver', 'report', 'sync']);
+});
+
+test('ADDED B3: a run that changed nothing delivers nothing, and says so rather than erroring', async () => {
+  const { dir: repo, bare } = repoWithRemote();
+  let reported = null;
+
+  const result = await executeWork({
+    ref: '#9',
+    config: CONFIG,
+    repoRoot: repo,
+    runRoot: mktemp('runs'),
+    stamp: '20260802T130600Z',
+    gh: ghIssue(AC_BODY),
+    spawn: stubSpawn((argv, opts) => ({ exit: 0, killed: false, signal: null, wall_ms: 900, log: opts.logPath })),
+    gate: () => ({ pass: true, findings: [], unverified: [], graded_criteria: 1, ungraded_reason: null, gate_sha: 'x' }),
+    report: (args) => {
+      reported = args;
+      return { ok: true, gaps: [] };
+    },
+    sync: () => null,
+  });
+
+  assert.equal(result.delivery.committed, false);
+  assert.equal(result.delivery.branch, null, 'no branch litter for a run that did nothing');
+  assert.equal(result.delivery.error, null, 'nothing to do is not an error');
+  assert.deepEqual(reported.delivery.commits, [], 'and NOT [null] — a one-element array reads as one commit');
+  assert.equal(git(bare, ['branch', '--list', 'alfred/*']).trim(), '');
+});
+
+test('ADDED B3: a preflight-refused run delivers nothing to the remote', async () => {
+  // The two B-slice guards meeting. A worker stopped in its first turn has touched nothing, so
+  // there is nothing to commit — but the path that matters is the verdict: the refusal raises a
+  // `check_failed` finding, the gate fails, and a failed gate does not push. Asserted rather than
+  // assumed, because the two mechanisms are independent and either could be removed alone.
+  const { dir: repo, bare } = repoWithRemote();
+
+  const result = await executeWork({
+    ref: '#9',
+    config: CONFIG,
+    repoRoot: repo,
+    runRoot: mktemp('runs'),
+    stamp: '20260802T130700Z',
+    gh: ghIssue(AC_BODY),
+    spawn: stubSpawn((argv, opts) => {
+      // The worker writes BEFORE being stopped, so "nothing to commit" is not what makes this pass.
+      mkdirSync(join(repo, 'src'), { recursive: true });
+      writeFileSync(join(repo, 'src', 'half-done.js'), 'export const partial = true;\n');
+      const stopped = opts.watch(attestLog([{ id: 'AC1', quote: 'a quote I invented wholesale', confidence: 0.9 }]));
+      return { exit: 0, killed: false, signal: 'SIGTERM', stopped, wall_ms: 4000, log: opts.logPath };
+    }),
+    gate: () => ({ pass: true, findings: [], unverified: [], graded_criteria: 0, ungraded_reason: null, gate_sha: 'x' }),
+    report: () => ({ ok: true, gaps: [] }),
+    sync: () => null,
+  });
+
+  assert.equal(result.preflight.refused, true);
+  assert.equal(result.gate.pass, false, 'the refusal must fail the gate');
+  assert.equal(result.delivery.pushed, false, 'a refused run reached the remote');
+  assert.equal(git(bare, ['branch', '--list', 'alfred/*']).trim(), '', 'and the remote confirms it');
+  // COMMITTED, THOUGH. The half-finished edit is preserved locally, which is both how an operator
+  // sees what the worker managed to do before it was stopped and how the next tick gets a clean tree.
+  assert.equal(result.delivery.committed, true);
 });
 
 test('ADDED B2: a quote is checked against the TICKET BODY, not against the prompt', async () => {

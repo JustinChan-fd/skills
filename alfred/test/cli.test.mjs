@@ -39,7 +39,8 @@ import { join } from 'node:path';
 import { after, test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 
-import { EXIT, parseArgv, reportRecord, reportSync, reportVerdict, usage } from '../lib/cli.mjs';
+import { AC_MAP_KIND } from '../lib/acmap.mjs';
+import { EXIT, parseArgv, reportDelivery, reportRecord, reportSync, reportVerdict, usage } from '../lib/cli.mjs';
 import { SOURCE_FILENAME } from '../lib/item.mjs';
 import { DEFAULT_WALL_CAP_MS } from '../lib/run.mjs';
 
@@ -853,4 +854,329 @@ test('ADDED B2: a truthful attestation is NOT stopped through the real entrypoin
   // `ac_unmapped` fires and the gate correctly fails it — asserting 0 here would require a stub
   // that also delivers, which would be testing the gate rather than the preflight. What is asserted
   // is the thing under test: no refusal, and the run was allowed to finish.
+});
+
+// --- B3: DELIVERY, THROUGH THE ENTRYPOINT ------------------------------------------------------
+//
+// run.test.mjs asserts the wiring with the real `deliver` but against a `file://` remote, where the
+// real `gh` correctly refuses to open a PR ("none of the git remotes point to a known GitHub host").
+// That leaves exactly one proposition unproven anywhere: that the argv Alfred hands `gh pr create`
+// carries `--draft` when the whole path runs for real. `delivery.test.mjs` asserts it against an
+// injected recorder, which proves the module composes the flag but not that the flag survives the
+// composed run — [[feedback-mocked-seam-blindness]] is about precisely that gap.
+//
+// SO THE SHIM HERE IS A RECORDER, NOT A REFUSER. `eval/gh-shim.sh` REFUSES `pr create` (it exists to
+// keep sandbox code off real repositories), which means it cannot be reused: a refusal proves nothing
+// about the argv that was refused. This one records the argv and answers with a plausible URL.
+//
+// WHAT THIS STILL DOES NOT PROVE, stated so the green is not read as more than it is: that GitHub
+// honours `--draft`. Nothing local can establish that. What it establishes is that the flag is in the
+// argv of a real subprocess, which is the entire part Alfred controls.
+function ghDeliveryStub({ body, prUrl = 'https://github.com/acme/jarvis/pull/41' }) {
+  const dir = mktemp('ghbin');
+  const path = join(dir, 'gh');
+  const argvFile = `${path}.argv`;
+  writeFileSync(
+    path,
+    [
+      '#!/bin/sh',
+      // EVERY invocation is appended, one argv per line with a blank line between calls, so a test
+      // can tell "pr create was never called" from "pr create was called without --draft". A shim
+      // that only recorded the last call could not.
+      `printf '%s\\n' "$@" >> "${argvFile}"`,
+      `printf '\\n' >> "${argvFile}"`,
+      'if [ "$1 $2" = "pr create" ]; then',
+      `  printf '%s\\n' '${prUrl}'`,
+      '  exit 0',
+      'fi',
+      `cat <<'JSON'`,
+      JSON.stringify({
+        number: 9,
+        title: 'uniform retries',
+        body,
+        url: 'https://github.com/acme/jarvis/issues/9',
+      }),
+      'JSON',
+    ].join('\n'),
+  );
+  chmodSync(path, 0o755);
+  return { dir, path, argvFile };
+}
+
+// A repo with a REAL bare remote, so `git push` in the real `deliver` really has somewhere to go.
+// `repo()` above deliberately has none — most tests want none — so this wraps it.
+function repoWithRemote(opts) {
+  const dir = repo(opts);
+  const bare = mktemp('remote');
+  git(bare, ['init', '--quiet', '--bare']);
+  git(dir, ['remote', 'add', 'origin', `file://${bare}`]);
+  git(dir, ['push', '--quiet', 'origin', 'main']);
+  return { dir, bare };
+}
+
+// A worker that does the whole job: edits a file AND files the ac_map that lets the gate grade it.
+// Every earlier stub in this file skips the ac_map, which is why none of them can produce a PASS —
+// `ac_unmapped` fires on each criterion. A delivery test needs a real pass, because "pushes only on
+// pass" is untestable end-to-end against a worker that can never pass.
+function deliveringWorkerStub({ acs }) {
+  const dir = mktemp('bin');
+  const path = join(dir, 'fake-claude');
+  const mapFile = join(dir, 'ac-map.json');
+  // Written by Node and `cat`ed by the shell, for the reason `attestingWorkerStub` gives at length:
+  // JSON inside a double-quoted sh string is reinterpreted by the shell.
+  //
+  // `kind` IS IMPORTED, NOT TYPED, and the first draft omitted it entirely — the map was filed, the
+  // gate reported `ac_unmapped` on every criterion, and the run failed. That is `readAcMap` working
+  // exactly as designed ("an unstamped object is not counted, so unrelated state under .alfred/
+  // cannot read as a map"), and the failure is worth recording here because it also means the FAILING
+  // test below initially passed for the wrong reason: no push, but because nothing could ever pass.
+  // A literal 'alfred.ac-map' here would drift the same way #67 did.
+  writeFileSync(mapFile, `${JSON.stringify({ kind: AC_MAP_KIND, entries: acs }, null, 2)}\n`);
+  writeFileSync(
+    path,
+    [
+      '#!/bin/sh',
+      'printf "%s\\n" "$@" > "$0.argv"',
+      // The work. `$PWD` is the repo — `spawnWorker` runs the child there.
+      'mkdir -p src .alfred',
+      'printf "%s\\n" "export const backoff = (n) => 2 ** n;" > src/backoff.js',
+      `cat "${mapFile}" > .alfred/ac-map.json`,
+      'exit 0',
+    ].join('\n'),
+  );
+  chmodSync(path, 0o755);
+  return { path, argvFile: `${path}.argv` };
+}
+
+// AN ac_map THAT CAN ACTUALLY PASS, and getting here took two failures worth recording, because both
+// were the gate correctly refusing to be fooled by a stub:
+//
+//   1. `{entries: [...]}` with no `kind` → `ac_unmapped` on every criterion. An unstamped object is
+//      deliberately not counted (see `deliveringWorkerStub`).
+//   2. `command: 'true'` → `mapping_implausible` x2 AND `unverified` x2. §8.1: a command that does not
+//      mention the AC's subject at all is a finding, and `true` mentions nothing. The gate is telling
+//      me my map is a rubber stamp, which it was.
+//
+// So each command NAMES ITS CRITERION and exits 0 on a real check of the tree. `grep -q` against the
+// file the worker wrote is a genuine exit code over real bytes, not a `true` in costume — and it
+// carries the subject words, so the plausibility rule is satisfied by substance rather than by
+// padding the string.
+const PASSING_AC_MAP = [
+  { ac: 'AC1', command: 'grep -q backoff src/backoff.js # retries uniform across every channel' },
+  { ac: 'AC2', command: 'test -f src/backoff.js # the suite passes under npx vitest run' },
+];
+
+test('ADDED B3: a PASSING run through bin/alfred pushes for real and opens a DRAFT pr', () => {
+  const gh = ghDeliveryStub({ body: AC_ISSUE_BODY });
+  const { dir, bare } = repoWithRemote();
+  const stub = deliveringWorkerStub({ acs: PASSING_AC_MAP });
+
+  const r = spawnSync(BIN, ['work', '#9', '--worker-bin', stub.path, '--run-root', mktemp('runs')], {
+    cwd: dir,
+    encoding: 'utf8',
+    env: { ...process.env, PATH: `${gh.dir}:${process.env.PATH}` },
+  });
+
+  assert.equal(r.status, EXIT.pass, `expected pass, got ${r.status}\n${r.stdout}\n${r.stderr}`);
+  assert.ok(statSync(stub.argvFile).size > 0, 'the worker never launched');
+
+  // THE BYTES REACHED THE REMOTE. Read off the bare repo, not off Alfred's own output, because the
+  // proposition is "somebody else can now fetch this" and only the remote can answer it.
+  const branches = git(bare, ['branch', '--list', 'alfred/*']).trim();
+  assert.notEqual(branches, '', `nothing reached the remote\n${r.stdout}\n${r.stderr}`);
+  const branch = branches.replace(/^\*?\s*/, '');
+  assert.match(git(bare, ['show', '--name-only', '--format=', branch]), /src\/backoff\.js/);
+
+  // AND `--draft` IS IN THE REAL ARGV. The whole reason this test exists.
+  const calls = readFileSync(gh.argvFile, 'utf8').split('\n\n').filter((c) => c.trim());
+  const prCall = calls.find((c) => c.startsWith('pr\ncreate\n'));
+  assert.ok(prCall, `gh pr create was never invoked\n${r.stdout}\n${r.stderr}`);
+  const prArgs = prCall.split('\n');
+  assert.ok(prArgs.includes('--draft'), `the PR was not opened as a draft: ${JSON.stringify(prArgs)}`);
+  assert.ok(prArgs.includes('--base'), 'no base was named');
+  assert.equal(prArgs[prArgs.indexOf('--base') + 1], 'main');
+  assert.equal(prArgs[prArgs.indexOf('--head') + 1], branch);
+  // NO MERGE, EVER — asserted on the argv of every call the shim recorded, not just the pr one.
+  assert.ok(!calls.some((c) => c.startsWith('pr\nmerge\n')), 'the harness tried to merge its own PR');
+
+  // The operator is told where it went without opening the record.
+  assert.match(r.stdout + r.stderr, /https:\/\/github\.com\/acme\/jarvis\/pull\/41/);
+});
+
+test('ADDED B3: a FAILING run through bin/alfred pushes NOTHING and opens no pr', () => {
+  // The falsifier, and the one with real consequences: if delivery ignored the verdict, Alfred would
+  // push every run it ever made. `exit 1` on AC2 makes the gate fail on `check_failed` while the
+  // worker still does real work — so there IS something to push, and it must not be pushed.
+  const gh = ghDeliveryStub({ body: AC_ISSUE_BODY });
+  const { dir, bare } = repoWithRemote();
+  // AC1 as in the passing case; AC2 greps for a symbol the worker never wrote, so it exits non-zero
+  // for a real reason and still names its own subject terms. `exit 1` would draw
+  // `mapping_implausible` instead of `ac_failed` and the run would fail for the wrong rule.
+  const stub = deliveringWorkerStub({
+    acs: [
+      PASSING_AC_MAP[0],
+      { ac: 'AC2', command: 'grep -q vitest src/backoff.js # the suite passes under npx vitest run' },
+    ],
+  });
+
+  const r = spawnSync(BIN, ['work', '#9', '--worker-bin', stub.path, '--run-root', mktemp('runs')], {
+    cwd: dir,
+    encoding: 'utf8',
+    env: { ...process.env, PATH: `${gh.dir}:${process.env.PATH}` },
+  });
+
+  assert.equal(r.status, EXIT.gate_failed, `expected gate_failed, got ${r.status}\n${r.stdout}\n${r.stderr}`);
+
+  // IT FAILED FOR THE REASON THIS TEST IS ABOUT. Without this line the test passes when the ac_map is
+  // not read at all — which is exactly what happened on the first draft: both criteria came back
+  // `ac_unmapped`, nothing was pushed, and the assertion below was satisfied by a run that could
+  // never have passed under any circumstances. A no-push test whose subject can't pass is vacuous.
+  // `ac_failed` IS THE RULE, not `check_failed`: this is a worker-declared ac_map command exiting
+  // non-zero, which is a different rule from a config `verify` command failing. Both are asserted
+  // NEGATIVELY too, because either of the two ways this test can pass vacuously — an unread map, or a
+  // map the gate judged a rubber stamp — leaves nothing to push for reasons unrelated to the verdict.
+  assert.match(r.stdout + r.stderr, /ac_failed/, 'the run failed for some other reason than AC2');
+  assert.doesNotMatch(r.stdout + r.stderr, /ac_unmapped/, 'the ac_map was not read, so this proves nothing');
+  assert.doesNotMatch(r.stdout + r.stderr, /mapping_implausible/, 'the map was rejected, not run');
+
+  assert.equal(git(bare, ['branch', '--list', 'alfred/*']).trim(), '', 'a FAILED run reached the remote');
+
+  const calls = readFileSync(gh.argvFile, 'utf8').split('\n\n').filter((c) => c.trim());
+  assert.ok(!calls.some((c) => c.startsWith('pr\ncreate\n')), 'a failed run opened a pull request');
+
+  // BUT THE WORK IS COMMITTED LOCALLY, which is the other half of the rule and the half that is easy
+  // to lose: the run directory holds the log and the record, and the DIFF exists nowhere but here.
+  // A branch is also what leaves the tree clean, so the next tick is not refused by this one.
+  assert.notEqual(git(dir, ['branch', '--list', 'alfred/*']).trim(), '', 'the work was not committed anywhere');
+  assert.equal(git(dir, ['status', '--porcelain']).trim(), '', 'the tree was left dirty for the next tick');
+});
+
+test('ADDED B3: never_merge: false REFUSES before the worker is ever launched', () => {
+  // The refusal at its real point of use, through the real entrypoint. `config.mjs` checks
+  // `never_merge` once at load; `delivery.mjs` checks it again because every caller in between holds
+  // a plain object anything could have edited. This asserts the operator-visible consequence.
+  //
+  // EXIT 2, NOT 1: nothing was spent. And the worker's argv file must not exist — that is the proof.
+  const gh = ghDeliveryStub({ body: AC_ISSUE_BODY });
+  const { dir, bare } = repoWithRemote({
+    config: { ...CONFIG, delivery: { mode: 'pr', never_merge: false } },
+  });
+  const stub = deliveringWorkerStub({ acs: [{ ac: 'AC1', command: 'true' }] });
+
+  const r = spawnSync(BIN, ['work', '#9', '--worker-bin', stub.path, '--run-root', mktemp('runs')], {
+    cwd: dir,
+    encoding: 'utf8',
+    env: { ...process.env, PATH: `${gh.dir}:${process.env.PATH}` },
+  });
+
+  assert.equal(r.status, EXIT.refused, `expected refused, got ${r.status}\n${r.stdout}\n${r.stderr}`);
+  assert.throws(() => statSync(stub.argvFile), /ENOENT/, 'a never_merge refusal spent money anyway');
+  assert.equal(git(bare, ['branch', '--list', 'alfred/*']).trim(), '');
+  assert.match(r.stderr, /never_merge/, 'the refusal does not name the key that caused it');
+});
+
+// --- B3: reportDelivery's four outcomes ---------------------------------------------------------
+//
+// Unit-level because the e2e above can only reach two of the four (pushed-with-pr, and committed-but-
+// not-pushed). The other two — a delivery that failed outright, and a push whose PR did not open —
+// are states a local test cannot produce against a working shim, and they are the two an operator is
+// most likely to misread. Asserted on the STRINGS because the strings are the whole interface here.
+const lines = (fn) => {
+  const acc = [];
+  fn((s) => acc.push(s));
+  return acc.join('\n');
+};
+
+test('ADDED B3: nothing delivered and nothing wrong prints NOTHING', () => {
+  // Same argument as `reportSync`'s unconfigured sink: a line on every no-op teaches the operator to
+  // skip the line that means something.
+  const out = lines((o) =>
+    reportDelivery({ committed: false, branch: null, pushed: false, pr_url: null, error: null }, { out: o }),
+  );
+  assert.equal(out, '');
+  // And a null delivery — a run from before B3, or one where the step never reached — is also silent.
+  assert.equal(lines((o) => reportDelivery(null, { out: o })), '');
+});
+
+test('ADDED B3: a delivery that FAILED before committing says so, because the diff may exist nowhere', () => {
+  const out = lines((o) =>
+    reportDelivery(
+      { committed: false, branch: null, pushed: false, pr_url: null, error: 'not a git repository' },
+      { out: o },
+    ),
+  );
+  assert.match(out, /NOT DELIVERED/);
+  assert.match(out, /not a git repository/, 'the reason is not printed');
+});
+
+test('ADDED B3: committed-but-not-pushed names the branch AND says the verdict is why', () => {
+  // The line an operator reads after a failed run. It must not look like delivery broke — the branch
+  // is where the only copy of the work is, and the absent push is the rule working.
+  const out = lines((o) =>
+    reportDelivery(
+      { committed: true, branch: 'alfred/tars-1351-abc', pushed: false, pr_url: null, error: null },
+      { out: o },
+    ),
+  );
+  assert.match(out, /alfred\/tars-1351-abc/, 'the branch holding the only copy is not named');
+  assert.match(out, /gate did not pass/, 'nothing says WHY it was not pushed');
+  assert.doesNotMatch(out, /NOT DELIVERED/, 'a committed run reads as undelivered');
+});
+
+test('ADDED B3: a PUSH whose pr FAILED still says the branch is on the remote', () => {
+  // THE MOST IMPORTANT OF THE FOUR. The bytes are published; a line that led with the `gh` failure
+  // would read as "nothing happened" when in fact a branch is out there for anyone to fetch.
+  const out = lines((o) =>
+    reportDelivery(
+      {
+        committed: true,
+        branch: 'alfred/tars-1351-abc',
+        pushed: true,
+        pr_url: null,
+        error: 'the branch was pushed but no PR was opened: gh: HTTP 422',
+      },
+      { out: o },
+    ),
+  );
+  assert.match(out, /pushed/, 'a pushed branch does not say it was pushed');
+  assert.match(out, /alfred\/tars-1351-abc/);
+  assert.match(out, /pr was NOT opened/, 'nothing says the pr is missing');
+  assert.match(out, /422/, 'the underlying reason is dropped');
+});
+
+test('ADDED B3: a pushed run with a pr prints the url and calls it a DRAFT', () => {
+  const out = lines((o) =>
+    reportDelivery(
+      {
+        committed: true,
+        branch: 'alfred/tars-1351-abc',
+        pushed: true,
+        pr_url: 'https://github.com/acme/jarvis/pull/41',
+        error: null,
+      },
+      { out: o },
+    ),
+  );
+  assert.match(out, /https:\/\/github\.com\/acme\/jarvis\/pull\/41/);
+  // "DRAFT" IN THE OPERATOR'S OUTPUT, not only in the argv and the PR body. The one-word summary of
+  // the whole delivery policy, at the one place a human actually reads.
+  assert.match(out, /DRAFT/i, 'the output does not say the pr is a draft');
+});
+
+test('ADDED B3: mode push with no pr wanted does not read as a failure', () => {
+  // The falsifier for the test above it: `pushed: true, pr_url: null, error: null` is a SUCCESS under
+  // `mode: 'push'`, and printing "NO pr" there would report a healthy run as a broken one.
+  const out = lines((o) =>
+    reportDelivery(
+      { committed: true, branch: 'alfred/x', pushed: true, pr_url: null, error: null },
+      { out: o },
+    ),
+  );
+  assert.match(out, /pushed alfred\/x/);
+  // ASSERTED ON THE FAILURE PHRASE, not on `/no pr/i`. The first draft used the latter and failed
+  // against "(no pr requested)" — which was the assertion doing its job: the healthy string and the
+  // failure string were one case-insensitive match apart, so `lib/cli.mjs` now says "the pr was NOT
+  // opened" for the failure. A reader skimming the output can tell the two apart, and so can this.
+  assert.doesNotMatch(out, /NOT opened/, 'a run that wanted no pr is reported as missing one');
+  assert.doesNotMatch(out, /NOT DELIVERED/);
 });
