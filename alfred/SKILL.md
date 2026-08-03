@@ -129,6 +129,16 @@ scheduler that reads a misconfiguration as a failed run retries it forever at
 full price; one that reads a failed run as a misconfiguration stops retrying
 work that failed honestly.
 
+**A preflight refusal is exit 1, not exit 2**, and the difference is the whole
+reason the table above says *spending* rather than *working*. The preflight stops
+a worker inside its first turn — so the run happened, tokens were spent, and a
+record was written with that spend. Exit 2 promises a **free** refusal; reporting
+a preflight refusal as exit 2 would tell the scheduler nothing was spent and
+invite it to retry at full price forever. On exit 1 look for the
+`preflight REFUSED this run (<reason>)` line before reading the findings: that
+run was stopped in its first turn, so nothing the worker claimed afterwards was
+checked — there was nothing afterwards.
+
 ## Requirements
 
 A `.alfred/config.json` in the target repo. Alfred **refuses** without one and
@@ -200,6 +210,33 @@ It is your job, and the point of a program is that the operator types the ticket
 information. Fix the ticket, the config, or the code — deliberately, with the
 user — rather than trying again and hoping.
 
+## Delivery: committed always, pushed only on a pass
+
+Delivery is **built** (`lib/delivery.mjs`), and it is the only part of Alfred that
+writes somewhere the operator does not control. Two rules carry it:
+
+**A commit is unconditional. A push is earned.** Every run that changed a file
+commits to a run branch, pass or fail — because a commit is local, revertible,
+and the only durable copy of the diff. The run directory holds the log and the
+record; the diff exists **only in the working tree**, and the next tick refuses to
+spawn against a dirty tree, so an uncommitted failed run is work that has to be
+thrown away to make progress. A push is what other people see, so it is gated on
+the verdict: gate passes, the branch goes up; gate fails, the commit stays local.
+
+**`delivery.mode`** is `off` (commit only), `push` (branch, no PR), or `pr`
+(branch plus a **draft** PR). **`never_merge: true` is required** — Alfred refuses
+before the spawn if it is false, so a misconfiguration costs nothing. Alfred never
+merges its own PR; a human does, or nobody does.
+
+Read the `delivery:` line in the output — it is the only place the outward-facing
+side effect is reported, and it distinguishes four outcomes on purpose: nothing to
+deliver (silent), committed locally, pushed, and **pushed but the PR failed**. That
+last one matters most: the bytes are already published even though the run looks
+incomplete.
+
+Still **ask before the first real push**, and treat that as one ask for the
+session, not one per tick — same rule as spending.
+
 ## What is not built yet
 
 `alfred loop` **refuses** rather than exiting 0. It needs the lock file and the
@@ -207,10 +244,9 @@ source poll of `docs/PLAN.md` §2.2. Exiting 0 would be worse than refusing: onc
 cron is pointed at it, a silent success is a loop that appears to be patrolling
 and is doing nothing at all.
 
-Delivery is also absent — nothing here creates a branch, pushes, or opens a PR.
-A run works the tree in place and is graded there. **Ask before anything
-outward-facing**, and note that Alfred's own config carries
-`delivery.never_merge`.
+So **the unattended loop today is `alfred work <ref>` per ticket**, one
+invocation per item, with the operator choosing the refs. That is the whole
+morning workflow — there is no `/alfred` slash command and no scheduler.
 
 ## Where things are
 
