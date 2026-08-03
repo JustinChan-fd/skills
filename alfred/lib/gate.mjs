@@ -194,7 +194,70 @@ async function defaultRun(command, cwd) {
   }
 }
 
-const finding = (rule, detail, evidence) => ({ rule, detail, evidence: String(evidence ?? '') });
+// EVIDENCE IS PUBLISHED, AND THAT IS WHY IT IS BOUNDED HERE (B2).
+//
+// `evidence` is raw stdout+stderr from an operator-authored `config.verify` command. It lands in
+// `record.json`, and `syncRecord` COMMITS AND PUSHES that record to a git-backed sink. So whatever a
+// failing `npm test` printed on this machine is what leaves it — and a push is not undone by editing
+// the file afterwards, because the bytes are already in a commit somebody may have fetched.
+//
+// AT THE CONSTRUCTOR, NOT AT THE FOUR CALL SITES. `runChecks`, the ac_map path, `runDeclaredChecks`,
+// and `unbacked_claim` all funnel command output through here. Bounding it at each site would be
+// four copies of a rule that has to agree, and the fifth site someone adds next month would be
+// unbounded by default — which is the wrong default for something that publishes. Here, a new
+// finding is bounded because it is a finding.
+//
+// NOT IN `defaultRun`, which was the first instinct and is wrong twice over: an INJECTED runner
+// (every test, and the ac_map path) would bypass it entirely, and `unbacked_claim`'s evidence is
+// worker-authored report text that never passes through a runner at all.
+
+// 6 KB. A failing check's diagnosis is in its first lines — the assertion and the frame that raised
+// it. What follows is the rest of the suite restating the same failure, and 4 MB of it was measured
+// on a real vitest run over a broken module. Big enough to hold a stack trace, small enough that a
+// sink of a thousand records stays readable.
+const EVIDENCE_MAX_BYTES = 6 * 1024;
+
+// SECRET-SHAPED STRINGS, REDACTED BY SHAPE RATHER THAN BY VALUE. Nothing here knows the operator's
+// actual secrets, so this cannot be complete and must not be described as such: it catches the
+// shapes that CI output is known to print. A vendor prefix nobody has enumerated still gets through,
+// which is why the size cap and this list are two mitigations and not one.
+//
+// EACH PATTERN KEEPS ITS SURROUNDING LINE. Blanking the line would take the diagnosis with it —
+// "auth failed for <token>" is a finding, and only the token is the hazard.
+const SECRET_PATTERNS = Object.freeze([
+  // github: ghp_/gho_/ghu_/ghs_/ghr_ + 36 chars, and the fine-grained github_pat_ form.
+  [/\b(gh[pousr]_[A-Za-z0-9]{16,}|github_pat_[A-Za-z0-9_]{20,})\b/g, '<redacted:github-token>'],
+  // anthropic and openai-style prefixed keys.
+  [/\b(sk-ant-[A-Za-z0-9_-]{16,}|sk-[A-Za-z0-9]{20,})\b/g, '<redacted:api-key>'],
+  // aws access key ids, and any KEY/SECRET/TOKEN/PASSWORD assignment.
+  [/\b(A(?:KIA|SIA|ROA|IDA)[A-Z0-9]{12,})\b/g, '<redacted:aws-key-id>'],
+  [/\b([A-Z0-9_]*(?:SECRET|TOKEN|PASSWORD|PASSWD|API_?KEY)[A-Z0-9_]*)\s*[=:]\s*(\S+)/g, '$1=<redacted>'],
+  // jwts: three base64url segments. The payload is the part that carries claims.
+  //
+  // THE SIGNATURE FLOOR IS 2, NOT THE 43 A REAL HS256 SIGNATURE HAS. Written as `{4,}` first and a
+  // fixture with a 3-char signature slipped through. The temptation was to lengthen the fixture,
+  // which would have been fixing the falsifier to match the code: a log line that WRAPPED or was
+  // itself truncated upstream still carries the header and payload, and those are the segments with
+  // the claims in them. `eyJ` is base64 for `{"`, so a false positive would need a literal
+  // `{"…`-prefixed base64 string with two dots — nothing pays for a tighter floor here.
+  [/\beyJ[A-Za-z0-9_-]{6,}\.[A-Za-z0-9_-]{6,}\.[A-Za-z0-9_-]{2,}\b/g, '<redacted:jwt>'],
+  // credentials embedded in a URL. The HOST is kept: it is often the whole diagnosis.
+  [/\b([a-z][a-z0-9+.-]*:\/\/)([^/\s:@]+):([^/\s@]+)@/gi, '$1<redacted:credentials>@'],
+]);
+
+// Order matters: redact FIRST, then cap. Capping first can cut a token in half and leave a fragment
+// that no pattern matches — a secret published in pieces is still published.
+export function boundEvidence(raw) {
+  let text = String(raw ?? '');
+  for (const [pattern, replacement] of SECRET_PATTERNS) text = text.replace(pattern, replacement);
+  if (text.length <= EVIDENCE_MAX_BYTES) return text;
+  // THE HEAD, NOT THE TAIL, and the marker says how much went. The exit code and the assertion are
+  // at the top; a tail would keep the least specific end of a stack trace.
+  const dropped = text.length - EVIDENCE_MAX_BYTES;
+  return `${text.slice(0, EVIDENCE_MAX_BYTES)}\n… truncated: ${dropped} more bytes not recorded`;
+}
+
+const finding = (rule, detail, evidence) => ({ rule, detail, evidence: boundEvidence(evidence) });
 
 // Normalizes a path for glob matching. Same reasoning as `config.mjs`'s isOffLimits:
 // callers produce `./x`, `x`, and backslash-separated forms for one file, and an

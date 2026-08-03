@@ -2573,3 +2573,91 @@ test('ADDED #8: the sha is on the verdict, NOT in the suite digest — the ruler
     'adding gate_sha must not move the suite digest',
   );
 });
+
+// --- ADDED B2: what a finding's `evidence` is allowed to carry off the machine ---------------
+//
+// WHY THIS IS A GATE CONCERN AND NOT A TELEMETRY ONE. `evidence` is raw stdout+stderr from a
+// `config.verify` command, and four sites funnel it in (`runChecks`, the ac_map path,
+// `runDeclaredChecks`, `unbacked_claim`). It reaches `record.json`, and `syncRecord` commits and
+// PUSHES that record to a git-backed sink. So whatever a failing `npm test` prints on the
+// operator's machine is what gets published — and a push is not undone by deleting the file
+// afterwards. Truncating downstream would be too late for the same reason: the bytes are already
+// in a commit.
+//
+// TWO SEPARATE PROPOSITIONS, TESTED SEPARATELY, because [[feedback-unfalsifiable-conjunct]] is the
+// rule here — a single "evidence is safe" boolean can pass because the cap fired and the redaction
+// never ran. So: a SIZE bound, and a SECRET-SHAPED-STRING bound.
+//
+// AND A THIRD TEST THAT MATTERS MOST: evidence must still be USEFUL. A cap that empties the field
+// makes every failing check untriageable, which is exactly the trade `gate.mjs:224`'s own comment
+// refuses — "without output the operator re-runs it by hand to learn anything."
+
+const evidenceFor = (findings, rule) => findings.filter((f) => f.rule === rule).map((f) => f.evidence);
+
+test('ADDED B2: a runaway check output is CAPPED before it can reach the record', async () => {
+  // 4 MB of stack trace is a real npm-test failure, not a hypothetical: a vitest run over a broken
+  // module prints every file it touched. Unbounded, that is a 4 MB blob in a git commit.
+  const huge = 'E'.repeat(4 * 1024 * 1024);
+  const result = await runGate({
+    config: CONFIG,
+    repoRoot: tempRepo(),
+    run: runnerFor({ 'npm test': { code: 1, output: huge }, 'npm run lint': { code: 0, output: '' } }),
+  });
+
+  const ev = evidenceFor(result.findings, GATE_RULES.check_failed);
+  assert.equal(ev.length, 1);
+  assert.ok(ev[0].length < 8 * 1024, `evidence is ${ev[0].length} bytes — nothing capped it`);
+  // AND THE OPERATOR IS TOLD IT WAS CUT. Silent truncation reads as "that was the whole output",
+  // which sends someone hunting for a failure mode in the part that was dropped.
+  assert.match(ev[0], /truncated/i);
+  // The exit code SURVIVES the cap. It is the one part of the evidence that is never noise, and a
+  // cap that takes the head of the string would lose it if the code came last.
+  assert.match(ev[0], /exit 1/);
+});
+
+test('ADDED B2: a secret-shaped string in check output is REDACTED, not published', async () => {
+  // Each of these is a shape that shows up in real CI output. The values are synthetic.
+  const leaky = [
+    'error: auth failed for ghp_AbCdEfGhIjKlMnOpQrStUvWxYz0123456789',
+    'AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMIK7MDENGbPxRfiCYEXAMPLEKEY',
+    'Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxIn0.sig',
+    'https://user:hunter2@internal.example.com/repo.git',
+    'sk-ant-api03-ZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZ',
+  ].join('\n');
+  const result = await runGate({
+    config: CONFIG,
+    repoRoot: tempRepo(),
+    run: runnerFor({ 'npm test': { code: 1, output: leaky }, 'npm run lint': { code: 0, output: '' } }),
+  });
+
+  const ev = evidenceFor(result.findings, GATE_RULES.check_failed).join('\n');
+  // THE SECRET MATERIAL ITSELF, absent. Asserted on the distinguishing substring of each rather
+  // than on a redaction count, because a count passes when one pattern matches five times.
+  assert.doesNotMatch(ev, /AbCdEfGhIjKlMnOpQrStUvWxYz/, 'a github token survived');
+  assert.doesNotMatch(ev, /wJalrXUtnFEMIK7MDENGbPxRfiCY/, 'an aws secret survived');
+  assert.doesNotMatch(ev, /eyJzdWIiOiIxIn0/, 'a jwt payload survived');
+  assert.doesNotMatch(ev, /hunter2/, 'a url password survived');
+  assert.doesNotMatch(ev, /ZZZZZZZZZZZZZZZZZZZZ/, 'an anthropic key survived');
+  // AND THE SURROUNDING PROSE SURVIVES. Redaction that eats the line takes the diagnosis with it:
+  // "auth failed" is the finding, the token is not.
+  assert.match(ev, /auth failed/);
+  assert.match(ev, /internal\.example\.com/);
+});
+
+test('ADDED B2: an ORDINARY failing check keeps its output verbatim — the falsifier', async () => {
+  // The test that makes the two above mean something. A redactor that blanked every evidence field
+  // would pass both of them, and would make every real failure untriageable. This is the case that
+  // must come through untouched, and it is what `gate.mjs`'s own comment promises: "the code AND
+  // the output."
+  const ordinary = "FAIL src/retry.test.js\n  expected 3 retries, got 1\n    at retry (src/retry.js:42:7)";
+  const result = await runGate({
+    config: CONFIG,
+    repoRoot: tempRepo(),
+    run: runnerFor({ 'npm test': { code: 1, output: ordinary }, 'npm run lint': { code: 0, output: '' } }),
+  });
+
+  const ev = evidenceFor(result.findings, GATE_RULES.check_failed);
+  assert.equal(ev.length, 1);
+  assert.equal(ev[0], `exit 1\n${ordinary}`, 'an ordinary failure was altered');
+  assert.doesNotMatch(ev[0], /truncated|REDACTED/i);
+});

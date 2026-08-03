@@ -799,8 +799,16 @@ test('ADDED B2: a confabulated quote exits 1 through the real entrypoint, and sa
   });
   const elapsed = Date.now() - started;
 
-  // EXIT 1. Not 0 (a four-second run that touched nothing is a clean diff, which is a PASS to the
-  // gate) and not 2 (the worker ran; this is not a pre-spawn refusal).
+  // EXIT 1, AND IT IS OVER-DETERMINED HERE — measured, not assumed. Mutating the refusal's finding
+  // rule to one the gate does not fail on kills `run.test.mjs`'s "a preflight refusal raises a gate
+  // finding" and SURVIVES this test, because this worker also delivers nothing and `ac_unmapped`
+  // fails the run on its own. So what this line pins is the exit CODE an operator and a scheduler
+  // see; the causal link from the refusal to the verdict is pinned there, against an injected spawn,
+  // where nothing else can fail the run. Making it causal here would need a stub that otherwise
+  // PASSES — a real diff plus an ac_map — which is a test of the gate wearing a preflight costume.
+  //
+  // Not 2, and that is NOT over-determined: exit 2 is the pre-spawn refusal path, and no finding of
+  // any kind can produce it.
   assert.equal(r.status, EXIT.gate_failed, `expected gate_failed, got ${r.status}\n${r.stdout}\n${r.stderr}`);
   assert.notEqual(r.status, EXIT.refused);
 
