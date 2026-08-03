@@ -288,6 +288,23 @@ async function commitAndPush({ repoRoot, config, item, gate, runId, recordPath, 
     // `-A` with an explicit `--` and no pathspec: everything the worker touched, which is what the
     // gate graded. Narrowing it here would commit a different tree than the one graded.
     await git(repoRoot, 'add', '-A');
+    // `--no-verify` HERE AND DELIBERATELY NOT ON THE PUSH BELOW. The asymmetry is the point.
+    //
+    // A pre-commit hook runs against a tree the gate has already graded. Letting it rewrite that
+    // tree (prettier, lint --fix, a generated file) would mean the commit contains something the
+    // gate never saw, and the record's verdict would describe a different diff than the branch. The
+    // commit is also local and cheap to discard, so skipping the hook costs the operator nothing.
+    //
+    // A PRE-PUSH HOOK IS A DIFFERENT ANIMAL: it is the repo owner's last guard on state other
+    // people will see, and this module's whole posture — draft-only, never merge — is that the
+    // harness does not get to decide what is safe to publish. So the push runs hooks. Measured
+    // consequence, 2026-08-03: `jarvis`'s `.husky/pre-push` blocks any push touching `src/`,
+    // `server/`, or `scripts/` without a `docs/brain/` entry, and generates one by spawning
+    // `claude -p` (scripts/claude-debrief.ts:65) before exiting 1 to force a re-push. That will
+    // fail this step on a passing run, and the failure is CORRECT: the hook is doing its job. It
+    // also spends tokens no Alfred record can attribute, which is worth knowing before reading a
+    // cost figure from a run that pushed. `.husky` is in that repo's `off_limits`, so a worker
+    // cannot quietly remove the obstacle either.
     await git(repoRoot, 'commit', '--no-verify', '-m', commitMessage({ item, gate, runId }));
     done('commit');
     state.committed = true;
