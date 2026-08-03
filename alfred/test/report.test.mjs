@@ -751,6 +751,87 @@ test('ADDED: a run with no vendor ledger records null, and null is not an empty 
   assert.equal(record.cost.vendor_usd, 1.0671731999999998, 'and the first vendor source still lands');
 });
 
+test('ADDED D: a record whose two cost sources disagree carries the named gap', () => {
+  // WIRING, asserted separately from the predicate. `costSourceDisagreement` is tested in
+  // test/gaps.test.mjs; this asserts `buildRecord` actually CALLS it. An unwired tripwire is the
+  // green-and-blind shape this module's own header calls out by name — "Wiring is where a guard
+  // gets forgotten" — and the whole reason tonight's 5% gap went unnoticed is that both figures
+  // were already in the record with nothing comparing them.
+  //
+  // Uses the real jarvis#7 figures. The transcript is synthetic and prices to ~nothing, so
+  // `ours` here comes from `workerCostUsd` being far above it — which is the same asymmetry the
+  // live run had, just amplified.
+  const dir = tmp();
+  const transcript = join(dir, 't.jsonl');
+  writeFileSync(
+    transcript,
+    JSON.stringify({
+      type: 'assistant',
+      timestamp: '2026-08-03T14:12:00.000Z',
+      message: {
+        model: 'claude-sonnet-5',
+        id: 'm1',
+        usage: { input_tokens: 579611, output_tokens: 123104, cache_read_input_tokens: 5220852, cache_creation_input_tokens: 234284 },
+      },
+    }) + '\n',
+  );
+
+  const record = buildRecord({
+    transcriptPath: transcript,
+    subagentsDir: null,
+    session: { id: 'sess-disagree' },
+    workerCostUsd: 6.352074599999998,
+  });
+
+  const gap = record.gaps.find((g) => g.code === 'cost-source-disagreement');
+  assert.ok(gap, `expected a cost-source-disagreement gap, got ${JSON.stringify(record.gaps)}`);
+  assert.match(gap.detail, /6\.35207/, 'the gap must name the vendor figure it disagreed with');
+
+  // AND THE RECORD IS STILL GOOD. gaps.mjs's founding rule: a gap does not condemn a record, and
+  // a run whose two sources differ by 5% is the most informative record in the sink, not the
+  // least. Both figures stay on it, untouched — no winner is picked here.
+  assert.equal(record.ok, true, 'a named gap must not fail the record');
+  assert.equal(record.cost.total_usd, 6.030214, 'our figure stays exactly as computed');
+  assert.equal(record.cost.vendor_usd, 6.352074599999998, 'and the vendor figure beside it');
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test('ADDED D: the five agreeing records do not gain a spurious gap', () => {
+  // The other half, split per feedback_unfalsifiable_conjunct. Five of the seven records in the
+  // sink agree — including to 1.11e-16, which is float noise from a different summation order —
+  // and a detector that flagged those would be muted inside a week.
+  const dir = tmp();
+  const transcript = join(dir, 't.jsonl');
+  writeFileSync(
+    transcript,
+    JSON.stringify({
+      type: 'assistant',
+      timestamp: '2026-08-03T14:13:00.000Z',
+      message: {
+        model: 'claude-sonnet-5',
+        id: 'm1',
+        usage: { input_tokens: 64531, output_tokens: 9536, cache_read_input_tokens: 868308, cache_creation_input_tokens: 37306 },
+      },
+    }) + '\n',
+  );
+
+  const record = buildRecord({
+    transcriptPath: transcript,
+    subagentsDir: null,
+    session: { id: 'sess-agree' },
+    // The real webtarsthree sonnet figure — 0.7370228999999999 against our 0.737023.
+    workerCostUsd: 0.7370228999999999,
+  });
+
+  assert.equal(record.cost.total_usd, 0.737023);
+  assert.equal(
+    record.gaps.find((g) => g.code === 'cost-source-disagreement'),
+    undefined,
+    '1.11e-16 is the same IEEE 754 number, not a disagreement',
+  );
+  rmSync(dir, { recursive: true, force: true });
+});
+
 test('ADDED: the record says WHY nothing was delivered, not just that nothing was', () => {
   const noop = buildRecord({
     transcriptPath: null,

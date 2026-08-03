@@ -36,6 +36,14 @@ export const GAP_CODES = Object.freeze({
   // than thrown: a mislabelled record is still worth reading, per this module's own
   // "a gap does NOT condemn the record" rule.
   'provenance-arm-unknown': 'the record names an arm that is not in the known set',
+  // Added for D, and it is the first code in this set that a LIVE RUN found rather than a
+  // review. Same family as model-id-disagreement one line up — two sources for one fact that
+  // do not agree — but about the dollar figure rather than the model name. Measured 2026-08-03:
+  // both jarvis#7 runs priced 5.34% and 6.04% under the vendor because the result line carries
+  // two token ledgers and we were summing the smaller one. Five shorter records agreed to 6dp,
+  // which is exactly why this needs to aggregate: one record's 5% gap is invisible, and "our
+  // two cost sources diverge on long runs" is only visible across the sink.
+  'cost-source-disagreement': 'our computed cost and the vendor-reported cost do not agree',
 });
 
 // THE CLOSED SET OF ARMS, for exactly the reason GAP_CODES above is closed: "how does the
@@ -129,4 +137,68 @@ export function reconcileModel(sources = {}, gaps = null) {
     noteGap(gaps, 'model-id-disagreement', `sources disagree on model id: ${named}`);
   }
   return null;
+}
+
+// THE TWO COST SOURCES, compared. Reports; never corrects.
+//
+// WHY THIS EXISTS. `report.mjs` has recorded both `total_usd` (ours, from the copied price
+// table) and `vendor_usd` (the CLI's own `total_cost_usd`) since M2, and the two agreeing has
+// been cited repeatedly as the evidence the table is right. Nothing ever CHECKED that they
+// agreed. On 2026-08-03 a live run made the omission expensive: both real jarvis#7 runs came in
+// 5.34% and 6.04% under the vendor, and the only reason anyone noticed was a human reading two
+// numbers side by side in a console line.
+//
+// The cause is fixed (96cb211 — the result line carries two token ledgers and we summed the
+// smaller). This is the tripwire for the next one, and it is deliberately not tied to that
+// cause: any future divergence between the two sources fires it, whatever the reason.
+//
+// A PREDICATE, NOT A FIX. It does not adjust a figure, pick a winner, or fail the record.
+// Choosing between the two is analysis and belongs in alfred-telemetry, per the standing
+// separation of concerns: Alfred writes raw metrics and names holes.
+//
+// THE TOLERANCE IS RELATIVE, AND IT HAS TO BE. Five records in the sink agree to 6dp but not to
+// the bit: ours 0.825523 against vendor 0.8255230000000001 differ by 1.11e-16, which is the same
+// IEEE 754 number arrived at by a different summation order. An absolute epsilon that caught
+// that would fire on every record and be muted within a week — this module's own muted-tripwire
+// rule. 0.1% is four orders of magnitude above the float noise and two below the defect found.
+export const COST_AGREEMENT_TOLERANCE = 0.001;
+
+// BOTH SOURCES OR NO COMPARISON. `comparable: false` is reported separately from
+// `disagrees: false` because collapsing them is the denominator-asymmetry defect: an absent
+// vendor figure would read as agreement, silently degrading a two-source check into a
+// one-source assertion. That is not hypothetical here — the Phase C backfill dry run rebuilt
+// all five records with `vendor_usd: null` and looked perfectly clean.
+export function costSourceDisagreement({ ours = null, vendor = null } = {}) {
+  const none = { disagrees: false, comparable: false, code: null, detail: null, relative: null };
+
+  // `typeof === 'number'` FIRST, and not `Number(x)`. `Number(null)` is 0, not NaN, so a
+  // finite-check alone lets a missing vendor figure through as a zero — which then reads as a
+  // 100% disagreement or, worse, as agreement against another zero. Caught by the
+  // missing-source test on the first run of this function, which is the whole reason that test
+  // exists: absent must never be coerced into a number.
+  if (typeof ours !== 'number' || typeof vendor !== 'number') return none;
+  const a = ours;
+  const b = vendor;
+  if (!Number.isFinite(a) || !Number.isFinite(b)) return none;
+  // A zero denominator has no relative difference to state. Both-zero is agreement; one-zero is
+  // a disagreement that this function cannot quantify, so it is reported as incomparable rather
+  // than as a division by zero dressed up as Infinity percent.
+  if (a === 0) return { ...none, comparable: b === 0 };
+
+  const relative = Math.abs(b - a) / Math.abs(a);
+  if (relative <= COST_AGREEMENT_TOLERANCE) {
+    return { ...none, comparable: true, relative };
+  }
+
+  return {
+    disagrees: true,
+    comparable: true,
+    relative,
+    code: 'cost-source-disagreement',
+    // BOTH FIGURES AND THE MAGNITUDE. A code alone cannot be triaged — 5% is a defect worth
+    // chasing and 1e-16 is float noise, and they would otherwise aggregate identically.
+    detail:
+      `ours ${a} vs vendor ${b} — a ${(relative * 100).toFixed(2)}% difference, ` +
+      `beyond the ${(COST_AGREEMENT_TOLERANCE * 100).toFixed(1)}% tolerance`,
+  };
 }

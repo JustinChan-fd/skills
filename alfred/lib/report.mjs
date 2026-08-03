@@ -60,7 +60,7 @@ import { basename, dirname, join } from 'node:path';
 
 import { collectFromText } from './tokens.mjs';
 import { priceTokens } from './prices.mjs';
-import { newGaps, noteGap, usageRefusal, isKnownArm, ARMS } from './gaps.mjs';
+import { newGaps, noteGap, usageRefusal, isKnownArm, ARMS, costSourceDisagreement } from './gaps.mjs';
 import { stampProblems } from './suite.mjs';
 import { projectDirFor, sessionFromWorkerLog, transcriptPathFor } from './transcript.mjs';
 
@@ -498,6 +498,22 @@ export function buildRecord({
 
   const priced = priceTokens(merged);
   const parentPriced = priceTokens(collected.by_model);
+
+  // THE TWO-COST-SOURCE TRIPWIRE, wired.
+  //
+  // Both figures have been on the record since M2 and their agreement has been cited repeatedly
+  // as the evidence the price table is right — with nothing ever comparing them. That is how
+  // tonight's defect survived: two real jarvis#7 runs sat in the sink 5.34% and 6.04% under the
+  // vendor, and it took a human reading two numbers in a console line to notice.
+  //
+  // Wired here rather than left to the caller for the reason this module's header already gives:
+  // wiring is where a guard gets forgotten, and an unwired tripwire reads as coverage. Skipped
+  // when the usage tripwire already fired — comparing a deliberately-null cost against the
+  // vendor would report a 100% disagreement on top of a hole we have already named.
+  if (!refusal.refused) {
+    const cmp = costSourceDisagreement({ ours: priced.total_usd, vendor: workerCostUsd });
+    if (cmp.disagrees) noteGap(gaps, cmp.code, cmp.detail);
+  }
 
   return {
     ok: true,

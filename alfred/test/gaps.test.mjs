@@ -56,7 +56,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { ARM_IDS, ARMS, GAP_CODES, isKnownArm, newGaps, noteGap, usageRefusal, reconcileModel } from '../lib/gaps.mjs';
+import { ARM_IDS, ARMS, GAP_CODES, isKnownArm, newGaps, noteGap, usageRefusal, reconcileModel, costSourceDisagreement } from '../lib/gaps.mjs';
 
 // --- 1. a structural hole is recorded without condemning the record ---
 
@@ -202,4 +202,76 @@ test('ADDED A5: an unstated arm is known-good, not unknown', () => {
   // But an empty string is NOT absent. It is a caller that meant to say something and said
   // nothing, and it aggregates as its own cohort.
   assert.equal(isKnownArm(''), false);
+});
+
+// --- D: the two token ledgers on one result line, and naming when they disagree ---
+//
+// MEASURED 2026-08-03. The result line carries both a flat `usage` object and a per-model
+// `modelUsage` block, and on long runs they DISAGREE: ours-from-`usage` came in 5.34% and 6.04%
+// under the vendor on the two real jarvis#7 runs, while five shorter records agreed to 6dp.
+// 96cb211 fixed the reading — both ledgers are now persisted raw. This names the disagreement so
+// it AGGREGATES: "how often do our two cost sources diverge, and by how much" has to be a query
+// over the sink rather than a human noticing a 5% gap in one record.
+//
+// A PREDICATE, NOT A CORRECTION. It reports; it does not pick a winner or adjust a figure.
+// Choosing between the ledgers is analysis and belongs in alfred-telemetry, and a gap
+// deliberately does not condemn the record (this module's founding rule) — a run whose two
+// sources differ by 5% is still the most informative record in the sink.
+test('ADDED D: two cost sources that disagree is a NAMED hole, not a silent 5% undercount', () => {
+  // Real figures, 20260803T141200Z-7.
+  const found = costSourceDisagreement({ ours: 6.030214, vendor: 6.352074599999998 });
+  assert.equal(found.disagrees, true, 'a 5.34% gap between two sources for one run is a hole');
+  assert.equal(found.code, 'cost-source-disagreement');
+
+  // The DETAIL must carry both figures and the magnitude, because a code alone cannot be
+  // triaged: 5% is a defect worth chasing and 1e-16 is float noise, and they would otherwise
+  // aggregate identically. Asserted on the substance rather than on `detail.length > 0`, per
+  // [[feedback_mutate_to_prove_a_falsifier]] — a length check passes on any string.
+  assert.match(found.detail, /6\.030214/, 'the detail must state our figure');
+  assert.match(found.detail, /6\.35207/, 'and the vendor figure');
+  assert.match(found.detail, /5\.3[0-9]/, 'and the magnitude, so 5% and float noise never aggregate alike');
+});
+
+test('ADDED D: the five records that AGREE are not reported as disagreeing', () => {
+  // The other half of the proposition, split per [[feedback_unfalsifiable_conjunct]]: a detector
+  // that fired on everything would be indistinguishable from one that worked. These are the real
+  // pairs from the sink, INCLUDING the 1.11e-16 float-noise case — ours 0.825523 against vendor
+  // 0.8255230000000001, which is the same number in IEEE 754 and must never register.
+  const agreeing = [
+    { ours: 0.825523, vendor: 0.8255230000000001 },
+    { ours: 8.022071, vendor: 8.0220705 },
+    { ours: 1.25924, vendor: 1.2592398 },
+    { ours: 4.279328, vendor: 4.27932805 },
+  ];
+  for (const pair of agreeing) {
+    assert.equal(
+      costSourceDisagreement(pair).disagrees,
+      false,
+      `${pair.ours} vs ${pair.vendor} agrees to 6dp and must not be flagged`,
+    );
+  }
+});
+
+test('ADDED D: a MISSING second source is not agreement — it is nothing to compare', () => {
+  // [[feedback_denominator_asymmetry]] exactly: a two-source check needs BOTH sources to say
+  // anything at all. Treating an absent vendor figure as agreement is the failure that made the
+  // backfill dry run look clean while every record rebuilt with `vendor_usd: null` — the check
+  // silently degraded from agreement to assertion with nothing to notice.
+  for (const pair of [
+    { ours: 6.030214, vendor: null },
+    { ours: null, vendor: 6.352075 },
+    { ours: null, vendor: null },
+    { ours: 6.030214, vendor: undefined },
+  ]) {
+    const found = costSourceDisagreement(pair);
+    assert.equal(found.disagrees, false, 'an unmeasurable comparison is not a disagreement');
+    assert.equal(
+      found.comparable,
+      false,
+      'and it must say it could not compare, so absent never reads as agreement',
+    );
+  }
+
+  // A real comparison says so, which is what makes the flag above mean something.
+  assert.equal(costSourceDisagreement({ ours: 6.030214, vendor: 6.352075 }).comparable, true);
 });
