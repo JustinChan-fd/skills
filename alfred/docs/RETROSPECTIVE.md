@@ -208,6 +208,39 @@ now requires splitting two propositions out of one pass boolean, and why A5's mo
 test is the *falsifier* (all three real arms plus `null` record no gap), not the one that
 catches the typo.
 
+### A fourth, found the same way: the cost figure was 5-6% low for the entire project
+
+Appended 2026-08-03, after Phase D. The result line carries **two** token ledgers — a flat
+`usage` object and a per-model `modelUsage` block — and Alfred summed the smaller one.
+Measured on both real jarvis#7 runs:
+
+| run | ours | vendor `total_cost_usd` | short by |
+|---|---|---|---|
+| `20260803T141200Z-7` | $6.030214 | $6.352074599999998 | 5.34% |
+| `20260802T142320Z-7` | $5.693860 | $6.03788025 | 6.04% |
+
+Three things about this are worth more than the fix.
+
+**The price table was innocent, and had been the suspect twice.** Pricing `modelUsage` at
+the very same rates reproduces the vendor's figure to 1e-9 on both runs. Two earlier
+investigations went after the rates; the defect was one field to the left. A wrong answer
+localises badly when two candidate causes both predict "our number is low."
+
+**Five agreeing records were read as evidence FOR the table.** The two ledgers agree to six
+decimals on short runs, and all five backfilled records are short — so the sink's own data
+looked like confirmation. This is `feedback_mocked_seam_blindness` one layer up from code:
+not a fake at a seam, but a *corpus* that only contains the regime where the bug is
+invisible. Every fixture in a 1147-test suite was small for the same reason every fixture in
+every suite is small.
+
+**A human noticed, not the harness.** Both figures had been on the record since M2 and their
+agreement had been cited repeatedly as proof the table was right — with nothing ever
+comparing them. `cost-source-disagreement` (tolerance relative at 0.1%, because five records
+agree to 6dp but differ by 1.11e-16 in the last bit) now fires on 2 of 7 records and on
+neither of the five that agree. That the comparison did not exist while both operands sat
+side by side in one JSON object is the same computed-and-discarded shape as #63/#69/#72/#73
+— and it means the shape survives review passes that were specifically looking for it.
+
 ## 6. Why rebuild thin
 
 The decision does not rest on the cost numbers, which point in two directions. It rests on
@@ -271,9 +304,20 @@ real system cron invoking `claude -p` headlessly.
 - **Every quality verdict here is n=1 per ticket shape**, and the two shapes disagreed.
 - **Cost has no consistent direction** across the two experiments, and the more dramatic of
   the two figures is contaminated by a since-removed flag.
-- **The gate has never returned `true` on a real run.** Only-ever-failed is not the same as
-  can-pass, and the #73 fix that made `gate_pass` carry information for the first time was
-  validated on the eval path, where the defect was solely reachable.
+- ~~**The gate has never returned `true` on a real run.**~~ **CORRECTED 2026-08-03 by Phase
+  D.** It has now: `20260803T141349Z-...TARS-1351` graded `pass: true` with 6 criteria
+  graded and 0 findings. Struck rather than deleted, because the reason it was worth writing
+  still stands — only-ever-failed was not the same as can-pass, and the #73 fix had been
+  validated only on the eval path. What replaces it is a narrower limit: **the pass came on
+  a run that changed nothing.** The worker rejected the ticket's premise (the required doc
+  sections already existed at `72dfa6df`), verified all six ACs against the file on disk, and
+  committed nothing. So a pass is now demonstrated over a *correct no-op*, and not yet over
+  work that produced a diff.
+- **The push path has never executed on a real run.** Both Phase D runs avoided it from
+  opposite directions: TARS-1351 passed the gate with `commits: []` so there was nothing to
+  push, and jarvis#7 committed locally but was killed at the 25-minute wall cap, so the gate
+  failed and delivery correctly stopped. `never_merge: true` and the draft-PR path are
+  therefore still only test-covered, and no draft PR has been opened anywhere.
 - **No aggregation exists.** Records land; nothing rolls them up. The dashboard refuses to
   run (`build.js`: *"v2/ was retired on 2026-07-28; log/ is now the only sink"*). Per-run
   metrics being correct and per-epic metrics not existing are two different states, and

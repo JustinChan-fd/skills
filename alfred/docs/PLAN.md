@@ -291,6 +291,42 @@ vocabulary — the defect §8 warns about.
    code they were written against. `executeWork`'s `provenance` argument overrides it for
    exactly one caller: Phase C's backfill, reconstructing runs some other code performed.
 
+8. **`cost` gains `vendor_by_model`, and this one a LIVE RUN found** (D, 2026-08-03) —
+   every deviation above came out of a review. The result line carries **two** token
+   ledgers: a flat `usage` object and a per-model `modelUsage` block, and on long runs
+   they disagree. Both real jarvis#7 runs priced 5.34% and 6.04% under the vendor's own
+   `total_cost_usd`, because Alfred summed the smaller one. Missing from `usage` on the
+   killed run: ~18k output, ~160k cache-read, ~2-4k input, ~130-190 cache-creation.
+
+   **The price table was never the defect**, and this is the part worth stating plainly,
+   because the table had been the suspect for two prior investigations. Pricing
+   `modelUsage` at the same $3/$15/$0.30/$3.75 per Mtok reproduces `total_cost_usd` to
+   within 1e-9 on both runs. The rates were right; the field being read was wrong.
+
+   **Why 1147 green tests and five sink records missed it.** The two ledgers agree to six
+   decimals on SHORT runs — all five backfilled records show a ~0% delta — so five
+   agreeing records read as proof the table was correct. The disagreement scales with run
+   length, and every fixture in the suite is small. `feedback_mocked_seam_blindness` one
+   layer up from the code: the tests weren't wrong about what they asserted, they were
+   asserted on the only shape where the bug is invisible.
+
+   **`modelUsage` can name a model `usage` omits entirely.** `20260802T082954Z-TARS-1351`
+   holds a `claude-haiku-4-5` seat at `costUSD 0.0885`, **10.7% of that run's cost**,
+   present in no other field of the transcript. So this is not only a magnitude
+   correction — it is the only place a secondary seat's spend appears at all.
+
+   **Carried raw, deliberately unreconciled.** Alfred does not pick a winner, adjust
+   `total_usd`, or fail the record. Choosing between two sources is analysis and belongs
+   in `alfred-telemetry`, per the standing separation of concerns. What Alfred adds is the
+   comparison as a NAMED hole: `cost-source-disagreement`, the tenth gap code, fired by
+   `costSourceDisagreement` in `gaps.mjs` at a **relative** 0.1% tolerance. Relative and
+   not absolute because five records agree to 6dp but not to the bit — ours `0.825523`
+   against vendor `0.8255230000000001` differ by 1.11e-16, the same IEEE 754 number
+   reached by a different summation order — and an epsilon that caught that would fire on
+   every record and be muted within a week. 0.1% sits four orders above the float noise
+   and two below the defect found. It flags 2 of 7 records: the two long jarvis runs, and
+   neither of the five that genuinely agree.
+
 `tokens.lines` is the record's name for the collector's `lines_parsed`, and
 `tokens.skipped` (non-empty lines minus parsed lines) is derived in `report.mjs`
 rather than added to `tokens.mjs`, being a property of the file and not of the

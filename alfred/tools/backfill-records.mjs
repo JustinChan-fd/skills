@@ -41,6 +41,16 @@
 // FIVE, NOT FOUR. The plan said four. A `record.json` inventory found five, and the fifth
 // (skills#21) is as real as the others. Backfilling four of five would have left a hole
 // nobody would later notice, so the count is corrected here rather than obeyed.
+//
+// SEVEN NOW, and the two added are NOT historical. Phase D's own live runs
+// (20260803T141200Z-7, 20260803T141349Z-...TARS-1351) are appended because 96cb211 landed
+// AFTER they finished, so records written by the live path were already missing
+// `cost.vendor_by_model` within hours of being written. That is the general case, not an
+// accident of tonight: any record predating a reader change is stale in exactly the fields
+// that change added, and re-deriving is the only way to make the sink homogeneous enough to
+// aggregate. `backfilled: true` on those two is therefore doing real work — they were live
+// runs whose COST FIELDS are reconstructions, and an analysis that treats a rebuilt figure as
+// a live one is the failure this flag exists to prevent.
 
 import { readFileSync, existsSync, writeFileSync } from 'node:fs';
 import { join, basename } from 'node:path';
@@ -117,7 +127,47 @@ const RUNS = [
       'tests, 6->12 assertions) and fixed in A3. The gate verdict on this record is therefore ' +
       'known-wrong and must not be counted as a failure. Its single-agent counterpart is a ' +
       'different session with no record.json and is NOT backfilled here. Its cost.total_usd ' +
-      '($5.69) and vendor_usd ($6.04) disagree by ~6%, the only such disagreement among the five.',
+      '($5.69) and vendor_usd ($6.04) disagree by ~6%, the only such disagreement among the five. ' +
+      'AMENDED 2026-08-03 later the same day: that ~6% is no longer unexplained. The result line ' +
+      'carries two token ledgers and Alfred was summing the smaller `usage` field rather than ' +
+      '`modelUsage`; see 96cb211. This record now carries a `cost-source-disagreement` gap and a ' +
+      '`cost.vendor_by_model` block, and it is the ONLY one of the five that does — which is the ' +
+      'evidence the tripwire discriminates rather than just fires.',
+  },
+  // TONIGHT'S TWO LIVE RUNS, appended after the fix so the whole sink carries the same fields.
+  // Rebuilt for the same reason as the five above and no other: their transcripts are immutable,
+  // so cost and tokens re-derive exactly, while gate/delivery/work are carried forward verbatim
+  // (a verdict is a judgment made against a working tree that no longer exists).
+  {
+    dir: '20260803T141200Z-7',
+    cwd: `${process.env.HOME}/Desktop/Repos/jarvis`,
+    repo: 'jarvis',
+    notes:
+      'Live run 2026-08-03, Phase D. KILLED AT THE 25-MINUTE WALL CAP after 1500264ms, so its ' +
+      'gate FAIL must not be read as a judgment on the work: two of the eight findings are ' +
+      '`check_failed` naming the kill itself, and the CLI reported `aborted_streaming` at 102 ' +
+      'turns. The six `ac_unmapped` findings are real but expected of an unfinished run — the ' +
+      'worker never reached the point of writing an ac_map. It committed locally to ' +
+      'alfred/justinchan-fd-jarvis-7-20260803t141200z-7 and pushed nothing, because the gate did ' +
+      'not pass. THE RUN THAT EXPOSED THE COST DEFECT: ours $6.030214 against vendor $6.352075, ' +
+      'a 5.34% gap, and the second of the two records that carry it. Rebuilt after 96cb211 so it ' +
+      'carries `cost.vendor_by_model` and the named gap. Its predecessor 20260802T142320Z-7 is ' +
+      'the same ticket in a worktree; the two are not independent samples.',
+  },
+  {
+    dir: '20260803T141349Z-https-fandango.atlassian.net-browse-TARS-1351',
+    cwd: `${process.env.HOME}/Desktop/Repos/webtarsthree`,
+    repo: 'webtarsthree',
+    notes:
+      'Live run 2026-08-03, Phase D. PASS with 6 graded criteria, 0 findings, $0.825523 against ' +
+      'vendor $0.8255230000000001 — agreement to 6dp, and the fourth TARS-1351 run. `commits: []` ' +
+      'is CORRECT and is the interesting part: the worker rejected the ticket\'s premise, finding ' +
+      'docs/modules/placements.md already carried every required section from 72dfa6df, verified ' +
+      'all six ACs against the existing file, and changed nothing. Ticket-skepticism working as ' +
+      'designed, not a failure to deliver. It is therefore a WEAK delivery test — it exercised ' +
+      'commit-nothing and push-nothing, never the push path. This run is also the reason the ' +
+      'delivery.error/steps fix (3aba45b) exists: a correct no-op and a delivery that blew up ' +
+      'before committing were byte-identical on disk before it.',
   },
 ];
 
