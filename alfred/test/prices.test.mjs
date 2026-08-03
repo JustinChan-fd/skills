@@ -266,6 +266,18 @@ test('ADDED: the introductory discount is recorded even though it is not applied
   assert.ok(note, 'the scheduled change must stay recorded');
   assert.equal(note.introductory.out, 10, 'the unapplied introductory rate is still recorded');
   assert.match(note.policy, /conserv|standard|not applied/i);
+
+  // FOUND BY MUTATION, and worth stating how because the mutant looked like it should have
+  // worked and did not. Flipping `applied` from "standard" to "introductory" left all 1138
+  // tests AND the new metrics baseline green — because `applied` is inert. Nothing reads it;
+  // the table rows carry the standard rate directly (lib/prices.mjs:171). So the field is a
+  // CLAIM ABOUT WHAT THE CODE DOES with nothing checking the claim is true, and the failure
+  // it invites is not wrong arithmetic but a reader trusting a label that drifted. Assert the
+  // label against the rate it names, so the two cannot disagree silently.
+  assert.equal(note.applied, 'standard', 'the label must name the rate actually charged');
+  const table_rate = table.models?.['claude-sonnet-5']?.out;
+  assert.equal(table_rate, 15, 'and the charged rate is the standard one, not the $10 introductory');
+  assert.notEqual(table_rate, note.introductory.out, 'if these ever match, `applied` is lying');
 });
 
 test('ADDED: no model reports a pending rate change, since none is applied', () => {
