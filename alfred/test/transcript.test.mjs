@@ -238,6 +238,64 @@ test('ADDED: the result line carries a SECOND token ledger, and it is returned r
   assert.equal(found.model_usage?.['claude-sonnet-5']?.vendor_usd, 6.352074599999998);
 });
 
+// --- D3: the two cost blocks spell the same model differently -------------------------------
+//
+// MEASURED 2026-08-03 across all ten records in the sink, after the jarvis#11 re-run. On every
+// record where a haiku seat ran (3 of 10), `cost.by_model` is keyed `claude-haiku-4-5-20251001`
+// while `cost.vendor_by_model` is keyed `claude-haiku-4-5`. Sonnet agrees on both sides, so the
+// mismatch is per-model and cannot be seen on a single-model run.
+//
+// PINNED, NOT NORMALISED. Neither spelling is wrong: `by_model` reports each message's own
+// `model` field and this reader reports the key the CLI printed. Alfred picking a winner would
+// be analysis, and destroying the raw spelling is the same overreach as swapping in the larger
+// figure. What this test buys is that a future normalisation has to be a DECISION — it will
+// fail here and the author will have to say why — instead of a quiet edit that makes ten
+// historical records unjoinable to new ones.
+//
+// WHY IT NEEDED A TEST AT ALL. `costSourceDisagreement` compares scalar totals, which reconcile
+// to 1e-9, so the check that exists specifically to catch cost-accounting divergence is blind
+// to this by construction. The consumer that is NOT blind to it is alfred-telemetry: a join on
+// model id drops haiku on exactly the runs where a cheap seat did real work, with no error.
+test('ADDED D3: the vendor ledger keeps the VENDOR spelling, which differs from ours for haiku', () => {
+  // Both real keys, from 20260803T151017Z-11's own result line.
+  const log = JSON.stringify({
+    type: 'result',
+    is_error: false,
+    session_id: 'd3-keys',
+    total_cost_usd: 6.1079012,
+    usage: { input_tokens: 1, output_tokens: 1, cache_read_input_tokens: 1, cache_creation_input_tokens: 1 },
+    modelUsage: {
+      'claude-sonnet-5': {
+        inputTokens: 578080,
+        outputTokens: 99101,
+        cacheReadInputTokens: 7183612,
+        cacheCreationInputTokens: 98443,
+        costUSD: 5.74499985,
+      },
+      // NO date suffix — this is the shape the CLI actually emits.
+      'claude-haiku-4-5': {
+        inputTokens: 11718,
+        outputTokens: 14930,
+        cacheReadInputTokens: 1298596,
+        cacheCreationInputTokens: 117339,
+        costUSD: 0.36290135,
+      },
+    },
+  });
+
+  const found = sessionFromWorkerLog(log);
+
+  // The undated key is present and carries the numbers...
+  assert.equal(found.model_usage?.['claude-haiku-4-5']?.output, 14930);
+  assert.equal(found.model_usage?.['claude-haiku-4-5']?.vendor_usd, 0.36290135);
+  // ...and the DATED key our own collector would use is absent, which is the whole hazard: a
+  // consumer looking haiku up by the id it sees in `cost.by_model` finds nothing here.
+  assert.equal(found.model_usage?.['claude-haiku-4-5-20251001'], undefined);
+  // Sonnet is spelled identically on both sides, so a test asserting only sonnet would pass
+  // while the join was broken. Pinned so the single-model blind spot is on the record.
+  assert.ok(found.model_usage?.['claude-sonnet-5'], 'sonnet agrees on both sides');
+});
+
 test('ADDED: a run whose two ledgers AGREE is not reported as disagreeing', () => {
   // The other half of the proposition, split out per feedback_unfalsifiable_conjunct: a
   // reader that flagged every run would be indistinguishable from one that worked, and five

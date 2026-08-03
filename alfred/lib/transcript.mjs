@@ -135,6 +135,25 @@ export function terminalErrorFromWorkerLog(text) {
 // to $0.00 and reads as a free run — gaps.mjs's founding rule that a zero is plottable and
 // false. Half-reading is refused for the same reason: two usable models out of three is a
 // confident undercount with nothing to notice.
+//
+// THE KEYS ARE THE VENDOR'S SPELLING AND DO NOT MATCH `cost.by_model`'s. Measured 2026-08-03
+// across the whole sink: on all three records where a haiku seat ran, `cost.by_model` says
+// `claude-haiku-4-5-20251001` and `cost.vendor_by_model` says `claude-haiku-4-5`. Sonnet agrees
+// (`claude-sonnet-5` both sides), so the mismatch is per-model and invisible on any run that
+// used one model.
+//
+// NEITHER SIDE IS WRONG, which is why this is documented rather than normalised here. `by_model`
+// comes from our collector reading each message's own `model` field; this function reads the
+// keys the CLI itself printed. Rewriting either to match the other would be Alfred deciding
+// which spelling is canonical — analysis, and the same overreach as swapping in the larger
+// figure above. Both are faithful reports of what their source said.
+//
+// SO IT IS A CONSUMER CONTRACT, and the consumer is alfred-telemetry: **an aggregator joining
+// these two blocks on model id must normalise first**, or it will silently drop haiku on
+// exactly the runs where a cheap seat did real work — 3 of 10 records today, and the join
+// failure produces no error, just a missing row. `costSourceDisagreement` does not catch this
+// because it compares scalar TOTALS, which reconcile perfectly; that is precisely why the
+// mismatch survived five reviews and two live runs unnoticed.
 function modelUsageOf(parsed) {
   const raw = parsed?.modelUsage;
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
