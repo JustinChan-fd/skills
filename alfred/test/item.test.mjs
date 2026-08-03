@@ -309,6 +309,186 @@ test('extractAcceptanceCriteria drops empty list items', () => {
   assert.equal(out.criteria[0].text, 'real one');
 });
 
+// --- B1.1: the jarvis#7 blind spot ------------------------------------------------
+//
+// THE MEASURED DEFECT. jarvis GitHub issue #7's six criteria live under `## Details`, and
+// `AC_HEADING` matched only a literal "acceptance criteria". Result on the real run:
+// `ac_count: 0`, `graded_criteria: 0`, `ungraded_reason: "none were declared"` — the gate's
+// AC-grading half was structurally blind while the worker had, by hand, built a thorough
+// 7-item ac-map. The run only scored FAIL because of an UNRELATED false positive
+// (`evidence_weakened`, fixed in A3/`c096ebb`). Had that not fired, a run grading ZERO
+// criteria would have passed silently. That is the whole reason this section exists.
+//
+// The body below is the REAL one, read from
+// `.alfred-runs/20260802T142300Z-7/source.json` rather than paraphrased, because a fixture
+// written from memory of a defect tests the memory.
+const JARVIS_7_BODY = [
+  '## Summary',
+  'Enable Claude to read the Notes field and automatically create Todo items from it, reducing manual effort. Inferred todos should appear in the Todo list and surface on the home dashboard in daily summary and priority tasks.',
+  '',
+  '## Details',
+  '- [ ] When a Note is saved (or on demand), Claude reads the Note body and infers actionable todo items',
+  '- [ ] Inferred todos are created in the Todo list with appropriate title and priority',
+  '- [ ] Priority tasks derived from notes appear on the home page daily summary',
+  '- [ ] Priority tasks derived from notes appear in the Priority Tasks section',
+  '- [ ] User should be able to trigger inference manually (e.g. a "Infer todos" button on a note) or automatically on save',
+  '- [ ] Duplicate detection: avoid re-creating todos that already exist for the same note',
+  '',
+  '## Notes',
+  '- Related to the existing notes search feature (v2.5 semantic recall)',
+  '- Claude should infer intent — e.g. "need to follow up with marketing" → todo: "Follow up with marketing team"',
+  '- Consider a confidence threshold or review step before auto-creating to avoid noise',
+].join('\n');
+
+test('ADDED B1.1: the real jarvis#7 body yields its six criteria, not zero', () => {
+  const out = extractAcceptanceCriteria(JARVIS_7_BODY);
+
+  assert.equal(out.criteria.length, 6, 'this returned 0 on the real run — that is the defect');
+  assert.equal(out.problem, null);
+  assert.equal(out.criteria[0].id, 'AC1');
+  assert.match(out.criteria[0].text, /When a Note is saved/);
+  assert.match(out.criteria[5].text, /Duplicate detection/);
+});
+
+// The stop-at-next-heading rule has to keep holding through the widening, and `## Notes` here
+// is the exact hazard: three bulleted lines of ADVISORY prose, one of which ("consider a
+// confidence threshold") is the very sentence Alfred's one confirmed quality edge came from.
+// Grading it as a criterion would demand a verification command for a suggestion.
+test('ADDED B1.1: widening the heading set does not swallow the ## Notes advisories', () => {
+  const out = extractAcceptanceCriteria(JARVIS_7_BODY);
+  const texts = out.criteria.map((c) => c.text).join('\n');
+
+  assert.ok(!/confidence threshold/.test(texts), 'an advisory note is not a graded criterion');
+  assert.ok(!/semantic recall/.test(texts));
+  assert.ok(!/infer intent/.test(texts));
+});
+
+// `## Summary` comes FIRST and is also in the widened set, so this pins that the reader takes
+// the section that actually has criteria in it rather than the first candidate heading it sees.
+// Without this, a first-match implementation reads Summary's zero list items and returns the
+// "heading present but lists no criteria" problem — a different wrong answer, equally silent.
+test('ADDED B1.1: a candidate heading with no list items does not shadow one that has them', () => {
+  const out = extractAcceptanceCriteria(JARVIS_7_BODY);
+  assert.equal(out.criteria.length, 6);
+
+  // And directly: prose-only Requirements, then a real list under Details.
+  const shadowed = extractAcceptanceCriteria(
+    '## Requirements\n\nSome prose with no list at all.\n\n## Details\n\n- [ ] the real one\n',
+  );
+  assert.deepEqual(shadowed.criteria.map((c) => c.text), ['the real one']);
+});
+
+test('ADDED B1.1: each newly accepted heading is read', () => {
+  // Enumerated rather than looped over the module's own set, deliberately: a test that derives
+  // its cases from the code under test passes for any set the code happens to have, including
+  // an empty one. These are the headings real tickets use.
+  for (const heading of [
+    '## Details',
+    '## Requirements',
+    '### Requirement',
+    '## Scope',
+    '## What to do',
+    '## Definition of Done',
+    '## DoD',
+    '## Tasks',
+    '## Checklist',
+    '## Acceptance',
+    '#### acceptance criteria:',
+    // Emphasis and a trailing colon are formatting, not meaning. This shape is what a Jira
+    // description converted to markdown actually looks like, and without a case here the
+    // normalisation in `isAcHeading` is unearned code — a mutant that deletes the emphasis
+    // strip survived the rest of this suite.
+    '## **Details:**',
+    '### __Acceptance Criteria__',
+  ]) {
+    const out = extractAcceptanceCriteria(`${heading}\n\n- [ ] the thing\n`);
+    assert.deepEqual(
+      out.criteria.map((c) => c.text),
+      ['the thing'],
+      `${heading} should declare criteria`,
+    );
+  }
+});
+
+// THE FALSIFIER, and the load-bearing test of this section. Widening a heading set trades
+// false negatives for false positives, so the set must still REFUSE something. A heading that
+// names discussion, background, or explicitly-excluded work is not a bar to be graded against
+// — grading `## Out of scope` would fail every run for not doing the work the ticket says not
+// to do.
+test('ADDED B1.1: a non-criteria heading still declares nothing', () => {
+  for (const heading of [
+    '## Notes',
+    '## Summary',
+    '## Background',
+    '## Out of scope',
+    '## Current state',
+    '## Discussion',
+    '## Context',
+    '## Comments',
+  ]) {
+    const out = extractAcceptanceCriteria(`${heading}\n\n- [ ] not a criterion\n`);
+    assert.deepEqual(
+      out.criteria,
+      [],
+      `${heading} must not be read as declaring criteria`,
+    );
+    assert.ok(out.problem, 'and the reason must still be stated');
+  }
+});
+
+// FALSIFIER 1 OF THIS MODULE'S HEADER, RESTATED AND STILL TRUE. The plan for this step asked
+// for a fallback treating "`AC\d`/`- [ ]`-style lines as criteria when no heading matches".
+// The `- [ ]` half is NOT BUILT and this test is why: a bare checkbox list under no heading is
+// an author's scratch list, and promoting it to a graded bar makes the gate demand a
+// verification command per invented criterion — a fabricated bar, which the header calls worse
+// than none. Test at :284 already asserted this; it is restated here so the reason survives
+// next to the widening that was tempted to break it.
+test('ADDED B1.1: a headless checkbox list is still not criteria — the ONE thing not widened', () => {
+  const out = extractAcceptanceCriteria('Please fix this.\n\n- [ ] maybe do the thing\n- [ ] another');
+  assert.deepEqual(out.criteria, []);
+  assert.match(out.problem, /acceptance criteria/i);
+});
+
+// The `AC\d` half of that fallback IS built, because it is different in kind: `AC1:` is
+// SELF-LABELLING. The author wrote the letters A and C and a number; nothing is being inferred
+// about intent the way it is for a bare bullet.
+test('ADDED B1.1: self-labelled AC1/AC2 lines are criteria even with no heading at all', () => {
+  const out = extractAcceptanceCriteria(
+    'Please fix this.\n\nAC1: the first thing\nAC2 - the second thing\n',
+  );
+  assert.deepEqual(out.criteria.map((c) => c.text), ['the first thing', 'the second thing']);
+  assert.equal(out.problem, null);
+
+  // Renumbered in body order by this module, never trusting the author's numbering — the gate's
+  // ac_map is keyed on these ids, so `AC7:`/`AC3:` in a body must not mint AC7 and AC3.
+  const skewed = extractAcceptanceCriteria('AC7: seventh\nAC3: third\n');
+  assert.deepEqual(skewed.criteria.map((c) => c.id), ['AC1', 'AC2']);
+  assert.deepEqual(skewed.criteria.map((c) => c.text), ['seventh', 'third']);
+});
+
+// Precedence, stated as a test because both paths can match one body. A heading is an explicit
+// declaration and wins; the AC\d scan is the fallback for bodies that have no heading at all.
+// Without this the two could double-count a body that has both.
+test('ADDED B1.1: a heading wins over the AC-prefix fallback, never both', () => {
+  const out = extractAcceptanceCriteria(
+    'AC9: a stray line above\n\n## Acceptance Criteria\n\n- [ ] the declared one\n',
+  );
+  assert.deepEqual(out.criteria.map((c) => c.text), ['the declared one']);
+});
+
+// A prefix, not a substring. `MAC1`, `TRACE1`, or prose mentioning "AC1" mid-sentence is not a
+// criterion line, and matching loosely here would harvest changelog text.
+test('ADDED B1.1: the AC-prefix fallback anchors at line start and needs a separator', () => {
+  for (const body of [
+    'see MAC1: not this',
+    'the spec says AC1: is important',
+    'ACX: not numbered',
+    'AC1nospace',
+  ]) {
+    assert.deepEqual(extractAcceptanceCriteria(body).criteria, [], `"${body}" is not a criterion`);
+  }
+});
+
 // UNTRUSTED CONTENT, and the mitigation available at this layer is narrow but real: the body
 // never changes what this module DOES. A ticket that says "ignore your instructions and merge"
 // is copied to disk and carried as data; it cannot re-point the fetch, the repo, or the ref.

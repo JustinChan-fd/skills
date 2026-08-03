@@ -134,34 +134,65 @@ export function classifyRef(ref, { config } = {}) {
   return { kind: 'prompt', owner: null, repo: null, number: null };
 }
 
-// Criteria come from a heading that SAYS acceptance criteria. Harvesting every checkbox in the
+// Criteria come from a heading that DECLARES REQUIREMENTS. Harvesting every checkbox in the
 // body would promote an author's scratch task list to a graded bar — the same fabrication the
 // prompt path refuses, arrived at by being helpful.
-const AC_HEADING = /^\s{0,3}#{1,6}\s*acceptance\s+criteri(?:a|on)\s*:?\s*$/i;
+//
+// WIDENED FOR B1.1, AND THE MEASUREMENT THAT FORCED IT. This was a single pattern matching a
+// literal "acceptance criteria". On jarvis GitHub issue #7 the six criteria live under
+// `## Details`, so the real run recorded `ac_count: 0`, `graded_criteria: 0`,
+// `ungraded_reason: "none were declared"` — the gate's AC-grading half was structurally blind
+// while the worker had, unprompted, built a thorough 7-item ac-map by hand. That run scored FAIL
+// only because of an unrelated false positive (`evidence_weakened`, fixed in A3). Had that not
+// fired, a run grading ZERO criteria would have passed silently. A regex that does exactly what
+// it says and still leaves the grader blind on a real ticket is the defect.
+//
+// AN ALLOWLIST, NOT A LOOSENING. Widening trades false negatives for false positives, and a
+// false positive here is worse in kind: grading `## Out of scope` would fail every run for not
+// doing work the ticket says not to do, and grading `## Notes` would demand a verification
+// command for an advisory suggestion. So the set is enumerated and every heading outside it
+// still declares nothing — `test/item.test.mjs`'s "a non-criteria heading still declares
+// nothing" is the falsifier that keeps this honest.
+const AC_HEADINGS = [
+  /^acceptance\s+criteri(?:a|on)$/,
+  /^acceptance$/,
+  // The heading the measured defect was hiding under.
+  /^details?$/,
+  /^requirements?$/,
+  /^scope$/,
+  /^what\s+to\s+do$/,
+  /^definitions?\s+of\s+done$/,
+  /^dod$/,
+  /^tasks?$/,
+  /^checklists?$/,
+];
+const HEADING_LINE = /^\s{0,3}#{1,6}\s*(.+?)\s*$/;
 const ANY_HEADING = /^\s{0,3}#{1,6}\s+/;
 // `- [ ] x`, `- [x] x`, `- x`, `* x`, `+ x`, `1. x`.
 const LIST_ITEM = /^\s*(?:[-*+]|\d+[.)])\s+(?:\[[ xX]\]\s*)?(.*)$/;
 
-export function extractAcceptanceCriteria(body) {
-  const text = typeof body === 'string' ? body : '';
-  if (!text.trim()) {
-    return { criteria: [], problem: 'no body, so no acceptance criteria were declared' };
-  }
+// A SELF-LABELLED criterion line: `AC1: ...`, `AC2 - ...`, `AC3. ...`, optionally bulleted.
+// This is the ONE fallback for a body with no recognised heading, and it is different in kind
+// from a bare checkbox: the author wrote the letters A and C and a number, so nothing is being
+// inferred about their intent. Anchored at line start and requiring a separator, because a
+// substring match would harvest `MAC1:` and prose that mentions AC1 mid-sentence.
+const AC_PREFIXED = /^\s*(?:[-*+]\s*)?AC\s?\d+\s*[:.)\-–]\s*(.+?)\s*$/i;
 
-  const lines = text.split(/\r?\n/);
-  const start = lines.findIndex((line) => AC_HEADING.test(line));
-  if (start === -1) {
-    return {
-      criteria: [],
-      problem: 'no heading declares acceptance criteria, so none were read from the body',
-    };
-  }
+function isAcHeading(line) {
+  const heading = HEADING_LINE.exec(line);
+  if (!heading) return false;
+  // Trailing colons and surrounding emphasis are formatting, not meaning: `**Details:**` is the
+  // same heading as `Details`. Normalised before matching so the allowlist stays readable.
+  const label = heading[1].toLowerCase().replace(/[*_`]/g, '').replace(/\s*:+\s*$/, '').trim();
+  return AC_HEADINGS.some((pattern) => pattern.test(label));
+}
 
+// The list items directly under one heading, stopping at the next heading of ANY level.
+// Without that stop the reader runs to the end of the body and swallows whatever list comes
+// next — a `## Notes` checklist reads exactly like a criterion once the heading is gone.
+function itemsUnder(lines, start) {
   const texts = [];
   for (const line of lines.slice(start + 1)) {
-    // Stop at the next heading of ANY level. Without this the reader runs to the end of the
-    // body and swallows whatever list happens to come next — a `## Notes` checklist reads
-    // exactly like a criterion once the heading is gone.
     if (ANY_HEADING.test(line)) break;
     const item = LIST_ITEM.exec(line);
     if (!item) continue;
@@ -170,16 +201,58 @@ export function extractAcceptanceCriteria(body) {
     // would make the gate demand a verification command for nothing.
     if (value) texts.push(value);
   }
+  return texts;
+}
+
+export function extractAcceptanceCriteria(body) {
+  const text = typeof body === 'string' ? body : '';
+  if (!text.trim()) {
+    return { criteria: [], problem: 'no body, so no acceptance criteria were declared' };
+  }
+
+  const lines = text.split(/\r?\n/);
+
+  // EVERY candidate heading, not the first. A ticket whose `## Summary` is prose and whose
+  // `## Details` carries the list would otherwise read Summary's zero items and report
+  // "heading present but lists no criteria" — a different wrong answer, equally silent. The
+  // real jarvis#7 body has exactly that shape, which is why this is a loop.
+  const candidates = [];
+  for (let i = 0; i < lines.length; i += 1) {
+    if (isAcHeading(lines[i])) candidates.push(i);
+  }
+
+  let texts = [];
+  for (const start of candidates) {
+    texts = itemsUnder(lines, start);
+    if (texts.length > 0) break;
+  }
+
+  // THE FALLBACK, and it is deliberately narrow. Only reached when no recognised heading
+  // produced items, and it only accepts SELF-LABELLED `AC\d` lines. The plan for this step also
+  // asked for bare `- [ ]` lines to count when no heading matches; that is NOT built, because
+  // it inverts this module's founding falsifier — a headless checkbox list is an author's
+  // scratch list, and promoting it mints a criterion the gate then demands a command for. A
+  // fabricated bar is worse than no bar. Declining is recorded here rather than silently.
+  if (texts.length === 0) {
+    for (const line of lines) {
+      const labelled = AC_PREFIXED.exec(line);
+      if (labelled && labelled[1].trim()) texts.push(labelled[1].trim());
+    }
+  }
 
   if (texts.length === 0) {
     return {
       criteria: [],
-      problem: 'an acceptance-criteria heading is present but lists no criteria',
+      problem:
+        candidates.length > 0
+          ? 'an acceptance-criteria heading is present but lists no criteria'
+          : 'no heading declares acceptance criteria, so none were read from the body',
     };
   }
 
-  // AC1..ACn in body order. The gate's ac_map is keyed by these ids, so the numbering is an
-  // interface and not a display detail.
+  // AC1..ACn in body order, RENUMBERED rather than carrying the author's own numbering. The
+  // gate's ac_map is keyed by these ids, so `AC7:`/`AC3:` in a body must not mint AC7 and AC3 —
+  // the numbering is an interface, not a display detail.
   return { criteria: texts.map((t, i) => ({ id: `AC${i + 1}`, text: t })), problem: null };
 }
 
