@@ -701,6 +701,56 @@ test('ADDED: the failure path carries what was DELIVERED — a pushed branch is 
 // TWO TESTS, NOT ONE, per feedback_unfalsifiable_conjunct: `error` and `steps` are separate
 // propositions and one test spanning both would go green on a fix to either.
 
+// --- D: the vendor's own per-model ledger has to reach the record ---
+//
+// `sessionFromWorkerLog` now returns `model_usage`, the SECOND token ledger off the result line
+// (see test/transcript.test.mjs for the measurement: it is 5.34% and 6.04% larger than the
+// `usage` field we sum, on the two real jarvis#7 runs, and pricing it at our own rates
+// reproduces the vendor figure to 1e-9). A reader that returns it and a record that drops it is
+// this project's #63/#69/#72/#73 shape again — computed, returned, and never persisted — so the
+// carry is asserted separately from the read.
+//
+// STORED RAW AND UNRECONCILED, per the standing separation of concerns: Alfred writes raw
+// metrics and snapshots, alfred-telemetry does the arithmetic. The point of persisting BOTH is
+// that the disagreement itself is the finding; a record that silently kept the bigger number
+// would have made tonight's defect permanently invisible.
+test('ADDED: the vendor per-model ledger is carried into the record, not just read', () => {
+  const record = buildRecord({
+    transcriptPath: null,
+    subagentsDir: null,
+    session: { id: 'sess-ledger' },
+    workerCostUsd: 6.352074599999998,
+    // Real counts from .alfred-runs/20260803T141200Z-7/worker.log.
+    workerModelUsage: {
+      'claude-sonnet-5': {
+        input: 581685,
+        output: 140932,
+        cache_read: 5379232,
+        cache_creation: 234472,
+        vendor_usd: 6.352074599999998,
+      },
+    },
+  });
+
+  // Keyed on the specific count, not on presence: `assert.ok(record.cost.vendor_by_model)`
+  // passes on `{}`, and `{}` is what a shape change hands us.
+  assert.equal(record.cost.vendor_by_model?.['claude-sonnet-5']?.output, 140932);
+  assert.equal(record.cost.vendor_by_model?.['claude-sonnet-5']?.vendor_usd, 6.352074599999998);
+});
+
+test('ADDED: a run with no vendor ledger records null, and null is not an empty ledger', () => {
+  // ABSENT IS NOT ZERO — gaps.mjs's founding rule. Every one of the five backfilled records
+  // predates this field, and `{}` on those would price to $0.00 and read as free runs.
+  const record = buildRecord({
+    transcriptPath: null,
+    subagentsDir: null,
+    session: { id: 'sess-noledger' },
+    workerCostUsd: 1.0671731999999998,
+  });
+  assert.equal(record.cost.vendor_by_model, null, 'no second ledger is null, never {}');
+  assert.equal(record.cost.vendor_usd, 1.0671731999999998, 'and the first vendor source still lands');
+});
+
 test('ADDED: the record says WHY nothing was delivered, not just that nothing was', () => {
   const noop = buildRecord({
     transcriptPath: null,
@@ -976,6 +1026,61 @@ test('ADDED: a known id survives even when the worker log is unparseable', () =>
 
   assert.equal(record.ok, true, `record failed: ${record.error}`);
   assert.equal(record.session.id, knownId);
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test('ADDED: recordForRun carries the vendor ledger from the LOG, not just from a caller', () => {
+  // THE SEAM THE TWO buildRecord TESTS ABOVE CANNOT SEE. They hand `workerModelUsage` in as an
+  // argument, so they prove the record keeps a ledger it is given and say nothing about whether
+  // anything gives it one. `recordForRun` is the only caller on the live path, and it built its
+  // `buildRecord` call by hand — passing `workerCostUsd` and, until this test, not the ledger.
+  // That is `feedback_mocked_seam_blindness` exactly: a test injecting a value at a seam cannot
+  // see that the seam is empty in production. Every real record would still have landed with
+  // `vendor_by_model: null` and the whole fix would have been inert, which is the same
+  // computed-and-discarded shape (#63/#69/#72/#73) this fix exists to close.
+  const dir = tmp();
+  const knownId = 'ledger-1111-2222-3333-444444444444';
+  const projectDir = join(dir, '.claude', 'projects', realpathSync(dir).replace(/[^A-Za-z0-9]/g, '-'));
+  mkdirSync(projectDir, { recursive: true });
+  writeFileSync(
+    join(projectDir, `${knownId}.jsonl`),
+    JSON.stringify({
+      type: 'assistant',
+      timestamp: '2026-08-01T00:00:00.000Z',
+      message: { model: 'claude-sonnet-5', id: 'm1', usage: { input_tokens: 10, output_tokens: 5 } },
+    }) + '\n',
+  );
+
+  const record = recordForRun({
+    // A result line shaped like the real one, with the two ledgers DISAGREEING as they do on
+    // the jarvis runs: `usage.output_tokens` 123104 against `modelUsage.outputTokens` 140932.
+    workerLog: JSON.stringify({
+      type: 'result',
+      session_id: knownId,
+      total_cost_usd: 6.352074599999998,
+      usage: { input_tokens: 579611, output_tokens: 123104, cache_read_input_tokens: 5220852, cache_creation_input_tokens: 234284 },
+      modelUsage: {
+        'claude-sonnet-5': {
+          inputTokens: 581685,
+          outputTokens: 140932,
+          cacheReadInputTokens: 5379232,
+          cacheCreationInputTokens: 234472,
+          costUSD: 6.352074599999998,
+        },
+      },
+    }),
+    cwd: dir,
+    home: dir,
+    session: { id: knownId },
+  });
+
+  assert.equal(record.ok, true, `record failed: ${record.error}`);
+  assert.equal(
+    record.cost.vendor_by_model?.['claude-sonnet-5']?.output,
+    140932,
+    'the ledger must reach the record from the log with no caller supplying it',
+  );
+  assert.equal(record.cost.vendor_usd, 6.352074599999998, 'and the vendor total still lands beside it');
   rmSync(dir, { recursive: true, force: true });
 });
 

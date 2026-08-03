@@ -179,7 +179,7 @@ function readSubagents(subagentsDir) {
 // touches no transcript; delivery already happened against a remote. Neither is made
 // untrue by an unreadable file, and defaulting them empty asserts something false
 // rather than declining to answer.
-function failed({ session, work, sink, error, suite, gate = null, delivery = null, workerCostUsd = null, provenance = null, preflight = null }) {
+function failed({ session, work, sink, error, suite, gate = null, delivery = null, workerCostUsd = null, workerModelUsage = null, provenance = null, preflight = null }) {
   return {
     ok: false,
     error,
@@ -201,6 +201,9 @@ function failed({ session, work, sink, error, suite, gate = null, delivery = nul
       // the measurement. It does NOT fill `total_usd`: that field means "computed from the price
       // table", and quietly substituting a second source is how a table stops being checked.
       vendor_usd: workerCostUsd,
+      // The vendor's per-model ledger, raw. Null when absent, never {} — an empty ledger prices
+      // to $0.00 and reads as a free run. See `workerModelUsage`.
+      vendor_by_model: workerModelUsage,
       price_table_version: null,
       unpriced: [],
       complete: false,
@@ -348,6 +351,21 @@ export function buildRecord({
   // the only evidence the copied price table is right, and a merge destroys the comparison.
   // Measured on the real run of 2026-07-31: vendor 1.0671731999999998, ours 1.067173.
   workerCostUsd = null,
+  // THE VENDOR'S OWN PER-MODEL TOKEN LEDGER, off the same result line as `workerCostUsd` —
+  // `sessionFromWorkerLog().model_usage`, or null when the log has none.
+  //
+  // WHY IT IS A SECOND FIELD AND NOT A CORRECTION. Measured 2026-08-03 on both real jarvis#7
+  // runs: the top-level `usage` object this module prices is SHORT of the result line's
+  // `modelUsage` block by ~18k output and ~160k cache-read tokens — 5.34% and 6.04% of a $6
+  // run. Pricing `modelUsage` at our own rates reproduces `total_cost_usd` to within 1e-9 on
+  // both, so neither the table nor the collector was wrong; the field being summed simply is
+  // not the field the vendor bills. Short runs agree to 6dp, which is why five records read as
+  // proof the table was right.
+  //
+  // CARRIED, NEVER MERGED — the same rule `workerCostUsd` already follows one line up, and for
+  // a stronger reason: reconciling here would pick a winner (analysis, which belongs in
+  // alfred-telemetry) and would erase the only evidence the two ledgers ever disagreed.
+  workerModelUsage = null,
   // WHICH ARM PRODUCED THIS RUN — `{arm, backfilled, notes}`, stated by the caller. See
   // `provenanceBlock`. Defaults to an all-null block rather than being required, because the hook
   // path reports sessions nobody assigned an arm to and refusing those would trade a labelled
@@ -363,7 +381,7 @@ export function buildRecord({
   error: presetError = null,
 } = {}) {
   if (presetError) {
-    return failed({ session, work, sink, suite, gate, delivery, workerCostUsd, provenance, preflight, error: presetError });
+    return failed({ session, work, sink, suite, gate, delivery, workerCostUsd, workerModelUsage, provenance, preflight, error: presetError });
   }
 
   let text;
@@ -380,6 +398,7 @@ export function buildRecord({
       gate,
       delivery,
       workerCostUsd,
+      workerModelUsage,
       provenance,
       preflight,
       error: `could not read transcript ${transcriptPath}: ${err?.code ?? err?.message ?? 'unknown'}`,
@@ -396,6 +415,7 @@ export function buildRecord({
       gate,
       delivery,
       workerCostUsd,
+      workerModelUsage,
       // `provenance` WAS MISSING HERE, and only here. The other two failure exits forwarded it from
       // the day A5 added the field; this third one — a transcript that read but held no parseable
       // line — silently dropped the arm label. Nothing caught it because A5's failure-path test
@@ -504,6 +524,9 @@ export function buildRecord({
       parent_usd: refusal.refused ? null : parentPriced.total_usd,
       // The vendor's own figure, beside ours and never instead of it. See `workerCostUsd`.
       vendor_usd: workerCostUsd,
+      // The vendor's per-model ledger, raw. Null when absent, never {} — an empty ledger prices
+      // to $0.00 and reads as a free run. See `workerModelUsage`.
+      vendor_by_model: workerModelUsage,
       price_table_version: priced.price_table_version,
       unpriced: priced.unpriced,
       complete: refusal.refused ? false : priced.complete,
@@ -629,6 +652,10 @@ export function recordForRun({
       transcriptPath: null,
       session: { ...session, cwd },
       workerCostUsd: found.total_cost_usd,
+      // The vendor's per-model ledger, from the SAME result line as the total above. Passed here
+      // and not only accepted by `buildRecord`: a record that keeps a ledger nobody hands it is
+      // inert, which is the computed-and-discarded shape this field exists to close.
+      workerModelUsage: found.model_usage,
       error: 'the worker log carried no session id, so no transcript could be named',
     });
   }
@@ -656,6 +683,10 @@ export function recordForRun({
     ),
     session: { ...session, id: sessionId, cwd },
     workerCostUsd: found.total_cost_usd,
+    // The vendor's per-model ledger, from the SAME result line as the total above. Passed here
+    // and not only accepted by `buildRecord`: a record that keeps a ledger nobody hands it is
+    // inert, which is the computed-and-discarded shape this field exists to close.
+    workerModelUsage: found.model_usage,
   });
 
   // Merged rather than overwritten: `buildRecord` already ran its own gap checks (an absent

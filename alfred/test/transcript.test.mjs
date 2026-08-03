@@ -167,6 +167,193 @@ test('ADDED: a stream-json log truncated mid-write still yields nulls, never an 
   assert.equal(found.total_cost_usd, null);
 });
 
+// --- D: the result line carries TWO token ledgers, and they do not agree ---
+//
+// FOUND BY A LIVE RUN, not by a test, and only because a SECOND source was already being
+// recorded beside ours. Measured 2026-08-03 on both real jarvis#7 runs:
+//
+//   run                      ours (from `usage`)   vendor (`total_cost_usd`)   short by
+//   20260803T141200Z-7           $6.030214              $6.352075             5.34%
+//   20260802T142320Z-7           $5.693860              $6.037880             6.04%
+//
+// The price table is NOT the defect: pricing the result line's `modelUsage` block at our own
+// rates reproduces the vendor figure to within 1e-9 on both runs. Nor is the collector wrong
+// about `usage` — its four totals match that field exactly. The defect is that the top-level
+// `usage` object is ITSELF SHORT of `modelUsage` on the same line, by ~18k output and ~160k
+// cache-read tokens on each run, and `modelUsage` was read nowhere in lib/.
+//
+// WHY THIS ESCAPED 1147 TESTS AND FIVE BACKFILLED RECORDS. The five short runs
+// (webtarsthree, skills) show a delta of exactly zero — the two ledgers agree to 6dp when a
+// run is small, which is why "ours == vendor" was true five times and read as proof. The
+// disagreement scales with run length, so the only runs that expose it are the expensive
+// ones, and every fixture in this suite is small. `feedback_mocked_seam_blindness`: a
+// fixture built from one ledger cannot see that a second ledger exists.
+//
+// WHAT IS FIXED HERE, AND WHAT DELIBERATELY IS NOT. This reader now returns `modelUsage` as
+// a RAW second ledger, verbatim, and does not reconcile it. Choosing a winner is analysis,
+// and per the standing separation of concerns Alfred records raw metrics while
+// alfred-telemetry does the arithmetic. The disagreement is named as a gap so it aggregates
+// (`feedback_denominator_asymmetry`: a two-source check needs both sources present to say
+// anything, and silently keeping one turns agreement into assertion).
+test('ADDED: the result line carries a SECOND token ledger, and it is returned raw', () => {
+  // Verbatim shape from .alfred-runs/20260803T141200Z-7/worker.log, trimmed to the fields
+  // under test. Note `usage.output_tokens` 123104 vs `modelUsage.outputTokens` 140932 — the
+  // 17,828-token difference that is 5.34% of a $6 run.
+  const log = JSON.stringify({
+    type: 'result',
+    is_error: true,
+    session_id: 'b4d2c568-65aa-43bc-84af-11b03607a5ec',
+    total_cost_usd: 6.352074599999998,
+    usage: {
+      input_tokens: 579611,
+      output_tokens: 123104,
+      cache_read_input_tokens: 5220852,
+      cache_creation_input_tokens: 234284,
+    },
+    modelUsage: {
+      'claude-sonnet-5': {
+        inputTokens: 581685,
+        outputTokens: 140932,
+        cacheReadInputTokens: 5379232,
+        cacheCreationInputTokens: 234472,
+        costUSD: 6.352074599999998,
+      },
+    },
+  });
+  const found = sessionFromWorkerLog(log);
+
+  // Keyed on the SPECIFIC number, not on truthiness. `assert.ok(found.model_usage)` would
+  // pass on `{}` — and `{}` is exactly what a shape change would hand us.
+  assert.equal(
+    found.model_usage?.['claude-sonnet-5']?.output,
+    140932,
+    'the second ledger must be carried, in the collector\'s own direction names',
+  );
+  assert.equal(found.model_usage?.['claude-sonnet-5']?.cache_read, 5379232);
+  assert.equal(found.model_usage?.['claude-sonnet-5']?.input, 581685);
+  assert.equal(found.model_usage?.['claude-sonnet-5']?.cache_creation, 234472);
+
+  // And the vendor's per-model cost, which is what makes this ledger checkable rather than
+  // merely present: pricing these four counts at our rates must reproduce it.
+  assert.equal(found.model_usage?.['claude-sonnet-5']?.vendor_usd, 6.352074599999998);
+});
+
+test('ADDED: a run whose two ledgers AGREE is not reported as disagreeing', () => {
+  // The other half of the proposition, split out per feedback_unfalsifiable_conjunct: a
+  // reader that flagged every run would be indistinguishable from one that worked, and five
+  // of the seven records in the sink genuinely do agree. Real shape from
+  // 20260803T141349Z (webtarsthree TARS-1351, ours == vendor to 6dp), where `usage` and
+  // `modelUsage` carry identical counts for sonnet.
+  const log = JSON.stringify({
+    type: 'result',
+    is_error: false,
+    session_id: 'a9baa807-c96a-4bef-9113-e13be8a6c0ed',
+    total_cost_usd: 0.8255230000000001,
+    usage: {
+      input_tokens: 64531,
+      output_tokens: 9536,
+      cache_read_input_tokens: 868308,
+      cache_creation_input_tokens: 37306,
+    },
+    modelUsage: {
+      'claude-sonnet-5': {
+        inputTokens: 64531,
+        outputTokens: 9536,
+        cacheReadInputTokens: 868308,
+        cacheCreationInputTokens: 37306,
+        costUSD: 0.7370228999999999,
+      },
+      // The haiku seat, which the top-level `usage` omits ENTIRELY — a second reason the
+      // flat field cannot be the only ledger read. It is 10.7% of this run's cost.
+      'claude-haiku-4-5': {
+        inputTokens: 38,
+        outputTokens: 1964,
+        cacheReadInputTokens: 194446,
+        cacheCreationInputTokens: 47358,
+        costUSD: 0.08850009999999998,
+      },
+    },
+  });
+  const found = sessionFromWorkerLog(log);
+  assert.equal(found.model_usage?.['claude-sonnet-5']?.output, 9536);
+  assert.equal(
+    found.model_usage?.['claude-haiku-4-5']?.output,
+    1964,
+    'a model present only in modelUsage must still be carried — it is real spend',
+  );
+  assert.equal(Object.keys(found.model_usage).length, 2);
+});
+
+test('ADDED: a log with no modelUsage reports null, and null is not an empty ledger', () => {
+  // ABSENT IS NOT ZERO, this project's oldest rule (gaps.mjs: "a zero is plottable and
+  // false"). An `{}` here would price to $0.00 and read as a free run; a null says the
+  // second source was not there to check against, which is a fact a caller can act on.
+  const log = JSON.stringify({
+    type: 'result',
+    session_id: 'af60fd37-1d43-40a6-b3e1-48482eab3344',
+    total_cost_usd: 1.0671731999999998,
+  });
+  const found = sessionFromWorkerLog(log);
+  assert.equal(found.model_usage, null, 'no second ledger is null, never {}');
+  assert.equal(found.total_cost_usd, 1.0671731999999998, 'and the first source still reports');
+});
+
+test('ADDED: a malformed modelUsage is null rather than a partial ledger', () => {
+  // Never throws, per this module's standing rule — and never half-reads.
+  for (const bad of [null, 'sonnet', 42, [], { 'claude-sonnet-5': null }, { 'claude-sonnet-5': 'x' }]) {
+    const found = sessionFromWorkerLog(
+      JSON.stringify({ type: 'result', session_id: 'abc-1', total_cost_usd: 1, modelUsage: bad }),
+    );
+    assert.equal(found.model_usage, null, `guessed on modelUsage=${JSON.stringify(bad)}`);
+  }
+});
+
+test('ADDED: an EMPTY modelUsage object is null too, because {} prices as a free run', () => {
+  // WRITTEN BECAUSE A MUTANT SURVIVED. Replacing the reader's final
+  // `Object.keys(out).length > 0 ? out : null` with a bare `return out` left every test above
+  // green: an absent `modelUsage` is caught by the earlier type guard, and each malformed case
+  // in the test above happens to collapse to `{}` and then reads back as null anyway. So the
+  // empty-object branch had no falsifier at all — the exact shape of
+  // [[feedback_unfalsifiable_conjunct]], a guard that looked covered because a DIFFERENT guard
+  // was doing the work.
+  const found = sessionFromWorkerLog(
+    JSON.stringify({ type: 'result', session_id: 'abc-2', total_cost_usd: 1, modelUsage: {} }),
+  );
+  assert.equal(found.model_usage, null, '{} is not a ledger — it prices to $0.00 and reads as free');
+});
+
+test('ADDED: ONE bad entry beside a good one refuses the whole ledger, never half of it', () => {
+  // THE SECOND SURVIVING MUTANT, and the more dangerous of the two. Turning the per-entry
+  // `return null` into a `continue` also left every test green, because the cases above have no
+  // good entry to keep — so "refuse" and "skip" were indistinguishable. They are not: with a
+  // usable model beside a broken one, `continue` yields a ledger that looks complete and is
+  // short by whatever the skipped model spent. On the real webtarsthree run the haiku seat was
+  // 10.7% of the cost, and dropping it silently is precisely the undercount this whole fix was
+  // opened to close — reappearing one layer down.
+  const found = sessionFromWorkerLog(
+    JSON.stringify({
+      type: 'result',
+      session_id: 'abc-3',
+      total_cost_usd: 1,
+      modelUsage: {
+        'claude-sonnet-5': {
+          inputTokens: 64531,
+          outputTokens: 9536,
+          cacheReadInputTokens: 868308,
+          cacheCreationInputTokens: 37306,
+          costUSD: 0.7370228999999999,
+        },
+        'claude-haiku-4-5': 'not an object',
+      },
+    }),
+  );
+  assert.equal(
+    found.model_usage,
+    null,
+    'a ledger missing one real model is worse than no ledger: it looks complete and undercounts',
+  );
+});
+
 // --- B2: reading the worker's FIRST TURN out of a log that is still being written ---
 //
 // The preflight (lib/preflight.mjs) checks an attestation the worker writes before it starts

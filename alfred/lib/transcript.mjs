@@ -116,8 +116,49 @@ export function terminalErrorFromWorkerLog(text) {
 // the only evidence the table is right. Measured on the real run — vendor 1.0671731999999998,
 // ours 1.067173. A cross-check, never the source: `lib/models.mjs` is ground truth for model
 // ids and `lib/prices.mjs` for rates, per the OTel finding that CLI-reported ceilings are not.
+// The result line's SECOND token ledger, in the collector's own direction names.
+//
+// WHY A SECOND LEDGER IS READ AT ALL. Measured 2026-08-03 on both real jarvis#7 runs: the
+// top-level `usage` object on the result line is SHORT of the `modelUsage` block on that same
+// line, by ~18k output and ~160k cache-read tokens, which is 5.34% and 6.04% of a $6 run.
+// Pricing `modelUsage` at our own rates reproduces `total_cost_usd` to within 1e-9 on both, so
+// the price table was never the defect and neither was the collector — the field we were
+// summing simply is not the field the vendor bills. On short runs the two agree to 6dp, which
+// is why five records in the sink read as proof that the table was right.
+//
+// RAW, AND DELIBERATELY NOT RECONCILED. This returns both ledgers and picks no winner.
+// Choosing one is analysis, and the standing separation of concerns is that Alfred writes raw
+// metrics and snapshots while alfred-telemetry does the arithmetic. A reader that silently
+// swapped in the larger figure would also destroy the only evidence that they ever disagreed.
+//
+// `{}` IS NOT A LEDGER. An empty or malformed block returns null, because an empty one prices
+// to $0.00 and reads as a free run — gaps.mjs's founding rule that a zero is plottable and
+// false. Half-reading is refused for the same reason: two usable models out of three is a
+// confident undercount with nothing to notice.
+function modelUsageOf(parsed) {
+  const raw = parsed?.modelUsage;
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+
+  const out = {};
+  for (const [model, entry] of Object.entries(raw)) {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) return null;
+    const n = (v) => (Number.isFinite(Number(v)) ? Number(v) : 0);
+    out[model] = {
+      input: n(entry.inputTokens),
+      output: n(entry.outputTokens),
+      cache_read: n(entry.cacheReadInputTokens),
+      cache_creation: n(entry.cacheCreationInputTokens),
+      // The vendor's own per-model cost. This is what makes the ledger CHECKABLE rather than
+      // merely present: our four counts priced at our rates must reproduce it, and on the two
+      // jarvis runs they do exactly.
+      vendor_usd: Number.isFinite(Number(entry.costUSD)) ? Number(entry.costUSD) : null,
+    };
+  }
+  return Object.keys(out).length > 0 ? out : null;
+}
+
 export function sessionFromWorkerLog(text) {
-  const none = { session_id: null, total_cost_usd: null };
+  const none = { session_id: null, total_cost_usd: null, model_usage: null };
   if (typeof text !== 'string' || text.trim() === '') return none;
 
   // The LAST line that parses, not the whole file — same reader as terminalErrorFromWorkerLog
@@ -152,6 +193,7 @@ export function sessionFromWorkerLog(text) {
   return {
     session_id: id,
     total_cost_usd: typeof cost === 'number' && Number.isFinite(cost) ? cost : null,
+    model_usage: modelUsageOf(parsed),
   };
 }
 
