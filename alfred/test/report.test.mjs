@@ -684,6 +684,80 @@ test('ADDED: the failure path carries what was DELIVERED — a pushed branch is 
   assert.equal(record.delivery.pr_url, 'https://example.invalid/pr/1');
 });
 
+// --- FOUND BY A LIVE RUN, 2026-08-03. `delivery.error` was computed and discarded. ---
+//
+// TARS-1351 passed its gate with `commits: []`, `pushed_to: null`, `pr_url: null` — and that
+// was CORRECT: the worker found the ticket's premise false, changed nothing, so there was
+// nothing to commit. But the record cannot say that. `deliver()` returns `steps[]` and `error`,
+// `reportDelivery` prints them to the console, and `deliveryBlock` keeps three fields and drops
+// both. So on disk a clean no-op and a delivery that BLEW UP before committing are byte-identical:
+// `{commits: [], pushed_to: null, pr_url: null}` either way.
+//
+// This is the project's recurring #63/#69/#72/#73 shape — a value computed, returned, displayed,
+// and never persisted — landing on the one block whose job is to say what reached a remote. And
+// report.mjs's own header already argued the principle at this exact field: "PRESENT IS NOT THE
+// SAME AS CARRIED."
+//
+// TWO TESTS, NOT ONE, per feedback_unfalsifiable_conjunct: `error` and `steps` are separate
+// propositions and one test spanning both would go green on a fix to either.
+
+test('ADDED: the record says WHY nothing was delivered, not just that nothing was', () => {
+  const noop = buildRecord({
+    transcriptPath: null,
+    subagentsDir: null,
+    session: { id: 'sess-noop' },
+    // What `deliver()` really returns on the nothing-to-commit path: no error, because
+    // nothing went wrong.
+    delivery: { committed: false, commits: [], pushed_to: null, pr_url: null, error: null, steps: [{ step: 'nothing_to_commit' }] },
+  });
+
+  const broke = buildRecord({
+    transcriptPath: null,
+    subagentsDir: null,
+    session: { id: 'sess-broke' },
+    delivery: { committed: false, commits: [], pushed_to: null, pr_url: null, error: 'observe: git status failed', steps: [{ step: 'preconditions' }] },
+  });
+
+  // THE DISTINGUISHING ASSERTION. Before this fix both records serialized identically, so a
+  // reader of the sink could not tell a correct no-op from a broken delivery — and the
+  // second is an incident.
+  assert.equal(noop.delivery.error, null, 'a clean no-op records no error');
+  assert.equal(broke.delivery.error, 'observe: git status failed', 'a failed delivery records why');
+  assert.notDeepEqual(
+    noop.delivery,
+    broke.delivery,
+    'a correct no-op and a broken delivery must not be byte-identical on disk',
+  );
+});
+
+test('ADDED: the record carries delivery STEPS, so a no-op names which no-op it was', () => {
+  // `steps` is how `deliver()` reports the path it took — `nothing_to_commit` versus
+  // `resolve_base` versus `push`. Asserted on the SPECIFIC step name rather than on
+  // `steps.length > 0`, per feedback_mutate_to_prove_a_falsifier: a length check passes on
+  // any array and would not notice the steps arriving from some other run.
+  const record = buildRecord({
+    transcriptPath: null,
+    subagentsDir: null,
+    session: { id: 'sess-steps' },
+    delivery: {
+      committed: true,
+      commits: ['deadbee'],
+      pushed_to: 'alfred/TARS-1351-abc',
+      pr_url: 'https://example.invalid/pr/9',
+      error: null,
+      steps: [{ step: 'resolve_base', detail: 'master' }, { step: 'commit' }, { step: 'push' }],
+    },
+  });
+  assert.deepEqual(
+    record.delivery.steps.map((s) => s.step),
+    ['resolve_base', 'commit', 'push'],
+    'the steps are carried in order, by name',
+  );
+  // And the detail with them: `resolve_base`'s detail IS the base branch, which is the field
+  // a PR-opened-against-the-wrong-base incident would be diagnosed from.
+  assert.equal(record.delivery.steps[0].detail, 'master');
+});
+
 test('ADDED #13: the record carries the DISCLOSURE that nothing was graded', () => {
   // A FIELD THE VERDICT CARRIES AND THE RECORD DROPS — #10's shape, at a new field. The gate
   // now reports `graded_criteria` and `ungraded_reason` so a green run graded against zero

@@ -228,6 +228,18 @@ function failed({ session, work, sink, error, suite, gate = null, delivery = nul
       commits: delivery?.commits ?? [],
       pushed_to: delivery?.pushed_to ?? null,
       pr_url: delivery?.pr_url ?? null,
+      // WHY NOTHING WAS DELIVERED, added 2026-08-03 after a live run made the omission visible.
+      // TARS-1351 passed with `commits: []` and that was CORRECT — the worker found the ticket's
+      // premise false and changed nothing. But with only the three fields above, that record was
+      // byte-identical to one from a delivery that blew up before committing. `deliver()` computes
+      // both of these, `reportDelivery` prints them, and this block used to drop them: the
+      // computed-and-discarded shape (#63/#69/#72/#73) landing on the one block whose job is to
+      // say what reached a remote. This function's own header already argued the principle at
+      // this exact field — "PRESENT IS NOT THE SAME AS CARRIED."
+      error: delivery?.error ?? null,
+      // The path taken, by name (`nothing_to_commit` / `resolve_base` / `push`). `?? []` rather
+      // than `?? null` so a consumer can always `.map` it, matching `commits` above.
+      steps: delivery?.steps ?? [],
     },
     // Carried on the failure path too. A run whose transcript could not be read was
     // still scored against a suite, and a `suite` key that exists on one path and not
@@ -521,6 +533,18 @@ export function buildRecord({
       commits: delivery?.commits ?? [],
       pushed_to: delivery?.pushed_to ?? null,
       pr_url: delivery?.pr_url ?? null,
+      // WHY NOTHING WAS DELIVERED, added 2026-08-03 after a live run made the omission visible.
+      // TARS-1351 passed with `commits: []` and that was CORRECT — the worker found the ticket's
+      // premise false and changed nothing. But with only the three fields above, that record was
+      // byte-identical to one from a delivery that blew up before committing. `deliver()` computes
+      // both of these, `reportDelivery` prints them, and this block used to drop them: the
+      // computed-and-discarded shape (#63/#69/#72/#73) landing on the one block whose job is to
+      // say what reached a remote. This function's own header already argued the principle at
+      // this exact field — "PRESENT IS NOT THE SAME AS CARRIED."
+      error: delivery?.error ?? null,
+      // The path taken, by name (`nothing_to_commit` / `resolve_base` / `push`). `?? []` rather
+      // than `?? null` so a consumer can always `.map` it, matching `commits` above.
+      steps: delivery?.steps ?? [],
     },
     // Carried VERBATIM, including when it is the thing that is wrong. Dropping or
     // repairing a bad stamp would destroy the only evidence of what the run claimed,
