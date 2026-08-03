@@ -203,7 +203,38 @@ const RUNS = [
       'a quote holding " — refusing a correct quotation as a paraphrase. Verified byte-for-byte ' +
       'against source.json before the fix was written. Fixed in 9ad6476 (norm() now unescapes on ' +
       'both sides, with paraphrase and case falsifiers asserted so it does not widen). The ' +
-      'ticket was re-run after the fix; see the later run_id for the real verdict.',
+      'ticket was re-run after the fix; that is 20260803T151017Z-11, immediately below.',
+  },
+  // THE RE-RUN, and the first live run that reached delivery. Listed for the same reason as the
+  // two above — not to fix its cost, which the live path already got right, but because a reader
+  // arriving at a FAIL needs to know what kind of failure it was.
+  {
+    dir: '20260803T151017Z-11',
+    cwd: `${process.env.HOME}/Desktop/Repos/jarvis`,
+    repo: 'jarvis',
+    notes:
+      'Live run 2026-08-03, Phase D, jarvis#11 re-run after the 9ad6476 preflight fix. ' +
+      'PREFLIGHT PASSED — the first confirmation that fix works in the run path rather than only ' +
+      'under test. Completed cleanly: exit 0 in 1438890ms, $6.107901 against vendor $6.1079012, ' +
+      'and cost.vendor_by_model written by the LIVE path. 183 turns before the first edit, which ' +
+      'is slow but was investigation, not thrash. DELIVERY COMMITTED FOR THE FIRST TIME ON A REAL ' +
+      'RUN: 56162bc on alfred/justinchan-fd-jarvis-11-20260803t151017z-11, 5 files, +131. Gate ' +
+      'FAIL on ONE finding (the CLI also printed 2 `unverified` entries in the same block, which ' +
+      'reads as three findings; the record has findings.length === 1 and the commit message says ' +
+      'so). THE FINDING IS CORRECT, and the worker\'s own brain entry is the proof: ' +
+      'mapping_implausible on AC6 ("a clear data contract defines the relationship between Notes ' +
+      'and Todos") mapped to a vitest -t filter over a prompt assertion, and the doc it wrote ' +
+      'says AC6 "is satisfied at the prompt-contract level, not the schema level" and files the ' +
+      'structural link under Deferred. Separate the two judgments: the WORK was good — it ' +
+      'rejected the ticket\'s stated root cause (summarize.ts already filtered completed tasks), ' +
+      'found two real gaps instead, and wrote the test first, stating "New test fails as expected ' +
+      '(red)". The gate failed it anyway and rightly, because a correct fix mapped to evidence ' +
+      'that cannot settle it is exactly what mapping_implausible is for. Also the run that exposed ' +
+      'the delivery.steps/error loss: steps was [] here despite a commit that demonstrably ' +
+      'exists, because run.mjs hand-built a three-key object over 3aba45b\'s report-layer fix. ' +
+      'That loss is NOT repaired by this tool — steps was never persisted anywhere, and ' +
+      'reconstructing it from the console prose would be inventing structured data from a ' +
+      'sentence, which is the fabrication the guard below exists to refuse.',
   },
 ];
 

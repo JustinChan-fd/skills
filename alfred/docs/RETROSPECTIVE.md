@@ -335,17 +335,43 @@ real system cron invoking `claude -p` headlessly.
     `\"` to `"` and the comparison rejected a faithful quotation as a paraphrase. Fixed in
     `9ad6476`. A refusal path is the one place a false positive is invisible, because it
     looks exactly like the guard working.
-  - **jarvis#11, re-run**, preflight **passed live** — the first confirmation that
-    `9ad6476` works in the run path rather than only under test.
+  - **jarvis#11, re-run** — preflight **passed live** (first confirmation that `9ad6476`
+    works in the run path, not only under test), the run **completed cleanly** at exit 0 in
+    1438890ms for **$6.107901**, and **delivery committed for the first time on a real run**:
+    `56162bc` on `alfred/justinchan-fd-jarvis-11-20260803t151017z-11`, 5 files, +131. The
+    gate then **failed on one finding** and delivery correctly stopped before the push.
 
-  A hazard found while checking whether delivery was even armed, and it is why a passing
-  run may still not push: jarvis's `.husky/pre-push` blocks any push touching `src/`,
-  `server/`, or `scripts/` without a `docs/brain/` entry, generating one by spawning
-  `claude -p` before exiting 1. Delivery passes `--no-verify` to `commit` but deliberately
-  not to `push` (see `lib/delivery.mjs`), so that hook will fail the push substep — and
-  correctly, since it is the repo owner's guard on state other people see and `.husky` is
-  in that repo's `off_limits`. It also spends tokens no record can attribute, which is
-  worth knowing before reading a cost figure from any run that pushed.
+    **The finding is correct, and the worker's own writeup is the proof.**
+    `mapping_implausible` on AC6 — "A clear data contract (or operation set) defines the
+    relationship between Notes and Todos" — mapped to a `vitest -t` filter over a prompt
+    assertion. The brain entry it wrote says, unprompted: *"the ticket's AC6 is satisfied at
+    the prompt-contract level, not the schema level"*, and files the structural link under
+    **Deferred**. So the gate caught an architectural criterion being settled by a test that
+    cannot settle it, on a run where the code changes themselves were sound.
+
+    Two things worth separating here. The work was **good**: it rejected the ticket's stated
+    root cause (`summarize.ts` already filtered completed tasks), found two real gaps
+    instead, and wrote the test before the fix, saying "New test fails as expected (red)".
+    The gate still failed it, and rightly — a correct fix mapped to the wrong evidence is
+    exactly what `mapping_implausible` is for. A harness that passed this because the diff
+    looked good would be grading the code and calling it grading the claim.
+
+  A hazard found while checking whether delivery was even armed: jarvis's `.husky/pre-push`
+  blocks any push touching `src/`, `server/`, or `scripts/` without a `docs/brain/` entry,
+  generating one by spawning `claude -p` before exiting 1. Delivery passes `--no-verify` to
+  `commit` but deliberately not to `push` (see `lib/delivery.mjs`), because a pre-push hook
+  is the repo owner's guard on state other people see and `.husky` is in that repo's
+  `off_limits`. It also spends tokens no record can attribute, which is worth knowing
+  before reading a cost figure from any run that pushed.
+
+  **I predicted that hook would block this run's push, and I was wrong.** Evaluating its
+  real condition against `main..56162bc`: four files under `src/`/`server/` **and**
+  `docs/brain/2026-08-03-completed-todos-in-summary-fix.md`, so it would have exited 0 and
+  the push would have gone through. The worker satisfied the repo's own convention without
+  being told the hook existed — it read the surrounding `docs/brain/` entries and wrote one.
+  Worth recording because the prediction was the confident part and the observation
+  contradicted it: the hook is still a live hazard for a run that *doesn't* write a brain
+  entry, but it is not what stopped this one. **The gate did.**
 - **No aggregation exists.** Records land; nothing rolls them up. The dashboard refuses to
   run (`build.js`: *"v2/ was retired on 2026-07-28; log/ is now the only sink"*). Per-run
   metrics being correct and per-epic metrics not existing are two different states, and

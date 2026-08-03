@@ -1160,10 +1160,30 @@ export async function executeWork({
       // `pushed_to` IS THE BRANCH ONLY IF IT WAS PUSHED. A branch that exists locally is not a
       // place anything was pushed to, and recording it as one would make a failed push look like a
       // successful one in the only artifact that outlives the console.
+      // `steps` AND `error` TOO, and they were missing until 2026-08-03. `buildRecord` accepts
+      // both, carries both, and has a comment at that field about this precise failure mode — but
+      // this object was hand-built with three keys, so the two it did not name were dropped one
+      // layer ABOVE the code being careful about them. Measured on all three records that ever ran
+      // delivery, including jarvis#11 whose commit `56162bc` exists on disk: `steps: []` on every
+      // one. Enumerating keys by hand is the shape that keeps producing this (#63/#69/#72/#73, and
+      // the backfill tool emptying `preflight`/`sink` the same day).
+      //
+      // `error` IS THE CONSEQUENTIAL HALF: null means "delivery raised nothing", so a run whose
+      // PUSH FAILED wrote a record byte-identical to one whose push was skipped for a failed gate.
+      // The console distinguished them at the time; the only artifact that outlives it did not.
+      //
+      // AND THIS IS THE SECOND HALF OF A FIX ALREADY MADE. `3aba45b` ("delivery.error was computed,
+      // printed, and discarded") added both fields to `buildRecord` — the layer below — and looked
+      // complete: report.mjs carried them, its own tests asserted it, and the suite was green. The
+      // records stayed empty anyway, because THIS object is what report.mjs was handed. A fix
+      // verified only at the layer it edited is not verified; what was missing was an assertion
+      // that followed a real delivery all the way onto disk, which is what `ADDED D4` now does.
       delivery: {
         commits: delivery?.head ? [delivery.head] : [],
         pushed_to: delivery?.pushed ? delivery.branch : null,
         pr_url: delivery?.pr_url ?? null,
+        steps: delivery?.steps ?? [],
+        error: delivery?.error ?? null,
       },
     });
   } catch (err) {

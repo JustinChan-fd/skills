@@ -300,11 +300,18 @@ async function commitAndPush({ repoRoot, config, item, gate, runId, recordPath, 
     // harness does not get to decide what is safe to publish. So the push runs hooks. Measured
     // consequence, 2026-08-03: `jarvis`'s `.husky/pre-push` blocks any push touching `src/`,
     // `server/`, or `scripts/` without a `docs/brain/` entry, and generates one by spawning
-    // `claude -p` (scripts/claude-debrief.ts:65) before exiting 1 to force a re-push. That will
-    // fail this step on a passing run, and the failure is CORRECT: the hook is doing its job. It
+    // `claude -p` (scripts/claude-debrief.ts:65) before exiting 1 to force a re-push. If it fires
+    // it fails this step, and that failure is CORRECT: the hook is doing its job. It
     // also spends tokens no Alfred record can attribute, which is worth knowing before reading a
     // cost figure from a run that pushed. `.husky` is in that repo's `off_limits`, so a worker
     // cannot quietly remove the obstacle either.
+    //
+    // AND IT DID NOT FIRE, on the run this was written for. jarvis#11's commit `56162bc` touched
+    // four files under `src/`/`server/` AND wrote `docs/brain/2026-08-03-...md`, so the hook's
+    // condition was satisfied and a push would have succeeded. The worker met the repo's
+    // convention by reading its neighbours, without being told the hook existed. Kept because the
+    // hazard is real for any run that does NOT write a brain entry — but the prediction that it
+    // would block a passing run was wrong, and what actually stopped that run was the gate.
     await git(repoRoot, 'commit', '--no-verify', '-m', commitMessage({ item, gate, runId }));
     done('commit');
     state.committed = true;

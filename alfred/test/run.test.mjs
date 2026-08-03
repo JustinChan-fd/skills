@@ -2709,6 +2709,35 @@ test('ADDED B3: a PASSING run reaches the remote through the REAL deliver, and t
   assert.ok(reported, 'the reporter was never called');
   assert.deepEqual(reported.delivery.commits, [result.delivery.head], 'the commit sha is in the record');
   assert.equal(reported.delivery.pushed_to, result.delivery.branch);
+
+  // --- D4: AND SO DO `steps` AND `error`, which this test used to stop just short of.
+  //
+  // MEASURED 2026-08-03 on all three records that ever ran delivery, including jarvis#11 whose
+  // commit 56162bc demonstrably exists: `delivery.steps` is `[]` on every one. `buildRecord`
+  // carries both fields and says so in a comment about this exact failure mode — but `run.mjs`
+  // hand-built a THREE-KEY object (`commits`/`pushed_to`/`pr_url`) to pass it, so the other two
+  // were dropped one layer above the code that was careful about them.
+  //
+  // The same defect as the backfill tool emptying `preflight` and `sink` earlier today, and the
+  // same one as #63/#69/#72/#73: a value computed, printed to the console, and never persisted.
+  // Enumerating keys by hand is the shape that keeps producing it.
+  //
+  // `error` IS THE HALF THAT MATTERS MOST. Null there means "delivery raised nothing", so a run
+  // whose push FAILED persisted a record byte-identical to one whose push was skipped for a
+  // failed gate — and the console said so at the time, so the information existed and was thrown
+  // away. Asserted below on the succeeding path (null, honestly) and at B3 on the failing one.
+  assert.ok(Array.isArray(reported.delivery.steps), 'steps must be an array in the record');
+  assert.ok(reported.delivery.steps.length > 0, 'a delivery that committed and pushed recorded no steps');
+  assert.deepEqual(
+    reported.delivery.steps,
+    result.delivery.steps,
+    'the record must carry the SAME sequence deliver() returned, not a rebuilt one',
+  );
+  // Named steps, not just a non-empty array: a length check passes on `[{}]`.
+  const names = reported.delivery.steps.map((s) => s.step);
+  assert.ok(names.includes('commit'), `no commit step in ${JSON.stringify(names)}`);
+  assert.ok(names.includes('push'), `no push step in ${JSON.stringify(names)}`);
+  assert.equal(reported.delivery.error, null, 'a clean delivery records no error');
 });
 
 test('ADDED B3: when the PUSH lands and the PR does NOT, the run says the branch is out there', async () => {
