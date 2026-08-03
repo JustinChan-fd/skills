@@ -51,6 +51,7 @@ import { promisify } from 'node:util';
 
 import { loadConfig } from './config.mjs';
 import { resolveItem } from './item.mjs';
+import { ARM_IDS } from './gaps.mjs';
 import { recordForRun } from './report.mjs';
 import { runGate } from './gate.mjs';
 import { SEATS } from './models.mjs';
@@ -64,6 +65,23 @@ const execFileAsync = promisify(execFile);
 // The record's filename inside the run directory. A sibling of `source.json`: that file is what
 // the run was ASKED to do, this one is what it cost and how it was graded.
 export const RECORD_FILENAME = 'record.json';
+
+// WHICH ARM THIS RUNNER IS (A5). Three approaches will sit side by side in the sink — the
+// single-agent control, Alfred before the thin rewrite, and this — and `provenance.arm` is the
+// only field that tells their records apart.
+//
+// A CONSTANT HERE, DELIBERATELY NOT A CONFIG KEY. The arm names the CODE that performed the run.
+// A repo config claiming `alfred-thin` while the multi-agent runner executed would be a lie the
+// record carries forever, and configs outlive the code they were written against —
+// webtarsthree's has already survived two rewrites of this runner. So the runner states its own
+// identity, and the one caller permitted to override it (`executeWork`'s `provenance` argument) is
+// Phase C's backfill, which is reconstructing a run some other code performed.
+//
+// FROM THE CLOSED SET in gaps.mjs, not a bare literal: a typo here would label every record this
+// runner ever writes with a cohort of one — recorded as `provenance-arm-unknown` on every run,
+// which is a gap nobody would read as "the constant is misspelled". Referenced by NAME rather than
+// by index, so reordering the list cannot silently re-point it.
+export const ARM = ARM_IDS.MULTI_AGENT;
 
 // 25 minutes, the same number THRESHOLDS.armC.wallCapMs carries, and for the same reason: arm B
 // ran 24.6 minutes and produced no PR, so a cap below that would kill runs before they can fail
@@ -647,6 +665,12 @@ export async function executeWork({
   // stream-json log are two independent confirmations of the same session, not one derived
   // from the other.
   newSessionId = randomUUID,
+  // A5. Defaults to THIS runner's own identity, stated by the code rather than read from config —
+  // see `ARM`. Overridden by exactly one caller: Phase C's backfill, which reconstructs records
+  // for runs performed by code that is not this code, and must be able to say `backfilled: true`
+  // and name the arm that actually ran. Merged over the default rather than replacing it, so a
+  // backfill that supplies only `notes` still gets a labelled record.
+  provenance = null,
 } = {}) {
   const root = typeof repoRoot === 'string' ? repoRoot : '';
   if (!root) return { ok: false, error: 'no repoRoot: nothing to work in', run_dir: null };
@@ -819,6 +843,13 @@ export async function executeWork({
         wall_ms: worker?.wall_ms ?? null,
       },
       sink: cfg.telemetry?.sink ?? null,
+      // A5. `ARM` first so a caller supplying only `notes` or only `backfilled` still gets an arm,
+      // and NOT read from `cfg`: the arm is a property of the code executing this line, and a
+      // config that outlived a rewrite of this runner would otherwise mislabel every run it
+      // configured. `backfilled: false` is stated rather than left to the reporter's default,
+      // because "a live run is not a backfill" is a fact this function knows and the reporter
+      // only assumes.
+      provenance: { arm: ARM, backfilled: false, ...(provenance ?? {}) },
     });
   } catch (err) {
     recordError = String(err?.message ?? err);

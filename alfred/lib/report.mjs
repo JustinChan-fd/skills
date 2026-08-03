@@ -60,7 +60,7 @@ import { basename, dirname, join } from 'node:path';
 
 import { collectFromText } from './tokens.mjs';
 import { priceTokens } from './prices.mjs';
-import { newGaps, noteGap, usageRefusal } from './gaps.mjs';
+import { newGaps, noteGap, usageRefusal, isKnownArm, ARMS } from './gaps.mjs';
 import { stampProblems } from './suite.mjs';
 import { projectDirFor, sessionFromWorkerLog, transcriptPathFor } from './transcript.mjs';
 
@@ -179,7 +179,7 @@ function readSubagents(subagentsDir) {
 // touches no transcript; delivery already happened against a remote. Neither is made
 // untrue by an unreadable file, and defaulting them empty asserts something false
 // rather than declining to answer.
-function failed({ session, work, sink, error, suite, gate = null, delivery = null, workerCostUsd = null }) {
+function failed({ session, work, sink, error, suite, gate = null, delivery = null, workerCostUsd = null, provenance = null }) {
   return {
     ok: false,
     error,
@@ -234,6 +234,40 @@ function failed({ session, work, sink, error, suite, gate = null, delivery = nul
     // the other is the one field a reader would have to guard.
     suite: suite ?? null,
     sink: sink ?? null,
+    // Same reasoning as `gate`/`delivery`/`suite` above: the arm is a property of HOW the run was
+    // performed, and an unreadable transcript does not un-perform it. Not gap-checked here — this
+    // path has no `gaps` list to add to (`gaps: []` above, by design: `ok: false` already says the
+    // record is not worth reading), so a bad label on a failed record is visible in the field
+    // itself rather than doubly reported.
+    provenance: provenanceBlock(provenance),
+  };
+}
+
+// WHICH APPROACH PRODUCED THIS RECORD (A5). Three arms will sit side by side in the sink — the
+// historical single-agent control, Alfred as it stood before the thin rewrite, and the thin runner
+// — and before this there was no field that said which. The only writable label was
+// `session.repo`, and that is exactly what `telemetry.mjs`'s `slugifyRepo` reads to choose
+// `log/<slug>/`, so labelling the arm through the repo name would have scattered one repo's arms
+// across three invented directories.
+//
+// CARRIED, NEVER INFERRED. There is deliberately no heuristic here — no "four subagents means
+// multi-agent". An arm read off the record's own contents cannot be evidence ABOUT arms; it would
+// be the conclusion copied out of the data meant to support it. So a caller states it, and an
+// unstated arm stays `null` rather than becoming a plausible guess.
+//
+// THE SAME SHAPE ON BOTH PATHS, from one function, for the reason `sessionBlock` exists: a field
+// present on the success path and absent on the failure path is a field every reader must guard,
+// and Phase C's backfill reads historical transcripts — the path most likely to fail is the one
+// whose label matters most.
+function provenanceBlock(provenance) {
+  const p = provenance ?? {};
+  return {
+    arm: p.arm ?? null,
+    // FALSE, not null. Unlike a cost or an arm, this one has a correct default: a record built
+    // from a live run is not backfilled, and `null` here would make every real record read as
+    // "unknown whether this happened" when it plainly did.
+    backfilled: p.backfilled === true,
+    notes: p.notes ?? null,
   };
 }
 
@@ -268,13 +302,18 @@ export function buildRecord({
   // the only evidence the copied price table is right, and a merge destroys the comparison.
   // Measured on the real run of 2026-07-31: vendor 1.0671731999999998, ours 1.067173.
   workerCostUsd = null,
+  // WHICH ARM PRODUCED THIS RUN — `{arm, backfilled, notes}`, stated by the caller. See
+  // `provenanceBlock`. Defaults to an all-null block rather than being required, because the hook
+  // path reports sessions nobody assigned an arm to and refusing those would trade a labelled
+  // cohort for no record at all.
+  provenance = null,
   // A refusal the CALLER already reached, reported through the same shape as every other
   // failure. `recordForRun` needs this: "no session id in the log" is known before a path can be
   // composed, and inventing one to fail on would be the wrong-session defect.
   error: presetError = null,
 } = {}) {
   if (presetError) {
-    return failed({ session, work, sink, suite, gate, delivery, workerCostUsd, error: presetError });
+    return failed({ session, work, sink, suite, gate, delivery, workerCostUsd, provenance, error: presetError });
   }
 
   let text;
@@ -291,6 +330,7 @@ export function buildRecord({
       gate,
       delivery,
       workerCostUsd,
+      provenance,
       error: `could not read transcript ${transcriptPath}: ${err?.code ?? err?.message ?? 'unknown'}`,
     });
   }
@@ -319,6 +359,20 @@ export function buildRecord({
 
   if (nullish(session?.id)) {
     noteGap(gaps, 'session-id-absent', 'no session id was supplied to join this record on');
+  }
+
+  // A5. Checked, never corrected. `'alfred_thin'` and `'alfred-thin'` aggregate as two arms, so a
+  // single typo silently halves a sample — and comparing arms is the entire reason these records
+  // are pooled in one sink. The bad string is still carried below: it is the only evidence of what
+  // the caller meant, and blanking it would leave an unlabelled record with no way back to the
+  // mistake. `null` is not checked — see `isKnownArm`.
+  const stated = provenance?.arm ?? null;
+  if (!isKnownArm(stated)) {
+    noteGap(
+      gaps,
+      'provenance-arm-unknown',
+      `arm ${JSON.stringify(stated)} is not one of ${ARMS.join(', ')} — this record will not aggregate with any known cohort`,
+    );
   }
 
   // THE SUITE STAMP, wired. `lib/suite.mjs` held the checker and nothing called it,
@@ -427,6 +481,11 @@ export function buildRecord({
     suite: suite ?? null,
     // Carried as data. This module never resolves it and never writes to it.
     sink: sink ?? null,
+    // WHICH ARM (A5). Same shape as the failure path, from the same function — see
+    // `provenanceBlock`. Carried verbatim even when `provenance-arm-unknown` was just recorded
+    // above: the gap says not to trust the label, exactly as `suite` is carried verbatim when its
+    // own stamp is the thing that is wrong.
+    provenance: provenanceBlock(provenance),
   };
 }
 

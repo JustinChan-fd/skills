@@ -40,7 +40,8 @@ import { after, test } from 'node:test';
 
 import { SEATS, normalizeModelId } from '../lib/models.mjs';
 import { SOURCE_FILENAME } from '../lib/item.mjs';
-import { RECORD_FILENAME } from '../lib/run.mjs';
+import { ARMS } from '../lib/gaps.mjs';
+import { ARM, RECORD_FILENAME } from '../lib/run.mjs';
 import {
   SEAT_ENV_VARS,
   executeWork,
@@ -1900,4 +1901,100 @@ test('when there is no record to sync, syncFn is never called at all', async () 
   assert.equal(result.record, null);
   assert.equal(called, false, 'syncFn ran with nothing built to sync');
   assert.equal(result.sync, null);
+});
+
+// --- A5: the arm reaches the record ------------------------------------------
+//
+// WHY THE ARM IS A CONSTANT IN `run.mjs` AND NOT A CONFIG KEY. The arm names the CODE that
+// performed the run. A repo config saying `alfred-thin` while the multi-agent runner executed
+// would be a lie the record carries forever, and configs outlive the code they were written
+// against — webtarsthree's has already survived two rewrites of this runner. So `executeWork`
+// states its own identity, and the only caller allowed to override it is Phase C's backfill,
+// which is reconstructing a run some OTHER code performed.
+
+test('A5: executeWork stamps its own arm onto the record it asks for', async () => {
+  // The wiring assertion. `buildRecord` accepting `provenance` proves nothing about a live run
+  // being labelled: `executeWork` composes the reporter's argument object itself, and a field
+  // dropped there is the computed-and-discarded defect this project keeps finding in its own
+  // instruments (#63, #69, #72, #73).
+  const repo = repoWithCommit();
+  let seen = null;
+
+  await executeWork({
+    ref: 'stamp the arm',
+    config: CONFIG,
+    repoRoot: repo,
+    runRoot: mktemp('runs'),
+    stamp: '20260802T100000Z',
+    spawn: stubSpawn((argv, opts) => ({
+      exit: 0, killed: false, signal: null, wall_ms: 1, log: opts.logPath,
+    })),
+    report: (args) => {
+      seen = args;
+      return { ok: true, error: null, gaps: [], cost: { total_usd: 1 } };
+    },
+  });
+
+  assert.ok(seen, 'the reporter was never called');
+  assert.equal(seen.provenance.arm, ARM, 'the runner did not tell the reporter which arm it is');
+  assert.equal(seen.provenance.backfilled, false, 'a live run is not a backfill');
+  // ASSERTED AGAINST THE IMPORTED CONSTANT, not a literal. A `'alfred-thin'` typed here would
+  // keep passing while ARM moved underneath it — the #67 drift shape, in the field whose whole
+  // purpose is telling two versions of this runner apart.
+  assert.ok(ARMS.includes(ARM), `ARM ${JSON.stringify(ARM)} is not in the closed set ${ARMS.join(', ')}`);
+});
+
+test('A5: the arm is NOT read from config — a stale config cannot mislabel the code that ran', async () => {
+  // The distinguishing assertion, and the reason this is a constant. A config key would let a
+  // record claim an arm its code never was. Here the config asserts the wrong arm loudly and is
+  // ignored.
+  const repo = repoWithCommit();
+  let seen = null;
+
+  await executeWork({
+    ref: 'config lies about the arm',
+    config: { ...CONFIG, provenance: { arm: 'single-agent' }, arm: 'single-agent' },
+    repoRoot: repo,
+    runRoot: mktemp('runs'),
+    stamp: '20260802T100100Z',
+    spawn: stubSpawn((argv, opts) => ({
+      exit: 0, killed: false, signal: null, wall_ms: 1, log: opts.logPath,
+    })),
+    report: (args) => {
+      seen = args;
+      return { ok: true, error: null, gaps: [], cost: { total_usd: 1 } };
+    },
+  });
+
+  assert.equal(seen.provenance.arm, ARM, 'a config key overrode the running code’s own identity');
+  assert.notEqual(seen.provenance.arm, 'single-agent');
+});
+
+test('A5: an explicit provenance argument wins — the seam Phase C backfills through', async () => {
+  // Phase C reconstructs four records from historical transcripts, produced by code that is not
+  // this code. Without this override the backfill would either stamp every historical run as the
+  // current arm — silently merging three cohorts into one — or hand-write JSON, which the plan
+  // refuses because a hand-written record proves nothing about the path real records take.
+  const repo = repoWithCommit();
+  let seen = null;
+
+  await executeWork({
+    ref: 'backfill',
+    config: CONFIG,
+    repoRoot: repo,
+    runRoot: mktemp('runs'),
+    stamp: '20260802T100200Z',
+    spawn: stubSpawn((argv, opts) => ({
+      exit: 0, killed: false, signal: null, wall_ms: 1, log: opts.logPath,
+    })),
+    report: (args) => {
+      seen = args;
+      return { ok: true, error: null, gaps: [], cost: { total_usd: 1 } };
+    },
+    provenance: { arm: 'single-agent', backfilled: true, notes: 'rescued transcript' },
+  });
+
+  assert.equal(seen.provenance.arm, 'single-agent');
+  assert.equal(seen.provenance.backfilled, true);
+  assert.equal(seen.provenance.notes, 'rescued transcript');
 });

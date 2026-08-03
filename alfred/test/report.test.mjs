@@ -967,3 +967,161 @@ test('ADDED: with no known id, recordForRun still falls back to the log-parsed o
   assert.equal(record.session.id, loggedId);
   rmSync(dir, { recursive: true, force: true });
 });
+
+// --- A5: provenance ----------------------------------------------------------
+//
+// WHAT THIS EXISTS FOR. Three arms will sit side by side in the sink — the historical
+// single-agent runs, the historical multi-agent Alfred, and the thin runner — and before
+// this there was NO FIELD saying which produced a record. Grepped: zero hits for
+// arm/approach/variant/provenance. The only writable label was `session.repo`, which is
+// exactly what `telemetry.mjs`'s `slugifyRepo` reads to choose `log/<slug>/`, so labelling
+// the arm through `repo` would scatter the records across invented directories.
+//
+// CARRIED, NEVER INFERRED. There is no heuristic here — no "many subagents means
+// multi-agent". A record whose arm was guessed from its own contents cannot be used as
+// evidence ABOUT arms; the inference would be reading the conclusion off the data it is
+// meant to explain. So the caller states it, and an unstated arm is `null`.
+
+test('ADDED A5: the record carries provenance, and an unstated arm is null rather than a guess', () => {
+  const record = realSession();
+
+  // The four-subagent fixture is exactly the record a heuristic would label
+  // 'alfred-multi-agent'. It says null, because nobody told it.
+  assert.equal(record.provenance.arm, null, 'an arm nobody supplied must not be inferred from subagents');
+  assert.equal(record.provenance.backfilled, false);
+  assert.equal(record.provenance.notes, null);
+  assert.ok(record.subagents.length > 0, 'the fixture must actually carry subagents for this to mean anything');
+});
+
+test('ADDED A5: a supplied arm is carried verbatim and does NOT touch session.repo', () => {
+  // The distinguishing assertion. `session.repo` chooses the sink directory, so an
+  // implementation that labelled the arm by decorating the repo name would pass a
+  // "provenance is present" test and still scatter three arms into three directories.
+  const record = buildRecord({
+    transcriptPath: SESSION_TRANSCRIPT,
+    session: { id: 'sess-arm', repo: 'webtarsthree' },
+    provenance: { arm: 'alfred-thin', backfilled: false, notes: 'first thin run' },
+  });
+
+  assert.equal(record.provenance.arm, 'alfred-thin');
+  assert.equal(record.provenance.notes, 'first thin run');
+  assert.equal(record.session.repo, 'webtarsthree', 'the repo is the sink key and must arrive unmodified');
+});
+
+test('ADDED A5: a backfilled record says so, so it is never read as a live run', () => {
+  // Four of the records in the sink will be reconstructions from historical transcripts
+  // (Phase C). Without this flag they are permanently indistinguishable from runs Alfred
+  // actually performed, and "how many runs has the thin arm done" becomes unanswerable.
+  const record = buildRecord({
+    transcriptPath: ARM0,
+    session: { id: 'sess-backfill' },
+    provenance: {
+      arm: 'single-agent',
+      backfilled: true,
+      notes: 'reconstructed from the rescued TARS-1351 transcript',
+    },
+  });
+
+  assert.equal(record.provenance.backfilled, true);
+  assert.equal(record.provenance.arm, 'single-agent');
+  assert.match(record.provenance.notes, /reconstructed/);
+});
+
+test('ADDED A5: an unknown arm is REFUSED as a gap, because a typo splits a cohort silently', () => {
+  // `'alfred_thin'` and `'alfred-thin'` aggregate as two arms. The same closed-set reasoning
+  // GAP_CODES and blocked.mjs's REASONS are built on: free text defeats aggregation quietly.
+  // Named as a gap rather than thrown — a mislabelled record is still worth reading, and
+  // report failure must not fail the run being reported on.
+  const record = buildRecord({
+    transcriptPath: ARM0,
+    session: { id: 'sess-typo' },
+    provenance: { arm: 'alfred_thin' },
+  });
+
+  assert.equal(record.ok, true, 'a bad label must not condemn the record');
+  assert.ok(
+    record.gaps.some((g) => g.code === 'provenance-arm-unknown'),
+    `an unrecognised arm must be named; gaps were ${JSON.stringify(record.gaps)}`,
+  );
+  // Carried VERBATIM beside the gap, never repaired or blanked: the wrong string is the
+  // only evidence of what the caller meant, which is what makes the typo findable.
+  assert.equal(record.provenance.arm, 'alfred_thin');
+});
+
+test('ADDED A5: a known arm records NO gap — the falsifier for the check above', () => {
+  // Without this, `provenance-arm-unknown` could be firing on every record and the test
+  // above would still pass. Each of the three real arms, asserted individually.
+  for (const arm of ['single-agent', 'alfred-multi-agent', 'alfred-thin']) {
+    const record = buildRecord({
+      transcriptPath: ARM0,
+      session: { id: `sess-${arm}` },
+      provenance: { arm },
+    });
+    assert.equal(
+      record.gaps.some((g) => g.code === 'provenance-arm-unknown'),
+      false,
+      `${arm} is a real arm and must not be flagged`,
+    );
+  }
+
+  // And a null arm — the default for every hook-reported session — is not a gap either.
+  // If it were, the list would carry a permanent hole on most records and stop
+  // distinguishing anything, which is the rule an absent subagents dir already follows.
+  const unstated = buildRecord({ transcriptPath: ARM0, session: { id: 'sess-none' } });
+  assert.equal(
+    unstated.gaps.some((g) => g.code === 'provenance-arm-unknown'),
+    false,
+    'an unstated arm is unobserved, not wrong',
+  );
+});
+
+test('ADDED A5: the FAILURE path carries provenance too', () => {
+  // Same reason `gate`, `delivery` and `suite` are carried there: a record whose transcript
+  // could not be read was still produced by some arm, and Phase C's backfill reads
+  // historical transcripts — the path most likely to fail is the one that most needs its
+  // label. A field present on one path and absent on the other is a field every reader
+  // has to guard.
+  const record = buildRecord({
+    transcriptPath: join(tmpdir(), 'alfred-report-definitely-absent-provenance.jsonl'),
+    session: { id: 'sess-fail' },
+    provenance: { arm: 'alfred-multi-agent', backfilled: true, notes: 'transcript was rescued half-written' },
+  });
+
+  assert.equal(record.ok, false);
+  assert.match(record.error, /could not read transcript/);
+  assert.equal(record.provenance.arm, 'alfred-multi-agent');
+  assert.equal(record.provenance.backfilled, true);
+  assert.match(record.provenance.notes, /half-written/);
+});
+
+test('ADDED A5: recordForRun passes provenance through — the path a real run takes', () => {
+  // `buildRecord` accepting the field proves nothing about `executeWork` being able to set
+  // it: `recordForRun` reconstructs its own argument object, and a field dropped there is
+  // the "computed and discarded" defect this project keeps finding in its own instruments
+  // (#63, #69, #72, #73). Asserted through the entry point a live run actually uses.
+  const dir = tmp();
+  const id = 'prov-7777-8888-9999-aaaaaaaaaaaa';
+  const projectDir = join(dir, '.claude', 'projects', realpathSync(dir).replace(/[^A-Za-z0-9]/g, '-'));
+  mkdirSync(projectDir, { recursive: true });
+  writeFileSync(
+    join(projectDir, `${id}.jsonl`),
+    JSON.stringify({
+      type: 'assistant',
+      timestamp: '2026-08-01T00:00:00.000Z',
+      message: { model: 'claude-sonnet-5', id: 'm1', usage: { input_tokens: 10 } },
+    }) + '\n',
+  );
+
+  const record = recordForRun({
+    workerLog: JSON.stringify({ type: 'result', session_id: id }),
+    cwd: dir,
+    home: dir,
+    session: { id, repo: 'jarvis' },
+    provenance: { arm: 'alfred-thin', backfilled: false, notes: null },
+  });
+
+  assert.equal(record.ok, true, `record failed: ${record.error}`);
+  assert.equal(record.provenance.arm, 'alfred-thin');
+  assert.equal(record.session.repo, 'jarvis');
+  rmSync(dir, { recursive: true, force: true });
+});

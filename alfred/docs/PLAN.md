@@ -229,7 +229,7 @@ suite     { suite_version, suite_digest, model, config_sha, at } | null
 `by_phase` is **absent by design.** There are no phases. If a dashboard panel
 needs phases, the honest answer is one bar.
 
-### AS BUILT — six deviations from the sketch above (M2, 2026-07-30)
+### AS BUILT — seven deviations from the sketch above (M2, 2026-07-30; #7 added 2026-08-02)
 
 The sketch was written before M0 and M1 existed, so it names shapes those modules
 turned out not to have. The deviations are recorded here rather than silently
@@ -267,6 +267,29 @@ vocabulary — the defect §8 warns about.
    `suite-stamp-invalid` gap — the eighth gap code — and the bad stamp is still
    carried verbatim, because repairing it would destroy the only evidence of what the
    run claimed. Present on the failure path too, so a reader never guards the field.
+7. **`provenance` is a top-level field** (A5, 2026-08-02), carrying
+   `{arm, backfilled, notes}`. Three approaches will sit side by side in the sink — the
+   single-agent control, Alfred before the thin rewrite, and the thin runner — and the
+   sketch had **no field saying which produced a record**. The only writable label was
+   `session.repo`, which is exactly what `telemetry.mjs`'s `slugifyRepo` reads to choose
+   `log/<slug>/`, so labelling the arm through the repo name would have scattered one
+   repo's arms across three invented directories.
+
+   **Carried, never inferred.** There is deliberately no heuristic — no "four subagents
+   means multi-agent". An arm read off the record's own contents cannot be evidence ABOUT
+   arms; it would be the conclusion copied out of the data meant to support it. An
+   unstated arm is `null` and records **no gap**, by the same rule `suite: null` follows.
+   An arm outside the closed set (`ARMS` in `gaps.mjs`, derived from `ARM_IDS` so the two
+   cannot drift) is a `provenance-arm-unknown` gap — the ninth code — and the bad string
+   is carried verbatim: `alfred_thin` and `alfred-thin` aggregate as two arms, so a typo
+   silently halves a sample, and blanking it would remove the only evidence of the
+   mistake. Present on the failure path too.
+
+   **`ARM` is a constant in `run.mjs`, deliberately not a config key.** The arm names the
+   CODE that performed the run; a config claiming `alfred-thin` while the multi-agent
+   runner executed would be a lie the record carries forever, and configs outlive the
+   code they were written against. `executeWork`'s `provenance` argument overrides it for
+   exactly one caller: Phase C's backfill, reconstructing runs some other code performed.
 
 `tokens.lines` is the record's name for the collector's `lines_parsed`, and
 `tokens.skipped` (non-empty lines minus parsed lines) is derived in `report.mjs`

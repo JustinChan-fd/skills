@@ -29,7 +29,44 @@ export const GAP_CODES = Object.freeze({
   // any single reading being false. Aggregatable so "how often do we produce
   // uncomparable results" is a query rather than a grep.
   'suite-stamp-invalid': 'the suite stamp is missing, malformed, or disagrees with the suite on disk',
+  // Added for A5. THE SAME FAMILY as suite-stamp-invalid: the numbers may be perfect,
+  // but what cohort this record belongs to is not known. `'alfred_thin'` and
+  // `'alfred-thin'` aggregate as two arms, so a single typo silently halves a sample —
+  // and the comparison between arms is the entire reason the sink exists. Named rather
+  // than thrown: a mislabelled record is still worth reading, per this module's own
+  // "a gap does NOT condemn the record" rule.
+  'provenance-arm-unknown': 'the record names an arm that is not in the known set',
 });
+
+// THE CLOSED SET OF ARMS, for exactly the reason GAP_CODES above is closed: "how does the
+// thin runner compare to the arm it replaced" has to be answerable by aggregating the sink
+// rather than by grepping prose, and free text defeats that without ever erroring.
+//
+//   single-agent         one `claude -p`, no harness. The control.
+//   alfred-multi-agent   Alfred as it stood before the thin rewrite (phase orchestration).
+//   alfred-thin          the single-session runner Phase B builds.
+//
+// NOT VALIDATED BY THROWING. `isKnownArm` returns a boolean and the caller records a gap,
+// because `buildRecord`'s standing rule is that report failure cannot fail the run being
+// reported on — and a backfill of four historical records is precisely where a strict
+// validator would abort the job it was meant to document.
+export const ARM_IDS = Object.freeze({
+  SINGLE_AGENT: 'single-agent',
+  MULTI_AGENT: 'alfred-multi-agent',
+  THIN: 'alfred-thin',
+});
+
+// Derived from ARM_IDS, never a second list. Two hand-maintained copies of the same set is the
+// #67 drift shape, and here the drift would be invisible: an id in one and not the other reads
+// as "that arm is a typo" on records that spelled it exactly as the code that wrote them did.
+export const ARMS = Object.freeze(Object.values(ARM_IDS));
+
+// `null` is KNOWN-GOOD, not unknown. Most records — every hook-reported session — state no
+// arm at all, and if that were a gap the list would carry a permanent hole on nearly
+// everything and stop distinguishing anything. Absent is unobserved; wrong is wrong.
+export function isKnownArm(arm) {
+  return arm === null || arm === undefined || ARMS.includes(arm);
+}
 
 export function newGaps() {
   return [];

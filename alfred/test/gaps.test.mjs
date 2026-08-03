@@ -56,7 +56,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { GAP_CODES, newGaps, noteGap, usageRefusal, reconcileModel } from '../lib/gaps.mjs';
+import { ARM_IDS, ARMS, GAP_CODES, isKnownArm, newGaps, noteGap, usageRefusal, reconcileModel } from '../lib/gaps.mjs';
 
 // --- 1. a structural hole is recorded without condemning the record ---
 
@@ -163,4 +163,43 @@ test('ADDED: no sources at all is a named hole, not a resolved model', () => {
   assert.equal(reconcileModel({}, gaps), null);
   assert.equal(gaps.length, 1);
   assert.equal(gaps[0].code, 'model-id-absent');
+});
+
+// --- A5: the closed set of arms ----------------------------------------------
+//
+// SAME FAMILY AS GAP_CODES ABOVE, and here for the same reason: "how does the thin runner
+// compare to the arm it replaced" has to be answerable by aggregating the sink rather than
+// by grepping prose, and free text defeats that without ever erroring.
+
+test('ADDED A5: ARMS is derived from ARM_IDS — two hand-maintained copies would drift invisibly', () => {
+  // The drift here is worse than a normal #67 copy: an id present in ARM_IDS and absent from
+  // ARMS makes `isKnownArm` reject a label the code itself wrote, so every record produced by
+  // that arm carries `provenance-arm-unknown` — which reads as "the caller typoed", not as
+  // "the set is incomplete". Derived, so the two cannot disagree.
+  assert.deepEqual(ARMS, Object.values(ARM_IDS));
+  assert.ok(Object.isFrozen(ARMS), 'a mutable set is not a closed set');
+});
+
+test('ADDED A5: each of the three arms is known, and a near-miss spelling is not', () => {
+  for (const arm of ARMS) assert.equal(isKnownArm(arm), true, `${arm} is a real arm`);
+
+  // The exact failure the closed set exists for: `alfred_thin` and `alfred-thin` aggregate as
+  // two arms, silently halving a sample. Asserted alongside a plausible abbreviation and a
+  // capitalisation, because those are the three ways a human writes this field by hand.
+  for (const wrong of ['alfred_thin', 'thin', 'Alfred-Thin', 'alfred', 'multi-agent']) {
+    assert.equal(isKnownArm(wrong), false, `${wrong} must not pass as a known arm`);
+  }
+});
+
+test('ADDED A5: an unstated arm is known-good, not unknown', () => {
+  // Most records — every hook-reported session — name no arm. If absent were unknown, nearly
+  // every record would carry a permanent gap and the list would stop distinguishing anything:
+  // the same rule an absent subagents directory already follows. Absent is unobserved; wrong
+  // is wrong.
+  assert.equal(isKnownArm(null), true);
+  assert.equal(isKnownArm(undefined), true);
+
+  // But an empty string is NOT absent. It is a caller that meant to say something and said
+  // nothing, and it aggregates as its own cohort.
+  assert.equal(isKnownArm(''), false);
 });
