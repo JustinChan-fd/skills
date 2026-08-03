@@ -37,6 +37,7 @@
 
 import { AC_MAP_PATH, acMapContract } from './acmap.mjs';
 import { MARKER_PATH, markerContract } from './blocked.mjs';
+import { preflightContract } from './preflight.mjs';
 import { AGENT_BRIEFS, AGENT_SEATS } from './router.mjs';
 
 // The fence. Two markers rather than a code fence because a ticket body legitimately contains
@@ -185,6 +186,19 @@ export function composeWorkerPrompt({ item, config, repoRoot } = {}) {
       '',
     );
   }
+
+  // THE PREFLIGHT CONTRACT, BEFORE THE OTHER TWO AND BY IMPORT (B2).
+  //
+  // ITS ORDER IS THE OPPOSITE OF THEIRS, and that is deliberate rather than incidental. The marker
+  // and ac_map contracts describe what to write when the work is OVER, which is why they sit last —
+  // the final instruction a worker reads should be about reporting. This one describes what to write
+  // before touching anything, and `run.mjs` reads the worker's FIRST turn, so an attestation the
+  // worker defers is an attestation Alfred never sees.
+  //
+  // STILL AFTER THE FENCE, like everything else here. A contract inserted above the quoted body
+  // would be talking to a worker that has not read the criteria yet, and a hostile body could then
+  // answer it.
+  lines.push(preflightContract({ criteria }), '');
 
   // BOTH CONTRACTS, LAST, BY IMPORT. They answer different questions — "I could not do this"
   // versus "here is how you can check what I did" — and #67 is what a worker handed only the

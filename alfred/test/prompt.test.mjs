@@ -28,6 +28,7 @@ import { MARKER_PATH, REASONS, markerContract } from '../lib/blocked.mjs';
 import { AC_MAP_PATH, acMapContract } from '../lib/acmap.mjs';
 import { AGENT_BRIEFS, AGENT_SEATS } from '../lib/router.mjs';
 import { composeWorkerPrompt, standingRules } from '../lib/prompt.mjs';
+import { preflightContract } from '../lib/preflight.mjs';
 
 const CONFIG = Object.freeze({
   version: 1,
@@ -291,4 +292,66 @@ test('refuses an item with neither a title nor a body — a prompt about nothing
     () => composeWorkerPrompt({ item: { ...TICKET, title: '', body: '   ' }, config: CONFIG, repoRoot: '/tmp/x' }),
     /neither a title nor a body/i,
   );
+});
+
+// --- B2: the preflight contract, and where in the prompt it has to sit ---
+
+test('ADDED B2: the prompt carries preflightContract() byte-identically', () => {
+  // Byte-identical, for the reason the marker and ac_map contracts are: two copies of "what a
+  // quote has to be" drift, and the copy in the prompt is the one the worker obeys while
+  // `checkAttestation` enforces the other. A paraphrase here means the worker is graded against a
+  // rule it was never given — the #67 shape.
+  const p = compose();
+  assert.ok(
+    p.includes(preflightContract({ criteria: TICKET.acceptance_criteria })),
+    'the prompt does not carry the preflight contract verbatim',
+  );
+});
+
+test('ADDED B2: the preflight contract comes BEFORE the marker and ac_map contracts', () => {
+  // ORDER IS THE WHOLE POINT, and it is the opposite of the other two contracts'. The marker and
+  // ac_map contracts describe what to write when the work is OVER, so they sit last. This one
+  // describes what to write before touching anything, and a worker that reads "restate the criteria
+  // first" after two paragraphs about how to report completion has been handed the steps out of
+  // order. `run.mjs` reads the FIRST turn, so an attestation the worker defers is an attestation
+  // Alfred never sees.
+  const p = compose();
+  const pre = p.indexOf(preflightContract({ criteria: TICKET.acceptance_criteria }));
+  assert.ok(pre !== -1, 'the preflight contract is absent');
+  assert.ok(pre < p.indexOf(markerContract()), 'the preflight contract must precede the marker contract');
+  assert.ok(pre < p.indexOf(acMapContract()), 'the preflight contract must precede the ac_map contract');
+});
+
+test('ADDED B2: the preflight contract still sits AFTER the fenced ticket body', () => {
+  // The existing rule this must not break: everything Alfred wrote comes after the quoted body, so
+  // the last instructions in the prompt are Alfred's and not the ticket author's. Inserting a
+  // contract "before the other two" is one plausible edit away from inserting it above the fence,
+  // where a hostile body could talk over it.
+  const p = compose();
+  assert.ok(
+    p.indexOf(preflightContract({ criteria: TICKET.acceptance_criteria })) > p.indexOf('END TICKET'),
+    'the preflight contract is buried above the ticket body',
+  );
+});
+
+test('ADDED B2: a prompt-sourced item gets the no-criteria form, not the JSON shape', () => {
+  // `item.mjs` refuses to invent acceptance criteria, so `alfred work "fix the flaky test"` has
+  // nothing to attest to. Handing that worker a JSON template with an empty id list would demand a
+  // block `checkAttestation` will not read — and `refused: false, attested: 0` is already its
+  // documented answer for this case. The failure mode is a worker burning a turn satisfying a
+  // contract that grades nothing.
+  const p = composeWorkerPrompt({ item: PROMPTED, config: CONFIG, repoRoot: '/tmp/wt/jarvis' });
+  assert.ok(p.includes(preflightContract({ criteria: [] })), 'the no-criteria form is missing');
+  assert.ok(!p.includes('"confidence": 0.0'), 'a prompt-sourced worker was handed the JSON template');
+});
+
+test('ADDED B2: the contract names the real criterion ids, and they match what the gate grades', () => {
+  // The falsifier for the byte-identity test above, which would pass against an empty contract.
+  // `checkAttestation` refuses `criterion-undeclared` on any id the ticket did not declare, so a
+  // contract listing the wrong ids would refuse every well-behaved worker — the false refusal that
+  // teaches an operator to route around the mechanism.
+  const p = compose();
+  for (const ac of TICKET.acceptance_criteria) {
+    assert.ok(p.includes(`\`${ac.id}\``), `the preflight contract does not name ${ac.id}`);
+  }
 });

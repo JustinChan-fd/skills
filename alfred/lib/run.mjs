@@ -55,10 +55,11 @@ import { ARM_IDS } from './gaps.mjs';
 import { recordForRun } from './report.mjs';
 import { runGate } from './gate.mjs';
 import { SEATS } from './models.mjs';
+import { checkAttestation, parseAttestation } from './preflight.mjs';
 import { composeWorkerPrompt, standingRules } from './prompt.mjs';
 import { workerArgv } from './router.mjs';
 import { syncRecord } from './telemetry.mjs';
-import { terminalErrorFromWorkerLog } from './transcript.mjs';
+import { firstTurnFromWorkerLog, terminalErrorFromWorkerLog } from './transcript.mjs';
 
 const execFileAsync = promisify(execFile);
 
@@ -550,7 +551,29 @@ export function dirtyRefusal(paths) {
 // being wired wrong.
 export function spawnWorker(
   argv,
-  { bin = 'claude', cwd, logPath, env = process.env, seats = SEATS, wallCapMs = DEFAULT_WALL_CAP_MS } = {},
+  {
+    bin = 'claude',
+    cwd,
+    logPath,
+    env = process.env,
+    seats = SEATS,
+    wallCapMs = DEFAULT_WALL_CAP_MS,
+    // STOP THIS WORKER EARLY, on what it has written so far (B2). `watch(logText)` returns
+    // `{reason, detail}` to stop or anything falsy to let it run. Called on a timer against the log
+    // the child is appending to, until it fires once or the child ends.
+    //
+    // A PREDICATE, AND THIS FUNCTION KNOWS NOTHING ABOUT PREFLIGHT. `executeWork` composes the
+    // predicate out of `firstTurnFromWorkerLog` + `parseAttestation` + `checkAttestation`; the
+    // launcher's job is the race, not the rule. Keeping the split means the attestation logic is
+    // testable with no child process and the race is testable with no attestation.
+    //
+    // OPT-IN. `undefined` means no timer is ever created, so every existing caller's behaviour is
+    // byte-identical — a spawn path silently rewritten for all callers is not an addition.
+    watch = null,
+    // 2s. The attestation lands within seconds of the spawn, and the thing being saved is minutes
+    // of a 25-minute cap, so a tighter poll buys nothing and reads a growing file more often for it.
+    pollMs = 2000,
+  } = {},
 ) {
   mkdirSync(dirname(logPath), { recursive: true });
   const sink = openSync(logPath, 'w');
@@ -567,6 +590,13 @@ export function spawnWorker(
   return new Promise((resolvePromise, reject) => {
     let killed = false;
     let timer = null;
+    // WHY THE WATCH STOP IS ITS OWN FLAG AND NOT `killed`. `killed` means the wall cap fired, and
+    // `executeWork` raises a `check_failed` finding from it that says the worker ran out of time. A
+    // preflight refusal reported through the same flag would be diagnosed as a timeout — a different
+    // problem with a different fix — and §2.8's recorded failure is precisely a run whose stop
+    // reason was lost on the way to the verdict.
+    let stopped = null;
+    let poll = null;
 
     // ONE CLOSE, MEASURED. A failed spawn emits BOTH 'error' and 'close' — Node's own
     // `maybeClose` runs off `onErrorNT` — so closing the fd in each handler throws
@@ -582,8 +612,14 @@ export function spawnWorker(
 
     // A LAUNCH FAILURE IS NOT A COMPLETED RUN. See gap 2: this arrives on a later tick than
     // `spawn` returns, and without it a `pid`-less child reads as a worker that finished.
+    const stopPolling = () => {
+      if (poll) clearInterval(poll);
+      poll = null;
+    };
+
     child.once('error', (err) => {
       if (timer) clearTimeout(timer);
+      stopPolling();
       release();
       reject(
         new Error(
@@ -600,8 +636,62 @@ export function spawnWorker(
       child.kill('SIGTERM');
     }, wallCapMs);
 
+    // THE WATCH, ON A TIMER AGAINST THE GROWING LOG (B2).
+    //
+    // POLLED, NOT READ ONCE. The attestation is not on disk when the child starts — measured at
+    // line 6 of a real 301-line log, some hundreds of milliseconds in. A watch called once at spawn
+    // time would read an empty file, conclude nothing, and be a mechanism that is present, green,
+    // and incapable of ever firing. That is the unwired-tripwire shape this project keeps finding.
+    if (typeof watch === 'function') {
+      poll = setInterval(() => {
+        // ONCE. SIGTERM is a request, not a guarantee: a child that ignores it keeps writing, the
+        // next poll matches again, and without this latch the run would signal it every `pollMs` and
+        // overwrite the stop reason with whatever a later, longer read happened to match. The FIRST
+        // reason is the true one.
+        if (stopped) return;
+
+        let text;
+        try {
+          text = readFileSync(logPath, 'utf8');
+        } catch {
+          // The file may not exist yet, or may be mid-write. Not an outcome — just nothing to read.
+          return;
+        }
+
+        let verdict = null;
+        try {
+          verdict = watch(text);
+        } catch {
+          // A BROKEN WATCH MUST NOT STOP A WORKING WORKER, and it especially must not throw from
+          // inside a timer: this callback is not inside the promise's own try, so an escape would
+          // take down the process supervising a worker that is already costing money. The mechanism
+          // that reports a problem must not become the problem — `readMarker`'s rule.
+          return;
+        }
+        if (!verdict) return;
+
+        stopped = {
+          reason: verdict.reason ?? null,
+          detail: verdict.detail ?? null,
+          // WHEN it was stopped, because the cost of the mechanism is the question it exists to
+          // answer. A refusal at 4s and a refusal at 4 minutes are the same verdict and very
+          // different value, and nothing else in the record could tell them apart.
+          at_ms: Date.now() - startedAt,
+        };
+        stopPolling();
+        // SIGTERM, for the wall cap's reason: the transcript this run is priced from has to flush.
+        // The spend up to the refusal is real and has to be reported, not discarded.
+        child.kill('SIGTERM');
+      }, pollMs);
+      // UNREF'd. Without it this interval holds the event loop open, and `alfred work` would sit
+      // there after the run finished — a hang introduced by the thing meant to prevent one. The
+      // 'close' handler clears it in the normal case; this covers every other exit.
+      poll.unref?.();
+    }
+
     child.once('close', (exit, signal) => {
       clearTimeout(timer);
+      stopPolling();
       // Returns early on a launch failure: 'error' already rejected, and resolving after that
       // would be a no-op that reads in the code like a second outcome.
       if (closed) return;
@@ -610,12 +700,76 @@ export function spawnWorker(
         exit,
         signal,
         killed,
+        // `null` WHEN NOTHING STOPPED IT, never `{reason: null}`. Absent is not "stopped for no
+        // reason" — the same absent-is-not-zero rule `gate.pass` and `cost.total_usd` follow.
+        stopped,
         wall_ms: Date.now() - startedAt,
         pid: child.pid ?? null,
         log: logPath,
       });
     });
   });
+}
+
+// THE PREFLIGHT PREDICATE. `spawnWorker`'s `watch` contract, composed out of three pieces that each
+// know nothing about the others: `firstTurnFromWorkerLog` reads a growing log, `parseAttestation`
+// finds the fenced block, `checkAttestation` grades it against the criteria the ticket declared.
+//
+// WHY IT IS BUILT HERE AND NOT INSIDE `spawnWorker`. The launcher owns the race — poll interval,
+// SIGTERM, the latch that fires once — and this owns the rule. Split that way, the attestation
+// logic is testable with no child process and the race is testable with no attestation. Fused, a
+// bug in either is only reachable by paying for both.
+//
+// RETURNS null FOR "KEEP GOING", which is `watch`'s contract, and there are FOUR distinct ways to
+// get there. Three of them are the mechanism working:
+//
+//   no criteria      nothing was declared, so there is nothing to attest to. `executeWork` does not
+//                    even arm a watch in that case — this clause is the belt to that braces.
+//   absent           the poll ran before the child wrote a byte. Every run passes through here.
+//   in_progress      the turn is being written right now. A half-written fence is not a lie, and
+//                    refusing on one would fire on a worker about to answer correctly.
+//
+// The fourth is the honest limit of a substring check: `checkAttestation` returns `refused: false`
+// and this returns null, WITHOUT that meaning the quotes were true. It means no quote was found to
+// be false. `preflight.mjs`'s header is explicit that this path can only ever refuse, never grant a
+// pass, which is why nothing here or there is named `ok`, `pass`, or `verified`.
+//
+// A COMPLETE TURN WITH NO ATTESTATION IS A REFUSAL, and it can only be known once the turn is over —
+// that is what the third state buys. `parseAttestation`'s `absent` on a `complete` turn means the
+// worker read the contract and answered around it.
+function preflightWatch({ criteria, body, threshold }) {
+  const declared = Array.isArray(criteria) ? criteria : [];
+  if (declared.length === 0) return null;
+
+  return (logText) => {
+    const turn = firstTurnFromWorkerLog(logText);
+    if (turn.state !== 'complete') return null;
+
+    const parsed = parseAttestation(turn.text);
+    // NO `absent` BRANCH HERE, AND ONE WAS WRITTEN AND THEN DELETED. It returned
+    // `attestation-absent` with its own prose, a mutant replacing it with `if (false)` survived the
+    // suite, and the trace is why: `parsed.attestation` is null in that state, and
+    // `checkAttestation(null)` ALREADY returns `attestation-absent` — with a better detail, because
+    // it names which criteria went unattested and the deleted branch could not. No input can
+    // distinguish the two forms, which makes the branch unearned rather than untested, and a branch
+    // that cannot fire is indistinguishable from one that passed. Same call as the blank-string half
+    // of `firstTurnFromWorkerLog`'s guard. Kept as a comment because "there is deliberately no
+    // absent branch" is a fact the next reader will otherwise re-add.
+    if (parsed.state === 'invalid') {
+      // `attestation-unreadable` FROM THE FROZEN SET, and the first draft of this line invented
+      // `attestation-unparseable` instead. Nothing would have thrown: the string would have reached
+      // the record, and a reader grouping runs by refusal code would have had one bucket that
+      // matches no documented reason — a value computed correctly and carried into a shape nothing
+      // can read, which is this project's recurring defect wearing a different coat. The set is
+      // frozen in preflight.mjs precisely so the codes are a closed vocabulary; a test below pins
+      // that every reason this runner can emit is a key in it.
+      return { reason: 'attestation-unreadable', detail: parsed.problem };
+    }
+
+    const verdict = checkAttestation({ attestation: parsed.attestation, criteria: declared, body, threshold });
+    if (!verdict.refused) return null;
+    return { reason: verdict.reason, detail: verdict.detail };
+  };
 }
 
 // PLAN.md §2.1, in its order. Returns a RESULT and does not throw, for the same reason
@@ -671,6 +825,12 @@ export async function executeWork({
   // and name the arm that actually ran. Merged over the default rather than replacing it, so a
   // backfill that supplies only `notes` still gets a labelled record.
   provenance = null,
+  // Forwarded to `resolveItem`, whose own defaults are the real `gh` and the real MCP fetch. Left
+  // `undefined` here rather than defaulted, so that module stays the single place those defaults
+  // are named — two copies of "what fetches an issue" drift, and the drift is invisible until a
+  // run resolves a ticket through the stale one.
+  gh = undefined,
+  jiraFetch = undefined,
 } = {}) {
   const root = typeof repoRoot === 'string' ? repoRoot : '';
   if (!root) return { ok: false, error: 'no repoRoot: nothing to work in', run_dir: null };
@@ -689,7 +849,18 @@ export async function executeWork({
   // Step 2. Resolve the item AND write the raw payload, before anything else happens. §2.1 calls
   // this non-negotiable and a bug fix: harness-core persisted a one-line excerpt, so no run there
   // is replayable.
-  const resolved = await resolveItem({ ref, config: cfg, runDir });
+  // THE `gh`/`jiraFetch` SEAM, FORWARDED RATHER THAN RE-IMPLEMENTED. `resolveItem` already takes
+  // both with real defaults; `executeWork` was swallowing them, which meant every test of a step
+  // AFTER item resolution had to route around the resolver — by passing a `ref` that lands on the
+  // prompt path, and therefore by testing the steps below against an item with no criteria and no
+  // id. That is mocked-seam blindness one layer out: the preflight only exists when criteria exist,
+  // so a suite that can only reach it with zero criteria cannot see it at all.
+  //
+  // NOT AN `item` OVERRIDE. Handing `executeWork` a pre-built item would let a test assert against a
+  // shape `item.mjs` never produces — the AC1..ACn ids the gate keys on are extracted by that
+  // module's own parser, and a hand-written `{id: 'AC1'}` agrees with it only until it changes.
+  // Injecting the FETCH keeps the extraction real and stubs only the network.
+  const resolved = await resolveItem({ ref, config: cfg, runDir, gh, jiraFetch });
   if (!resolved.ok) return { ok: false, error: resolved.error, run_dir: runDir };
   const item = resolved.item;
 
@@ -740,14 +911,43 @@ export async function executeWork({
     return { ok: false, error: err.message, run_dir: runDir };
   }
 
-  // Step 5. Spawn and WAIT.
+  // Step 5. Spawn and WAIT — with the preflight armed, if there is anything to check.
+  //
+  // `watch` IS UNDEFINED WHEN THERE ARE NO CRITERIA, not a predicate that always returns null.
+  // `spawnWorker` creates no timer for a non-function, so `alfred work "fix the flaky test"` reads a
+  // growing log zero times instead of every two seconds for a whole run to reach a conclusion that
+  // was foregone before the spawn. `?? undefined` rather than passing null through for the same
+  // reason: the option's default is what "unarmed" means, and this is the caller saying it.
   const logPath = join(runDir, 'worker.log');
+  const watch = preflightWatch({
+    criteria: item.acceptance_criteria ?? [],
+    // The BODY, which is the only thing here that is not Alfred's own text. A quote is checked
+    // against what the ticket actually said, not against the prompt Alfred composed from it —
+    // otherwise Alfred's own contract text would count as a place a quote could be found, and a
+    // worker echoing the contract's example would attest successfully to nothing.
+    body: item.body ?? '',
+  }) ?? undefined;
   let worker;
   try {
-    worker = await spawnFn(argv, { cwd: root, logPath, runDir, env, wallCapMs });
+    worker = await spawnFn(argv, { cwd: root, logPath, runDir, env, wallCapMs, watch });
   } catch (err) {
     return { ok: false, error: err.message, run_dir: runDir, worker: null };
   }
+
+  // THE VERDICT, AS A FACT ABOUT THE RUN. `worker.stopped` is the launcher reporting that the
+  // predicate fired; this turns it into the shape `report.mjs`'s `preflightBlock` whitelists.
+  //
+  // `attested` IS NOT RECOMPUTED HERE, and that is a deliberate hole rather than an oversight. The
+  // count lives inside `checkAttestation`'s verdict, which the predicate consumed and discarded to
+  // satisfy `watch`'s `{reason, detail}` contract. Threading it back out would mean either widening
+  // that contract — making the launcher carry a field only one caller understands — or re-reading
+  // and re-grading the log after the fact, which is a second grader that can disagree with the
+  // first. `null` says "not observed" rather than asserting a number nobody counted, which is this
+  // project's absent-is-not-zero rule. The zero-criteria case is different and IS known: nothing
+  // was declared, so nothing was attested, and `0` there is a measurement.
+  const preflight = worker?.stopped
+    ? { refused: true, reason: worker.stopped.reason, detail: worker.stopped.detail, attested: null, checks: [] }
+    : { refused: false, reason: null, detail: null, attested: watch ? null : 0, checks: [] };
 
   // Step 6. Observe, then gate. OBSERVE FIRST and pass the result: `runGate` takes no default
   // for `diffstat`, so a runner that omits it silently disables `evidence_weakened` and
@@ -806,6 +1006,19 @@ export async function executeWork({
     });
   }
 
+  // NOR IS A WORKER WE STOPPED AT THE PREFLIGHT. The third member of the same family, and the one
+  // whose false-pass is most inviting: a worker stopped four seconds in has touched nothing, so from
+  // the TREE's side it is indistinguishable from a worker that finished and correctly changed
+  // nothing — a clean diff, no findings, and `pass = findings.length === 0` is TRUE. §2.8's recorded
+  // failure exactly, at a new site. The gate cannot see a refusal; the runner has to say so.
+  if (preflight.refused) {
+    findings.push({
+      rule: 'check_failed',
+      detail: `the preflight refused this run (${preflight.reason}): ${preflight.detail ?? 'no detail'}`,
+      evidence: `log: ${worker?.log}`,
+    });
+  }
+
   const gate = {
     ...verdict,
     findings,
@@ -850,6 +1063,10 @@ export async function executeWork({
       // because "a live run is not a backfill" is a fact this function knows and the reporter
       // only assumes.
       provenance: { arm: ARM, backfilled: false, ...(provenance ?? {}) },
+      // B2. The verdict, onto disk. `result.preflight` being right proves nothing about what a
+      // reader sees a week from now, and the record is the only thing that outlives the console
+      // line — the exact gap between "computed" and "carried" that #63/#69/#72/#73 all are.
+      preflight,
     });
   } catch (err) {
     recordError = String(err?.message ?? err);
@@ -905,6 +1122,12 @@ export async function executeWork({
     item,
     worker,
     gate,
+    // The verdict as its own field, ALWAYS present. `worker.stopped` already carries whether the
+    // predicate fired, but a caller reading that has to know what `stopped` means and that a
+    // preflight is what arms it; this states the outcome directly, including the not-refused case,
+    // so "we checked and found no false quote" and "we never checked" are distinguishable without
+    // inference. `bin/alfred` prints from this and `cli.mjs` decides the exit code from it.
+    preflight,
     record,
     // Where it landed, or null. A caller that printed a path it had not written would send an
     // operator to a file that is not there.

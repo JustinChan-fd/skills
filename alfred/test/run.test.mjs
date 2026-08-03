@@ -41,6 +41,7 @@ import { after, test } from 'node:test';
 import { SEATS, normalizeModelId } from '../lib/models.mjs';
 import { SOURCE_FILENAME } from '../lib/item.mjs';
 import { ARMS } from '../lib/gaps.mjs';
+import { PREFLIGHT_REFUSALS } from '../lib/preflight.mjs';
 import { ARM, RECORD_FILENAME } from '../lib/run.mjs';
 import {
   SEAT_ENV_VARS,
@@ -1997,4 +1998,627 @@ test('A5: an explicit provenance argument wins — the seam Phase C backfills th
   assert.equal(seen.provenance.arm, 'single-agent');
   assert.equal(seen.provenance.backfilled, true);
   assert.equal(seen.provenance.notes, 'rescued transcript');
+});
+
+// --- B2: STOPPING A WORKER IN FLIGHT, on what it said in its first turn ---
+//
+// WHY THIS IS A REAL CHILD AND NOT A STUB. The whole mechanism is a race between a file being
+// appended to by one process and polled by another, and a test that hands `spawnWorker` a fake
+// child cannot observe that race — it is the mocked-seam blindness this project has already paid
+// for twice (nine defects past 1148 green tests). So every test below launches `node` for real,
+// writes real bytes to a real log, and reads the real outcome.
+//
+// AND WHY THE MECHANISM EXISTS AT ALL. `lib/preflight.mjs` checks an attestation the worker writes
+// before it touches anything, and that check is only worth its cost if it can act WHILE the worker
+// runs. A refusal computed after a 25-minute run has paid the full price of the thing it prevents.
+
+test('ADDED B2: a watch that returns a stop reason kills the worker and reports the reason', async () => {
+  // The load-bearing case. The child announces itself, then hangs for a minute; the watch sees the
+  // announcement and stops it. Without this the refusal is post-hoc and costs a whole run.
+  const dir = mktemp('watch-stop');
+  const log = join(dir, 'w.log');
+  const outcome = await spawnWorker(
+    ['-e', "process.stdout.write(JSON.stringify({type:'assistant',message:{content:[{type:'text',text:'REFUSE ME'}]}})+'\\n'); setTimeout(()=>{},60000)"],
+    {
+      bin: NODE,
+      cwd: dir,
+      logPath: log,
+      wallCapMs: 20000,
+      pollMs: 25,
+      watch: (text) => (text.includes('REFUSE ME') ? { reason: 'quote-not-in-body', detail: 'AC2 was confabulated' } : null),
+    },
+  );
+
+  assert.equal(outcome.stopped.reason, 'quote-not-in-body');
+  assert.equal(outcome.stopped.detail, 'AC2 was confabulated');
+  assert.equal(outcome.signal, 'SIGTERM', 'SIGTERM so the transcript flushes, as with the wall cap');
+  // AND IT IS NOT `killed`. `killed` means the WALL CAP fired — a worker that ran out of time —
+  // and `run.mjs` raises a `check_failed` finding from it saying exactly that. A preflight refusal
+  // that set the same flag would be reported to the operator as a timeout, which is a different
+  // diagnosis with a different fix.
+  assert.equal(outcome.killed, false, 'a watch stop is not a wall-cap kill');
+  assert.ok(outcome.wall_ms < 20000, 'the worker was not stopped early');
+});
+
+test('ADDED B2: a watch that never fires leaves the worker completely alone', async () => {
+  // The falsifier. Without it, a watch that killed everything unconditionally would pass the test
+  // above — and every run would refuse. A false refusal costs a spawn and teaches the operator to
+  // route around the mechanism, which is worse than having no mechanism.
+  const dir = mktemp('watch-quiet');
+  const outcome = await spawnWorker(['-e', "process.stdout.write('working\\n'); process.exit(0)"], {
+    bin: NODE,
+    cwd: dir,
+    logPath: join(dir, 'w.log'),
+    pollMs: 25,
+    watch: () => null,
+  });
+
+  assert.equal(outcome.exit, 0);
+  assert.equal(outcome.killed, false);
+  assert.equal(outcome.stopped, null, 'nothing was stopped, so `stopped` must be null and not a shape');
+});
+
+test('ADDED B2: no watch at all behaves exactly as before — the default is unchanged', async () => {
+  // Every existing caller passes no `watch`. If the default polled, or wrapped the outcome
+  // differently, this would be a rewrite of the spawn path disguised as an addition.
+  const dir = mktemp('watch-none');
+  const outcome = await spawnWorker(['-e', 'process.exit(0)'], { bin: NODE, cwd: dir, logPath: join(dir, 'w.log') });
+  assert.equal(outcome.exit, 0);
+  assert.equal(outcome.stopped, null);
+});
+
+test('ADDED B2: a watch that THROWS does not kill the worker or the run', async () => {
+  // The mechanism that reports a problem must not become the problem — the rule `readMarker`,
+  // `buildRecord` and `parseAttestation` all follow. This one runs on a timer inside a promise, so
+  // an unhandled throw here would not merely mis-grade the run: it would take down the process that
+  // was supervising a worker already costing money.
+  const dir = mktemp('watch-throw');
+  const outcome = await spawnWorker(['-e', "process.stdout.write('hi\\n'); setTimeout(()=>process.exit(0), 250)"], {
+    bin: NODE,
+    cwd: dir,
+    logPath: join(dir, 'w.log'),
+    pollMs: 25,
+    watch: () => {
+      throw new Error('the watch is broken');
+    },
+  });
+
+  assert.equal(outcome.exit, 0, 'a broken watch must not stop a working worker');
+  assert.equal(outcome.stopped, null);
+});
+
+test('ADDED B2: the watch sees the log GROWING, not one snapshot of it', async () => {
+  // The reason this polls a file rather than reading it once. The attestation is not on disk when
+  // the child starts; it arrives some hundreds of milliseconds later. A watch called once at spawn
+  // time would read an empty file, conclude nothing, and the mechanism would be nominal — present,
+  // green, and incapable of ever firing. Here the trigger text is written only on the second write.
+  const dir = mktemp('watch-grow');
+  const script = [
+    "process.stdout.write('first\\n');",
+    "setTimeout(() => { process.stdout.write('THE TRIGGER\\n'); }, 200);",
+    'setTimeout(() => {}, 60000);',
+  ].join('');
+
+  const seen = [];
+  const outcome = await spawnWorker(['-e', script], {
+    bin: NODE,
+    cwd: dir,
+    logPath: join(dir, 'w.log'),
+    wallCapMs: 20000,
+    pollMs: 25,
+    watch: (text) => {
+      seen.push(text.length);
+      return text.includes('THE TRIGGER') ? { reason: 'low-confidence', detail: 'stopped on a later write' } : null;
+    },
+  });
+
+  assert.equal(outcome.stopped.reason, 'low-confidence');
+  assert.ok(seen.length >= 2, `the watch ran ${seen.length} time(s) — it must poll, not sample once`);
+  assert.ok(Math.max(...seen) > Math.min(...seen), 'the watch never saw the log grow');
+});
+
+test('ADDED B2: the wall cap still fires when a watch is armed and never triggers', async () => {
+  // The two stop paths coexist. A watch that polls forever must not disarm the only bound on a
+  // hung worker — and the flags must stay distinguishable: this outcome is `killed: true` with
+  // `stopped: null`, the exact inverse of the first test.
+  const dir = mktemp('watch-cap');
+  const outcome = await spawnWorker(['-e', 'setTimeout(() => {}, 60000)'], {
+    bin: NODE,
+    cwd: dir,
+    logPath: join(dir, 'w.log'),
+    wallCapMs: 400,
+    pollMs: 25,
+    watch: () => null,
+  });
+
+  assert.equal(outcome.killed, true);
+  assert.equal(outcome.signal, 'SIGTERM');
+  assert.equal(outcome.stopped, null);
+});
+
+test('ADDED B2: a watch fires at most ONCE, even on a child that ignores SIGTERM', async () => {
+  // A stopped worker is not necessarily a dead worker: SIGTERM is a request. A child that ignores
+  // it keeps writing, the poll keeps matching, and without a latch the run would signal it every
+  // `pollMs` and — worse — overwrite `stopped` with each later read. The first reason is the true
+  // one; a later poll may match a different rule against more text.
+  const dir = mktemp('watch-once');
+  const script = [
+    "process.on('SIGTERM', () => {});",
+    "process.stdout.write('FIRST REASON\\n');",
+    'setTimeout(() => process.exit(0), 400);',
+  ].join('');
+
+  // MATCHES, NOT CALLS, and the difference is the whole test. An earlier draft counted every watch
+  // invocation and asserted the stop carried `call 1` — it failed with `call 2`, because the first
+  // poll at 25ms ran before the child's write reached disk and correctly returned null. That is the
+  // watch working, and the assertion was measuring the wrong thing: what must happen at most once is
+  // a MATCH being acted on, not the predicate being consulted.
+  let matches = 0;
+  const outcome = await spawnWorker(['-e', script], {
+    bin: NODE,
+    cwd: dir,
+    logPath: join(dir, 'w.log'),
+    wallCapMs: 20000,
+    pollMs: 25,
+    watch: (text) => {
+      if (!text.includes('FIRST REASON')) return null;
+      matches += 1;
+      return { reason: 'attestation-absent', detail: `match ${matches}` };
+    },
+  });
+
+  assert.equal(outcome.stopped.reason, 'attestation-absent');
+  assert.equal(outcome.stopped.detail, 'match 1', 'the stop reason was overwritten by a later poll');
+  // The child ignores SIGTERM and keeps living for 400ms at a 25ms poll, so without the latch the
+  // predicate would have matched ~15 more times and signalled the child on each one.
+  assert.equal(matches, 1, `the watch matched ${matches} times — the latch did not hold`);
+});
+
+
+// --- B2: the preflight, COMPOSED and CARRIED --------------------------------------------------
+//
+// `spawnWorker` takes a predicate; `checkAttestation` grades an attestation; neither proves the two
+// were ever joined. This project's named recurring defect is a value computed correctly and carried
+// nowhere (#63, #69, #72, #73), and a preflight module with no caller was exactly that for one
+// commit. So these run through `executeWork` — the path a real run takes — and the criteria come
+// out of `item.mjs`'s own extractor via the injected `gh`, never hand-written. A test asserting
+// against `{id: 'AC1'}` it wrote itself agrees with the extractor only until the extractor changes,
+// and the ids are what the gate keys on.
+
+const AC_BODY =
+  '## Acceptance Criteria\n' +
+  '- retries are uniform across every channel\n' +
+  '- the suite passes under npx vitest run\n';
+
+const ghIssue = (body) => async () =>
+  JSON.stringify({
+    number: 9,
+    title: 'uniform retries',
+    body,
+    url: 'https://github.com/acme/jarvis/issues/9',
+  });
+
+// A worker log whose first turn is an attestation, in the real stream-json shape measured on
+// `.alfred-runs/20260802T142320Z-7/worker.log`: a `thinking` block, then `text`, then a `user`
+// event closing the turn.
+const attestLog = (criteria) =>
+  [
+    JSON.stringify({ type: 'system', subtype: 'init' }),
+    JSON.stringify({
+      type: 'assistant',
+      parent_tool_use_id: null,
+      message: {
+        content: [
+          { type: 'thinking', thinking: 'reading the ticket', signature: 'sig' },
+          { type: 'text', text: '```json\n' + JSON.stringify({ criteria }) + '\n```' },
+        ],
+      },
+    }),
+    JSON.stringify({ type: 'user', message: { content: [] } }),
+  ].join('\n') + '\n';
+
+test('ADDED B2: a CONFABULATED quote stops the worker in flight and refuses the run', async () => {
+  // The mechanism end to end. AC2's quote is not in the body, the watch sees it on the growing log,
+  // and the worker is stopped — before it has done any work. That is the whole argument for reading
+  // the first turn rather than the result: the refusal costs one turn instead of a 25-minute run.
+  const repo = repoWithCommit();
+  let stoppedWith = null;
+
+  const result = await executeWork({
+    ref: '#9',
+    config: CONFIG,
+    repoRoot: repo,
+    runRoot: mktemp('runs'),
+    stamp: '20260802T120000Z',
+    gh: ghIssue(AC_BODY),
+    spawn: stubSpawn((argv, opts) => {
+      const log = attestLog([
+        { id: 'AC1', quote: 'retries are uniform across every channel', confidence: 0.9 },
+        { id: 'AC2', quote: 'I will rewrite the entire retry subsystem from scratch', confidence: 0.9 },
+      ]);
+      // The stub decides nothing. It hands the predicate `executeWork` composed a log and reports
+      // what the predicate said, so what is under test is the composition, not this callback.
+      stoppedWith = opts.watch(log);
+      return { exit: 0, killed: false, signal: 'SIGTERM', stopped: stoppedWith, wall_ms: 4000, log: opts.logPath };
+    }),
+    report: () => null,
+    sync: () => null,
+  });
+
+  assert.equal(result.ok, true, result.error);
+  assert.ok(stoppedWith, 'executeWork armed no watch, so the preflight can never fire');
+  assert.equal(stoppedWith.reason, 'quote-not-in-body');
+  assert.equal(result.preflight.refused, true);
+  assert.equal(result.preflight.reason, 'quote-not-in-body');
+  // The detail names WHICH criterion, because a refusal an operator cannot locate is a refusal they
+  // will route around rather than investigate.
+  assert.match(result.preflight.detail, /AC2/);
+});
+
+test('ADDED B2: a TRUTHFUL attestation is not stopped — the falsifier', async () => {
+  // Without this, a predicate that refused everything would pass the test above and every run would
+  // refuse. `preflight.mjs`'s header names the cost of that: a false refusal teaches the operator to
+  // route around the mechanism, which is worse than not having one.
+  const repo = repoWithCommit();
+  let stoppedWith = 'not called';
+
+  const result = await executeWork({
+    ref: '#9',
+    config: CONFIG,
+    repoRoot: repo,
+    runRoot: mktemp('runs'),
+    stamp: '20260802T120100Z',
+    gh: ghIssue(AC_BODY),
+    spawn: stubSpawn((argv, opts) => {
+      stoppedWith = opts.watch(
+        attestLog([
+          { id: 'AC1', quote: 'retries are uniform across every channel', confidence: 0.9 },
+          { id: 'AC2', quote: 'the suite passes under npx vitest run', confidence: 0.8 },
+        ]),
+      );
+      return { exit: 0, killed: false, signal: null, stopped: null, wall_ms: 5, log: opts.logPath };
+    }),
+    report: () => null,
+    sync: () => null,
+  });
+
+  assert.equal(stoppedWith, null, 'a verbatim attestation was refused');
+  assert.equal(result.preflight.refused, false);
+  assert.equal(result.preflight.reason, null);
+  assert.equal(result.gate.findings.filter((f) => /preflight/i.test(f.detail ?? '')).length, 0);
+
+  // `attested` IS null HERE, NOT 0, and a mutant collapsing the two survived until this line. The
+  // pair with the no-criteria test below is what makes the field mean anything: 0 there is a
+  // MEASUREMENT (nothing was declared, so nothing was attested), null here is an ADMISSION (two
+  // criteria were checked and the count was consumed by the predicate rather than threaded back).
+  // Collapsed to 0, a reader summing `attested` across the sink would count every checked run as
+  // having checked nothing and conclude the mechanism was never armed — absent read as zero, which
+  // is the rule this project keeps re-learning.
+  assert.equal(result.preflight.attested, null, 'a checked run reported a count nobody counted');
+});
+
+test('ADDED B2: an INCOMPLETE first turn is not refused — the worker is still writing', async () => {
+  // The `in_progress` state, and the reason `firstTurnFromWorkerLog` has three states rather than
+  // two. A poll landing 200ms in sees a half-written fence; refusing there would fire on a worker
+  // about to answer correctly. Absent is not wrong — it is unobserved.
+  const repo = repoWithCommit();
+  let verdict = 'not called';
+
+  await executeWork({
+    ref: '#9',
+    config: CONFIG,
+    repoRoot: repo,
+    runRoot: mktemp('runs'),
+    stamp: '20260802T120200Z',
+    gh: ghIssue(AC_BODY),
+    spawn: stubSpawn((argv, opts) => {
+      // A torn fence: the turn has begun, no `user` event has arrived, and the JSON inside is not
+      // yet parseable. Both halves of "still writing" at once.
+      verdict = opts.watch(
+        JSON.stringify({
+          type: 'assistant',
+          parent_tool_use_id: null,
+          message: { content: [{ type: 'text', text: '```json\n{"criteria":[{"id":"AC1",' }] },
+        }) + '\n',
+      );
+      return { exit: 0, killed: false, signal: null, stopped: null, wall_ms: 5, log: opts.logPath };
+    }),
+    report: () => null,
+    sync: () => null,
+  });
+
+  assert.equal(verdict, null, 'a worker still writing its first turn was refused mid-sentence');
+});
+
+test('ADDED B2: an EMPTY log is not refused, but a FINISHED turn of PROSE is', async () => {
+  // Two things on the same predicate, and the pair is the point.
+  //
+  // An empty log is the poll that ran before the child wrote a byte. Every run passes through it, so
+  // refusing there would refuse every run at the first tick, forever.
+  //
+  // A COMPLETE first turn with no fenced block IS a refusal — the worker read the contract and
+  // answered around it — and it is only knowable once the turn is over. That is precisely what the
+  // third state buys, and asserting both here is what stops "never refuses" and "always refuses"
+  // from both passing.
+  //
+  // AND THE CODE IS `attestation-unreadable`, NOT `attestation-absent`. This test asserted the
+  // latter and was wrong about the code rather than the code being wrong — but the frozen set reads
+  // as though the two were distinct ("attested to none of them" versus "answered, but not in a shape
+  // that can be checked"), so the collapse is worth stating. `parseAttestation` falls back to
+  // treating the WHOLE turn as the JSON candidate when it finds no fence, so prose reaches
+  // `JSON.parse`, throws, and comes back `invalid`. That is deliberate there: a worker that writes
+  // `{"criteria": [...]}` with no fence around it has attested, and reading the raw turn is what
+  // catches it. The cost is that "ignored the contract" and "fenced malformed JSON" arrive under one
+  // code. Acceptable — both are refusals, the `detail` distinguishes them for a human — and NOT
+  // papered over by re-classifying here, because a second classifier in run.mjs would be free to
+  // disagree with the first.
+  const repo = repoWithCommit();
+  const seen = {};
+
+  await executeWork({
+    ref: '#9',
+    config: CONFIG,
+    repoRoot: repo,
+    runRoot: mktemp('runs'),
+    stamp: '20260802T120300Z',
+    gh: ghIssue(AC_BODY),
+    spawn: stubSpawn((argv, opts) => {
+      seen.empty = opts.watch('');
+      seen.prose = opts.watch(
+        JSON.stringify({
+          type: 'assistant',
+          parent_tool_use_id: null,
+          message: { content: [{ type: 'text', text: 'Sure, I will get started on this now.' }] },
+        }) +
+          '\n' +
+          JSON.stringify({ type: 'user', message: { content: [] } }) +
+          '\n',
+      );
+      return { exit: 0, killed: false, signal: null, stopped: null, wall_ms: 5, log: opts.logPath };
+    }),
+    report: () => null,
+    sync: () => null,
+  });
+
+  assert.equal(seen.empty, null, 'an empty log refused a worker that had not spoken yet');
+  assert.ok(seen.prose, 'a finished first turn with no attestation was let through');
+  assert.equal(seen.prose.reason, 'attestation-unreadable');
+  assert.match(seen.prose.detail, /could not be parsed as JSON/);
+});
+
+test('ADDED B2: an EMPTY text block on a finished turn refuses as ABSENT', async () => {
+  // The only input that reaches `preflightWatch`'s `absent` branch, and without this test that branch
+  // is unreachable-looking code — the shape [[feedback-unfalsifiable-conjunct]] names, where a green
+  // suite means the guard cannot fire rather than that it works.
+  //
+  // The path is narrow and worth writing down: `firstTurnFromWorkerLog` returns `absent` whenever it
+  // collected no text parts, so a `user`-terminated turn with NO text blocks never reaches
+  // `complete`. The one way to be complete AND empty is a text block whose `text` is the empty
+  // string — the turn exists, the worker committed to nothing in it.
+  //
+  // UNMEASURED AS A VENDOR SHAPE. The real 301-line log has no empty text block. So this is a
+  // synthetic fixture, kept for the same reason as transcript.test.mjs's three: the branch is one
+  // line, the alternative is deleting it and having the next empty block arrive at `checkAttestation`
+  // as a JSON parse error blamed on the worker's formatting.
+  const repo = repoWithCommit();
+  let verdict = null;
+
+  await executeWork({
+    ref: '#9',
+    config: CONFIG,
+    repoRoot: repo,
+    runRoot: mktemp('runs'),
+    stamp: '20260802T120320Z',
+    gh: ghIssue(AC_BODY),
+    spawn: stubSpawn((argv, opts) => {
+      verdict = opts.watch(
+        JSON.stringify({
+          type: 'assistant',
+          parent_tool_use_id: null,
+          message: { content: [{ type: 'text', text: '' }] },
+        }) +
+          '\n' +
+          JSON.stringify({ type: 'user', message: { content: [] } }) +
+          '\n',
+      );
+      return { exit: 0, killed: false, signal: null, stopped: null, wall_ms: 5, log: opts.logPath };
+    }),
+    report: () => null,
+    sync: () => null,
+  });
+
+  assert.ok(verdict, 'a finished turn that committed to nothing was let through');
+  assert.equal(verdict.reason, 'attestation-absent');
+});
+
+test('ADDED B2: every reason the runner can emit is a key in the FROZEN refusal set', async () => {
+  // A code outside `PREFLIGHT_REFUSALS` would not throw. It would land in the record, and a reader
+  // grouping runs by refusal reason would have a bucket matching no documented reason — a value
+  // computed correctly and carried into a shape nothing can read. The first draft of `preflightWatch`
+  // did exactly this, inventing `attestation-unparseable` for the invalid branch.
+  const repo = repoWithCommit();
+  const reasons = [];
+
+  await executeWork({
+    ref: '#9',
+    config: CONFIG,
+    repoRoot: repo,
+    runRoot: mktemp('runs'),
+    stamp: '20260802T120350Z',
+    gh: ghIssue(AC_BODY),
+    spawn: stubSpawn((argv, opts) => {
+      const collect = (log) => {
+        const v = opts.watch(log);
+        if (v) reasons.push(v.reason);
+      };
+      // One log per branch the predicate can refuse on.
+      collect(attestLog([{ id: 'AC1', quote: 'not in the body at all whatsoever', confidence: 0.9 }]));
+      collect(
+        JSON.stringify({
+          type: 'assistant',
+          parent_tool_use_id: null,
+          message: { content: [{ type: 'text', text: '```json\nthis is not json\n```' }] },
+        }) +
+          '\n' +
+          JSON.stringify({ type: 'user', message: { content: [] } }) +
+          '\n',
+      );
+      collect(
+        JSON.stringify({
+          type: 'assistant',
+          parent_tool_use_id: null,
+          message: { content: [{ type: 'text', text: 'no fence here' }] },
+        }) +
+          '\n' +
+          JSON.stringify({ type: 'user', message: { content: [] } }) +
+          '\n',
+      );
+      collect(attestLog([{ id: 'AC1', quote: 'retries are uniform across every channel', confidence: 0.1 }]));
+      collect(attestLog([{ id: 'AC1', quote: 'retries are uniform', confidence: 0.9 }]));
+      return { exit: 0, killed: false, signal: null, stopped: null, wall_ms: 5, log: opts.logPath };
+    }),
+    report: () => null,
+    sync: () => null,
+  });
+
+  assert.ok(reasons.length >= 4, `only ${reasons.length} refusal branches were reached: ${reasons}`);
+  for (const reason of reasons) {
+    assert.ok(
+      Object.prototype.hasOwnProperty.call(PREFLIGHT_REFUSALS, reason),
+      `"${reason}" is not a key in PREFLIGHT_REFUSALS — an undocumented code reached the record`,
+    );
+  }
+  // The invalid-JSON branch specifically, since that is the one that was wrong.
+  assert.ok(reasons.includes('attestation-unreadable'), `no unreadable refusal among ${reasons}`);
+});
+
+test('ADDED B2: NO criteria means NO watch is armed at all', async () => {
+  // `alfred work "fix the flaky test"` is a supported invocation and `item.mjs` refuses to invent
+  // criteria for it. There is nothing to attest to, so arming a poll would read a growing log every
+  // two seconds for a whole run to reach a conclusion that was foregone before the spawn.
+  const repo = repoWithCommit();
+  let armed = 'unset';
+
+  const result = await executeWork({
+    ref: 'fix the flaky test',
+    config: CONFIG,
+    repoRoot: repo,
+    runRoot: mktemp('runs'),
+    stamp: '20260802T120400Z',
+    spawn: stubSpawn((argv, opts) => {
+      armed = opts.watch ?? null;
+      return { exit: 0, killed: false, signal: null, stopped: null, wall_ms: 5, log: opts.logPath };
+    }),
+    report: () => null,
+    sync: () => null,
+  });
+
+  assert.deepEqual(result.item.acceptance_criteria, [], 'the prompt path invented criteria');
+  assert.equal(armed, null, 'a watch was armed for an item with no criteria to check');
+  assert.equal(result.preflight.refused, false);
+  // ZERO IS A MEASUREMENT HERE, and null is not. Nothing was declared, so nothing was attested —
+  // that is known, unlike the count on a run that WAS checked, where the verdict was consumed by
+  // the predicate and `null` correctly says "not observed".
+  assert.equal(result.preflight.attested, 0, 'zero attested must be recorded, not omitted');
+});
+
+test('ADDED B2: a preflight refusal raises a gate finding, so the verdict is not PASS', async () => {
+  // §2.8's recorded failure, at a new site. A worker stopped at 4 seconds has touched nothing — and
+  // from the TREE's side that is indistinguishable from a worker that finished and correctly changed
+  // nothing, which is a clean diff, zero findings, and `pass = findings.length === 0` is TRUE. The
+  // gate cannot see the refusal; the runner has to tell it, exactly as it already does for a kill.
+  const repo = repoWithCommit();
+
+  const result = await executeWork({
+    ref: '#9',
+    config: CONFIG,
+    repoRoot: repo,
+    runRoot: mktemp('runs'),
+    stamp: '20260802T120500Z',
+    gh: ghIssue(AC_BODY),
+    spawn: stubSpawn((argv, opts) => {
+      const stopped = opts.watch(attestLog([{ id: 'AC1', quote: 'a quote I invented wholesale', confidence: 0.9 }]));
+      return { exit: 0, killed: false, signal: 'SIGTERM', stopped, wall_ms: 4000, log: opts.logPath };
+    }),
+    // A gate that would otherwise PASS: no findings at all. Without the injection the ac_unmapped
+    // findings would mask the one under test, and the test would pass for the wrong reason.
+    gate: () => ({ pass: true, findings: [], unverified: [], graded_criteria: 0, ungraded_reason: null, gate_sha: 'x' }),
+    report: () => null,
+    sync: () => null,
+  });
+
+  assert.equal(result.gate.pass, false, 'a refused run was graded PASS');
+  const finding = result.gate.findings.find((f) => f.rule === 'check_failed');
+  assert.ok(finding, 'the refusal raised no finding');
+  assert.match(finding.detail, /preflight/i);
+  assert.match(finding.detail, /quote-not-in-body/);
+});
+
+test('ADDED B2: the preflight verdict reaches the RECORD, not just the result', async () => {
+  // The computed-and-discarded falsifier. `result.preflight` being right proves nothing about what a
+  // reader sees a week from now, and the record is the only thing that outlives the console line.
+  // Asserted on the arguments the reporter is actually called with.
+  const repo = repoWithCommit();
+  let reported = null;
+
+  await executeWork({
+    ref: '#9',
+    config: CONFIG,
+    repoRoot: repo,
+    runRoot: mktemp('runs'),
+    stamp: '20260802T120600Z',
+    gh: ghIssue(AC_BODY),
+    spawn: stubSpawn((argv, opts) => {
+      const stopped = opts.watch(attestLog([{ id: 'AC1', quote: 'not in the body either, plainly', confidence: 0.9 }]));
+      return { exit: 0, killed: false, signal: 'SIGTERM', stopped, wall_ms: 4000, log: opts.logPath };
+    }),
+    report: (args) => {
+      reported = args;
+      return { ok: true, gaps: [] };
+    },
+    sync: () => null,
+  });
+
+  assert.ok(reported, 'the reporter was never called');
+  assert.ok(reported.preflight, 'the record was built without the preflight verdict');
+  assert.equal(reported.preflight.refused, true);
+  assert.equal(reported.preflight.reason, 'quote-not-in-body');
+});
+
+test('ADDED B2: a quote is checked against the TICKET BODY, not against the prompt', async () => {
+  // The subtlest way this could be wrong and still look right. If the predicate were handed the
+  // composed prompt instead of `item.body`, then Alfred's own contract text would become a place a
+  // quote could be found — and a worker echoing the contract's example, or quoting the standing
+  // rules, would attest successfully to something the ticket never said.
+  const repo = repoWithCommit();
+  let stoppedWith = null;
+
+  await executeWork({
+    ref: '#9',
+    config: CONFIG,
+    repoRoot: repo,
+    runRoot: mktemp('runs'),
+    stamp: '20260802T120700Z',
+    gh: ghIssue(AC_BODY),
+    spawn: stubSpawn((argv, opts) => {
+      // A phrase that IS in the prompt Alfred composed and is nowhere in the issue body. THIS LINE
+      // WAS WRONG ONCE and the mutant caught it: the first version quoted the off-limits preamble,
+      // but this test's CONFIG declares `off_limits: []`, so that block is never emitted and the
+      // phrase was in neither the body NOR the prompt — the test passed while proving nothing, and
+      // swapping `item.body` for the composed prompt did not fail it. The seat brief below is
+      // unconditional in `composeWorkerPrompt`, so it is genuinely present in the prompt and
+      // genuinely absent from the body, which is what makes the two sources distinguishable.
+      stoppedWith = opts.watch(
+        attestLog([
+          { id: 'AC1', quote: 'You may delegate to a subagent for part of this work', confidence: 0.9 },
+        ]),
+      );
+      return { exit: 0, killed: false, signal: 'SIGTERM', stopped: stoppedWith, wall_ms: 100, log: opts.logPath };
+    }),
+    report: () => null,
+    sync: () => null,
+  });
+
+  assert.ok(stoppedWith, "a quote lifted from Alfred's own prompt was accepted as a quote of the ticket");
+  assert.equal(stoppedWith.reason, 'quote-not-in-body');
 });

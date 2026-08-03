@@ -367,6 +367,21 @@ export async function main(
       `${worker.killed ? ' KILLED at the wall cap' : ''} in ${worker.wall_ms ?? '?'}ms`,
   );
   if (worker.log) out(`worker log: ${worker.log}`);
+
+  // THE PREFLIGHT, SAID OUT LOUD, and to stderr because it is a refusal. Without this the line above
+  // reads `worker: exit 0 (SIGTERM) in 4000ms` — a healthy-looking short run — and the only trace of
+  // WHY is a `check_failed` finding among however many others the gate raised. An operator seeing a
+  // four-second run and no stated cause reasonably concludes the worker crashed, and debugs the
+  // wrong thing.
+  //
+  // ONLY WHEN REFUSED. A line on every run saying the preflight found nothing would be asserting the
+  // attestation was TRUE, which a substring check cannot establish — it can only ever refuse. See
+  // lib/preflight.mjs's header on why nothing in this path is named `ok`, `pass`, or `verified`.
+  if (result.preflight?.refused) {
+    err(`preflight REFUSED this run (${result.preflight.reason}): ${result.preflight.detail ?? 'no detail'}`);
+    err('the worker was stopped in its first turn. Nothing it claimed afterwards was checked, because');
+    err('there was nothing afterwards — this is a refusal that cost one turn, not a graded run.');
+  }
   if (result.observed_error) {
     // Said out loud. An unobserved tree means the evidence rules returned without a verdict
     // (#63), so the gate's silence on them is not a clean bill of health.

@@ -683,3 +683,166 @@ test('A4: telemetry_not_configured is quiet — an unconfigured sink is not a fa
   reportSync(null, { out: (l) => printed.push(l) });
   assert.deepEqual(printed, []);
 });
+
+// --- B2: the preflight, through the ENTRYPOINT -------------------------------------------------
+//
+// run.test.mjs already asserts the composition with an injected spawn. This is the seam that
+// injection cannot see, and [[feedback-mocked-seam-blindness]] is why it is written: the exit code
+// is decided in `main`, printed by a real process, and read by whatever schedules a tick. Every
+// piece here is real — a real `git` repo, a real `gh` on PATH, a real child writing a real
+// stream-json log, and `bin/alfred` launched as a subprocess.
+//
+// A REFUSAL IS EXIT 1, NOT 2, and that is the whole point of the test. Exit 2 means "refused before
+// spending" — a dirty tree, an unresolvable ref, a bad flag — and a scheduler is free to retry it.
+// A preflight refusal happens AFTER the spawn: money was spent, a worker really ran, and it was
+// stopped for what it said. Coded 2, an unattended loop would retry it at full price every tick.
+
+// A `gh` on PATH that answers `issue view` with a body carrying real acceptance criteria. The
+// criteria are EXTRACTED by lib/item.mjs from this body rather than written here, for the reason
+// run.test.mjs gives: the AC1..ACn ids are that module's, and a hand-written id agrees with it only
+// until it changes.
+function ghStub(body) {
+  const dir = mktemp('ghbin');
+  const path = join(dir, 'gh');
+  writeFileSync(
+    path,
+    [
+      '#!/bin/sh',
+      'printf "%s\\n" "$@" >> "$0.argv"',
+      `cat <<'JSON'`,
+      JSON.stringify({
+        number: 9,
+        title: 'uniform retries',
+        body,
+        url: 'https://github.com/acme/jarvis/issues/9',
+      }),
+      'JSON',
+    ].join('\n'),
+  );
+  chmodSync(path, 0o755);
+  return { dir, path, argvFile: `${path}.argv` };
+}
+
+const AC_ISSUE_BODY =
+  '## Acceptance Criteria\n' +
+  '- retries are uniform across every channel\n' +
+  '- the suite passes under npx vitest run\n';
+
+// A worker that writes a stream-json first turn and then SLEEPS, so the poll has time to read the
+// log and the SIGTERM has something to land on. `--session-id` is honoured by ignoring it: the stub
+// is not the CLI, and what is under test is Alfred's reaction to the log, not the CLI's argv.
+//
+// THE TURN GOES IN A SIDECAR FILE AND THE STUB `cat`s IT, and the first draft did not — it inlined
+// each line as `printf '%s\n' "<json>"`. `JSON.stringify` produces a DOUBLE-quoted shell string, and
+// backticks are live command substitution inside double quotes in sh, so ```json ran as a command,
+// `jsonn{"criteria":...` came back "command not found", and the text block reached the log EMPTY.
+// The run then refused as `attestation-absent`, which is the correct verdict on the log the stub
+// actually wrote — a passing-looking refusal for entirely the wrong reason, and the falsifier below
+// is what exposed it. A `cat` of a file written by Node cannot be reinterpreted by a shell.
+//
+// `cat` also solves flushing for free: the stub does not need to `sync`, because `cat` is a separate
+// process that exits, and the bytes are on disk before `sleep` begins. Without that the turn can sit
+// in a builtin's stdio buffer for the whole sleep and the poll reads nothing.
+function attestingWorkerStub({ criteria, sleep = 30 }) {
+  const dir = mktemp('bin');
+  const path = join(dir, 'fake-claude');
+  // The real stream-json shape, same as run.test.mjs's `attestLog`: thinking, then text, then a
+  // `user` event closing the turn. `spawnWorker` redirects the child's STDOUT to the log, so the
+  // stub does not need to know the log path.
+  const turn =
+    [
+      JSON.stringify({ type: 'system', subtype: 'init' }),
+      JSON.stringify({
+        type: 'assistant',
+        parent_tool_use_id: null,
+        message: {
+          content: [
+            { type: 'thinking', thinking: 'reading the ticket', signature: 'sig' },
+            { type: 'text', text: '```json\n' + JSON.stringify({ criteria }) + '\n```' },
+          ],
+        },
+      }),
+      JSON.stringify({ type: 'user', message: { content: [] } }),
+    ].join('\n') + '\n';
+  writeFileSync(`${path}.turn`, turn);
+  writeFileSync(
+    path,
+    [
+      '#!/bin/sh',
+      'printf "%s\\n" "$@" > "$0.argv"',
+      'cat "$0.turn"',
+      `sleep ${sleep}`,
+      'exit 0',
+    ].join('\n'),
+  );
+  chmodSync(path, 0o755);
+  return { path, argvFile: `${path}.argv` };
+}
+
+test('ADDED B2: a confabulated quote exits 1 through the real entrypoint, and says why', () => {
+  const gh = ghStub(AC_ISSUE_BODY);
+  const dir = repo();
+  // AC1 is verbatim from the body; AC2 is invented. One true quote and one false one, so a
+  // mechanism that refused on ANY attestation could not be told from one that reads the quotes.
+  const stub = attestingWorkerStub({
+    criteria: [
+      { id: 'AC1', quote: 'retries are uniform across every channel', confidence: 0.9 },
+      { id: 'AC2', quote: 'I will rewrite the whole retry subsystem from scratch', confidence: 0.9 },
+    ],
+  });
+
+  const started = Date.now();
+  const r = spawnSync(BIN, ['work', '#9', '--worker-bin', stub.path, '--run-root', mktemp('runs')], {
+    cwd: dir,
+    encoding: 'utf8',
+    env: { ...process.env, PATH: `${gh.dir}:${process.env.PATH}` },
+  });
+  const elapsed = Date.now() - started;
+
+  // EXIT 1. Not 0 (a four-second run that touched nothing is a clean diff, which is a PASS to the
+  // gate) and not 2 (the worker ran; this is not a pre-spawn refusal).
+  assert.equal(r.status, EXIT.gate_failed, `expected gate_failed, got ${r.status}\n${r.stdout}\n${r.stderr}`);
+  assert.notEqual(r.status, EXIT.refused);
+
+  // THE WORKER REALLY LAUNCHED. Without this the test passes identically if the spawn no-oped and
+  // the refusal came from somewhere else entirely.
+  assert.ok(statSync(stub.argvFile).size > 0, 'the worker never launched, so this is not a preflight refusal');
+
+  // AND IT WAS STOPPED EARLY. The stub sleeps 30s; the wall cap is 25 MINUTES. Finishing well under
+  // the sleep is the only proof that something killed it rather than that it ran to completion —
+  // and it is the entire value proposition, since the alternative is paying for the full run.
+  assert.ok(elapsed < 25_000, `the run took ${elapsed}ms — the worker was not stopped in flight`);
+
+  // The operator can see the cause without opening the record.
+  assert.match(r.stderr, /preflight REFUSED/i);
+  assert.match(r.stderr, /quote-not-in-body/);
+  assert.match(r.stderr, /AC2/);
+});
+
+test('ADDED B2: a truthful attestation is NOT stopped through the real entrypoint', () => {
+  // The falsifier for the above, and the one that matters most here: if the watch fired on every
+  // run, the test above would pass and Alfred would refuse every ticket it was ever given. A short
+  // sleep because this worker is expected to run to completion.
+  const gh = ghStub(AC_ISSUE_BODY);
+  const dir = repo();
+  const stub = attestingWorkerStub({
+    criteria: [
+      { id: 'AC1', quote: 'retries are uniform across every channel', confidence: 0.9 },
+      { id: 'AC2', quote: 'the suite passes under npx vitest run', confidence: 0.85 },
+    ],
+    sleep: 3,
+  });
+
+  const r = spawnSync(BIN, ['work', '#9', '--worker-bin', stub.path, '--run-root', mktemp('runs')], {
+    cwd: dir,
+    encoding: 'utf8',
+    env: { ...process.env, PATH: `${gh.dir}:${process.env.PATH}` },
+  });
+
+  assert.ok(statSync(stub.argvFile).size > 0, 'the worker never launched');
+  assert.doesNotMatch(r.stderr, /preflight REFUSED/i, 'a verbatim attestation was refused');
+  // The exit code is NOT asserted to be 0. This worker attested honestly and then did no work, so
+  // `ac_unmapped` fires and the gate correctly fails it — asserting 0 here would require a stub
+  // that also delivers, which would be testing the gate rather than the preflight. What is asserted
+  // is the thing under test: no refusal, and the run was allowed to finish.
+});
