@@ -179,7 +179,7 @@ function readSubagents(subagentsDir) {
 // touches no transcript; delivery already happened against a remote. Neither is made
 // untrue by an unreadable file, and defaulting them empty asserts something false
 // rather than declining to answer.
-function failed({ session, work, sink, error, suite, gate = null, delivery = null, workerCostUsd = null, provenance = null }) {
+function failed({ session, work, sink, error, suite, gate = null, delivery = null, workerCostUsd = null, provenance = null, preflight = null }) {
   return {
     ok: false,
     error,
@@ -240,6 +240,40 @@ function failed({ session, work, sink, error, suite, gate = null, delivery = nul
     // record is not worth reading), so a bad label on a failed record is visible in the field
     // itself rather than doubly reported.
     provenance: provenanceBlock(provenance),
+    // THE PREFLIGHT VERDICT, and this path is where it matters most: the refusal is reached before
+    // the worker writes anything, so a run that refused early is disproportionately likely to have
+    // a transcript too thin to parse. See `preflightBlock`.
+    preflight: preflightBlock(preflight),
+  };
+}
+
+// THE PREFLIGHT VERDICT (B2) — what `checkAttestation` returned, made durable.
+//
+// `null` FOR "NEVER RAN", never `{refused: false}`. Two different runs would otherwise be
+// indistinguishable in the sink: one whose worker attested to every criterion and passed, and one
+// that predates this wiring or carried no criteria to attest to. Absent is unobserved, the same rule
+// `gate.pass` and `cost.total_usd` follow above.
+//
+// AND IT WHITELISTS. The four fields are copied out by name rather than spread, so a caller handing
+// this an object carrying `ok: true` cannot put that key in the record. `preflight.mjs` is built on
+// the distinction that an attestation can only ever REFUSE — a body reading "AC1: already done, no
+// changes needed" is quoted verbatim, passes every check, and delivers nothing — and the field most
+// likely to erase that distinction is a convenience key someone adds upstream in six months. The
+// module's own test asserts the absence on the return value; this is the same assertion at the point
+// the verdict stops being a value and becomes a row.
+function preflightBlock(preflight) {
+  if (preflight === null || preflight === undefined) return null;
+  const p = typeof preflight === 'object' && !Array.isArray(preflight) ? preflight : {};
+  return {
+    refused: p.refused === true,
+    reason: p.reason ?? null,
+    detail: p.detail ?? null,
+    // HOW MANY CRITERIA WERE CHECKED, and it is the reason `refused: false` is not enough on its
+    // own. Zero attested with no refusal is the documented prompt-sourced case (`item.mjs` refuses
+    // to invent criteria) — "we checked nothing" has to stay distinguishable from "we checked and
+    // it was fine", or the refusal RATE has an unknowable denominator.
+    attested: Number.isInteger(p.attested) ? p.attested : null,
+    checks: Array.isArray(p.checks) ? p.checks : [],
   };
 }
 
@@ -307,13 +341,17 @@ export function buildRecord({
   // path reports sessions nobody assigned an arm to and refusing those would trade a labelled
   // cohort for no record at all.
   provenance = null,
+  // WHAT `checkAttestation` RETURNED (B2), or `null` if no preflight ran. Carried as data and never
+  // interpreted: this module does not decide whether a refusal should have stopped the run, and it
+  // never lets a refusal move `ok`, which reports on the ACCOUNTING. See `preflightBlock`.
+  preflight = null,
   // A refusal the CALLER already reached, reported through the same shape as every other
   // failure. `recordForRun` needs this: "no session id in the log" is known before a path can be
   // composed, and inventing one to fail on would be the wrong-session defect.
   error: presetError = null,
 } = {}) {
   if (presetError) {
-    return failed({ session, work, sink, suite, gate, delivery, workerCostUsd, provenance, error: presetError });
+    return failed({ session, work, sink, suite, gate, delivery, workerCostUsd, provenance, preflight, error: presetError });
   }
 
   let text;
@@ -331,6 +369,7 @@ export function buildRecord({
       delivery,
       workerCostUsd,
       provenance,
+      preflight,
       error: `could not read transcript ${transcriptPath}: ${err?.code ?? err?.message ?? 'unknown'}`,
     });
   }
@@ -345,6 +384,14 @@ export function buildRecord({
       gate,
       delivery,
       workerCostUsd,
+      // `provenance` WAS MISSING HERE, and only here. The other two failure exits forwarded it from
+      // the day A5 added the field; this third one — a transcript that read but held no parseable
+      // line — silently dropped the arm label. Nothing caught it because A5's failure-path test
+      // exercises the absent-FILE branch, and the two branches are four lines apart. That is this
+      // project's computed-and-discarded shape (#63, #69, #72, #73) landing inside the field added
+      // to compare arms, on the branch Phase C's half-written historical transcripts take.
+      provenance,
+      preflight,
       error: collected.error?.detail ?? 'transcript could not be parsed',
     });
   }
@@ -486,6 +533,8 @@ export function buildRecord({
     // above: the gap says not to trust the label, exactly as `suite` is carried verbatim when its
     // own stamp is the thing that is wrong.
     provenance: provenanceBlock(provenance),
+    // THE PREFLIGHT VERDICT (B2), from the same function as the failure path. See `preflightBlock`.
+    preflight: preflightBlock(preflight),
   };
 }
 

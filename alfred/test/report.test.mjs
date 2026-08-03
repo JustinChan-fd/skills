@@ -1125,3 +1125,188 @@ test('ADDED A5: recordForRun passes provenance through — the path a real run t
   assert.equal(record.session.repo, 'jarvis');
   rmSync(dir, { recursive: true, force: true });
 });
+
+// --- B2: the preflight verdict, and the third failure branch that dropped provenance ---
+//
+// TWO SEPARATE THINGS ARE PINNED HERE, found while wiring `lib/preflight.mjs` into `run.mjs`.
+//
+// FIRST, A REAL DEFECT. `buildRecord` has THREE failure exits, not two: a preset error, an
+// unreadable file, and a transcript that read but would not parse. The first two forwarded
+// `provenance`; the third did not, so an arm label survived a missing transcript and was silently
+// dropped by a corrupt one. A5 added the field and a test for "the FAILURE path carries provenance"
+// — singular, against the absent-file branch — and the parse branch was never exercised at all.
+// This is the computed-and-discarded shape (#63, #69, #72, #73) inside the field added to measure
+// arms, on the branch Phase C's backfill of half-written historical transcripts is most likely to
+// take.
+//
+// SECOND, A NEW FIELD. A preflight refusal is a verdict about the WORKER on this attempt, reached
+// before the work — see `PREFLIGHT_REFUSALS`' header on why it is a separate set from
+// `blocked.mjs`'s REASONS. It cannot go in `gate`: the gate is the only authority on whether work
+// happened, and `preflight.mjs` deliberately returns no `ok`/`pass`/`verified` key precisely so it
+// can never be read as granting one. Folding it into `gate.findings` would let "the worker misread
+// the ticket" and "the tests fail" aggregate as one number.
+
+test('ADDED B2: the UNPARSEABLE-transcript branch carries provenance too', () => {
+  // The third exit. A file that exists, reads, and holds no parseable line — the shape a
+  // half-written or truncated transcript takes, which is exactly Phase C's input.
+  const dir = tmp();
+  const bad = join(dir, 'corrupt.jsonl');
+  writeFileSync(bad, 'this is not jsonl\nnor is this\n');
+
+  const record = buildRecord({
+    transcriptPath: bad,
+    session: { id: 'sess-corrupt' },
+    provenance: { arm: 'single-agent', backfilled: true, notes: 'rescued from /tmp half-written' },
+  });
+
+  assert.equal(record.ok, false);
+  assert.equal(record.provenance.arm, 'single-agent', 'the arm survived an absent file; it must survive a corrupt one');
+  assert.equal(record.provenance.backfilled, true);
+  assert.match(record.provenance.notes, /half-written/);
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test('ADDED B2: the record carries a PREFLIGHT block, and no preflight verdict is null not clean', () => {
+  // `null` and not `{refused: false}`. A run whose preflight never ran — every run before this
+  // wiring, and every prompt-sourced item with no criteria to attest to — must not read as a run
+  // that was checked and found clean. Same absent-is-not-zero rule as `gate.pass` and
+  // `cost.total_usd` above.
+  const record = buildRecord({ transcriptPath: ARM0, session: { id: 'sess-nopreflight' } });
+  assert.equal(record.preflight, null);
+});
+
+test('ADDED B2: a preflight REFUSAL is carried with its reason, detail and checks', () => {
+  const record = buildRecord({
+    transcriptPath: ARM0,
+    session: { id: 'sess-refused' },
+    preflight: {
+      refused: true,
+      reason: 'quote-not-in-body',
+      detail: "AC2's quote does not appear in the ticket body",
+      attested: 1,
+      checks: [{ id: 'AC1', quote_in_body: true, confidence: 0.9, belongs: true }],
+    },
+  });
+
+  assert.equal(record.preflight.refused, true);
+  assert.equal(record.preflight.reason, 'quote-not-in-body');
+  assert.match(record.preflight.detail, /does not appear/);
+  assert.equal(record.preflight.attested, 1);
+  assert.equal(record.preflight.checks.length, 1);
+});
+
+test('ADDED B2: the preflight block NEVER carries an ok/pass/verified key', () => {
+  // `preflight.mjs`'s founding distinction, enforced at the point the verdict becomes durable.
+  // A ticket body reading "AC1: already done, no changes needed" is quoted verbatim and truthfully,
+  // every check passes, and zero work happens — so a record field a reader could mistake for a
+  // verdict on the WORK would make the sink assert something no mechanical check can know. The
+  // module's own test asserts this on the return value; this asserts it survives serialisation.
+  const record = buildRecord({
+    transcriptPath: ARM0,
+    session: { id: 'sess-clean' },
+    preflight: { refused: false, reason: null, detail: null, attested: 3, checks: [], ok: true, pass: true, verified: true },
+  });
+
+  assert.equal(record.preflight.refused, false);
+  assert.equal(record.preflight.attested, 3);
+  for (const forbidden of ['ok', 'pass', 'verified']) {
+    assert.equal(
+      Object.hasOwn(record.preflight, forbidden),
+      false,
+      `preflight must not carry \`${forbidden}\` — even when a caller supplies it`,
+    );
+  }
+});
+
+test('ADDED B2: the FAILURE paths carry the preflight verdict as well', () => {
+  // The refusal happens BEFORE the transcript is written, so the run most likely to have a
+  // preflight verdict worth reading is a run whose transcript is a stub. A field present on the
+  // success path and absent on the failure path is one every reader has to guard — the rule
+  // `gate`, `delivery`, `suite` and `provenance` already follow here.
+  const preflight = { refused: true, reason: 'low-confidence', detail: 'AC1 (0.2) scored below 0.6', attested: 1, checks: [] };
+
+  const absent = buildRecord({
+    transcriptPath: join(tmpdir(), 'alfred-report-definitely-absent-preflight.jsonl'),
+    session: { id: 'sess-fail-1' },
+    preflight,
+  });
+  assert.equal(absent.ok, false);
+  assert.equal(absent.preflight.reason, 'low-confidence');
+
+  const dir = tmp();
+  const bad = join(dir, 'corrupt.jsonl');
+  writeFileSync(bad, 'not jsonl at all\n');
+  const corrupt = buildRecord({ transcriptPath: bad, session: { id: 'sess-fail-2' }, preflight });
+  assert.equal(corrupt.ok, false);
+  assert.equal(corrupt.preflight.reason, 'low-confidence');
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test('ADDED B2: recordForRun passes the preflight verdict through — the path a real run takes', () => {
+  // Same reason the A5 test above exists: `recordForRun` rebuilds its own argument object, and a
+  // field `buildRecord` accepts but `recordForRun` drops is invisible to every test that calls
+  // `buildRecord` directly. That is the defect this file has now found twice.
+  const dir = tmp();
+  const id = 'pref-1111-2222-3333-bbbbbbbbbbbb';
+  const projectDir = join(dir, '.claude', 'projects', realpathSync(dir).replace(/[^A-Za-z0-9]/g, '-'));
+  mkdirSync(projectDir, { recursive: true });
+  writeFileSync(
+    join(projectDir, `${id}.jsonl`),
+    JSON.stringify({
+      type: 'assistant',
+      timestamp: '2026-08-01T00:00:00.000Z',
+      message: { model: 'claude-sonnet-5', id: 'm1', usage: { input_tokens: 10 } },
+    }) + '\n',
+  );
+
+  const record = recordForRun({
+    workerLog: JSON.stringify({ type: 'result', session_id: id }),
+    cwd: dir,
+    home: dir,
+    session: { id },
+    preflight: { refused: true, reason: 'criteria-unaddressed', detail: 'does not address AC3', attested: 2, checks: [] },
+  });
+
+  assert.equal(record.ok, true, `record failed: ${record.error}`);
+  assert.equal(record.preflight.reason, 'criteria-unaddressed');
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test('ADDED B2: an unreadable preflight verdict does not inflate the refusal count', () => {
+  // TWO RULES, both of which a mutant walked through.
+  //
+  // `refused` IS `=== true`, NOT TRUTHY. The only consumer of this field is aggregation — "how
+  // often does the preflight refuse, and why" — and `!!` would let any truthy garbage a future
+  // caller hands in count as a refusal. That is the denominator asymmetry this project has already
+  // been bitten by: a gate over N sources has to count DECLARED values, never coerced ones. The
+  // decision to stop a run is made from `checkAttestation`'s live return value in `run.mjs`, not
+  // from this block, so strictness here costs nothing and protects the only thing the field is for.
+  //
+  // `attested` IS `null` WHEN UNREADABLE, NOT `0`. `0` is a real and meaningful value — the
+  // prompt-sourced item with no criteria to attest to — so defaulting a missing count to it would
+  // make "we could not tell how many were checked" aggregate as "we checked none", and the refusal
+  // rate would have a denominator that silently absorbed its own failures.
+  const record = buildRecord({
+    transcriptPath: ARM0,
+    session: { id: 'sess-garbage' },
+    preflight: { refused: 'no', reason: null, detail: null, attested: '3' },
+  });
+
+  assert.equal(record.preflight.refused, false, "the string 'no' is not a refusal");
+  assert.equal(record.preflight.attested, null, "the string '3' is not a count");
+  assert.deepEqual(record.preflight.checks, [], 'a missing checks array is empty, not undefined');
+});
+
+test('ADDED B2: attested 0 with no refusal is carried as 0 — the falsifier for the null above', () => {
+  // Without this, `attested` could be hardwired to `null` and the test above would still pass.
+  // Zero is the documented prompt-sourced case: `item.mjs` refuses to invent acceptance criteria
+  // (its founding falsifier), so `alfred work "fix the flaky test"` legitimately checks nothing and
+  // must stay distinguishable from a run whose count could not be read.
+  const record = buildRecord({
+    transcriptPath: ARM0,
+    session: { id: 'sess-zero' },
+    preflight: { refused: false, reason: null, detail: null, attested: 0, checks: [] },
+  });
+  assert.equal(record.preflight.attested, 0);
+  assert.equal(record.preflight.refused, false);
+});
