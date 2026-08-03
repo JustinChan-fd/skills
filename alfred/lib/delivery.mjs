@@ -96,7 +96,7 @@ async function defaultGh(args, { cwd } = {}) {
 // wrong with this", and a number does not answer it. `unverified` is listed separately because it
 // is the honest channel — §5 rule 2: it does not fail the run, and it is precisely what a human
 // needs to look at.
-export function prBody({ item, gate, runId, recordPath, preflight } = {}) {
+export function prBody({ item, gate, runId, recordPath, preflight, config = null } = {}) {
   const lines = [
     `Alfred ran on \`${item?.id ?? 'unknown'}\`${item?.url ? ` (${item.url})` : ''}.`,
     '',
@@ -135,6 +135,33 @@ export function prBody({ item, gate, runId, recordPath, preflight } = {}) {
       '',
       'The worker was stopped in its first turn, so the diff below is whatever existed before it',
       'was stopped — which is usually nothing.',
+      '',
+    );
+  }
+
+  // HOW TO VERIFY, FROM COMMANDS THAT REALLY RAN. Ported in spirit from the operator's
+  // `push-branch` skill, whose QA-notes rule is the one genuinely good convention it has that this
+  // body lacked: give a reviewer a concrete path to type, never a prose gesture at a "page" or a
+  // "flow". Its exact rule is "use actual URLs: `/configuration/rating-classifications`, not
+  // 'Rating Classifications Page'".
+  //
+  // WHAT IS DELIBERATELY NOT DONE HERE, and it is the whole reason this is six lines instead of a
+  // numbered manual-test script like the skill's. That skill has a MODEL author the steps, which
+  // for a human-driven PR is fine — the human knows what they built. Alfred does not: `grade()`
+  // returns `pass`/`findings`/`unverified` and NOT the ac_map's per-criterion commands, so this
+  // function has no grounded source for "step 1, navigate to X". Generating them from the ticket
+  // text would be inventing verification steps for a diff nobody has read — structured data
+  // conjured from prose, which is the exact fabrication `tools/backfill-records.mjs`'s guard
+  // refuses, and it would be published on a PR where it reads as tested fact.
+  //
+  // So: only `config.verify`, whose commands `gate.mjs` actually execFile'd on this tree. A
+  // reviewer can paste them. Anything more specific belongs to the human reading the diff.
+  const verify = Object.entries(config?.verify ?? {}).filter(([, cmd]) => typeof cmd === 'string' && cmd.trim());
+  if (verify.length > 0) {
+    lines.push(
+      'To check this yourself, from the repository root — these are the commands the gate ran, not a suggestion:',
+      '',
+      ...verify.map(([name, cmd]) => `- \`${name}\`: \`${cmd}\``),
       '',
     );
   }
@@ -346,6 +373,19 @@ async function commitAndPush({ repoRoot, config, item, gate, runId, recordPath, 
     return { ...state, steps, error: null };
   }
 
+  // WHY `git push` RAN FIRST, AND WHY REORDERING THESE TWO BLOCKS IS A REGRESSION. This ordering
+  // was arrived at structurally — the URL has to come from a branch that exists — but it is also
+  // the one rule the operator's `push-branch` skill puts in capitals, and for a reason this module
+  // never wrote down: **`gh pr create` will push the branch ITSELF if the remote lacks it, and it
+  // does so through the GitHub API, which runs no git hooks at all.** `gh` is an API client, not a
+  // git wrapper. So a "tidier" version of this function that dropped the push above and let
+  // `gh pr create` handle it would silently become the hook-bypassing push that the block above
+  // deliberately refuses to be (see its comment: the harness has no standing to override a hook
+  // guarding state other people see). The bypass would be invisible — same PR, same URL, same
+  // recorded steps, no error.
+  //
+  // Stated as a rule because comments about what code DOES rot when the code moves, and this is a
+  // rule about ORDER: push with git, then create the PR against the branch already on the remote.
   try {
     // `--draft`, ALWAYS. See the header: not a config key, and not overridable from a repo file.
     const out = await gh(
@@ -360,7 +400,7 @@ async function commitAndPush({ repoRoot, config, item, gate, runId, recordPath, 
         '--title',
         prTitle({ item, gate }),
         '--body',
-        prBody({ item, gate, runId, recordPath, preflight }),
+        prBody({ item, gate, runId, recordPath, preflight, config }),
       ],
       { cwd: repoRoot },
     );

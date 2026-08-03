@@ -490,6 +490,53 @@ test('unverified ACs are listed SEPARATELY and not as failures — §5 rule 2’
   assert.match(body, /AC3.*rendered page/);
 });
 
+test('ADDED 2026-08-03: the body hands a reviewer the verify commands that REALLY ran, and invents none', () => {
+  // Ported in spirit from the operator's `push-branch` skill: give a reviewer something concrete to
+  // type. Grounded in `config.verify`, which lib/gate.mjs execFile'd against this tree — so the
+  // section is a report, not a suggestion.
+  const config = { verify: { test: 'npx vitest run', lint: 'npm run lint' } };
+  const body = prBody({ item: ITEM, gate: PASS, runId: 'r1', config });
+  assert.match(body, /commands the gate ran/i);
+  assert.match(body, /npx vitest run/);
+  assert.match(body, /npm run lint/);
+
+  // AND THE OMISSION CASE, which is the half that would rot silently. A repo with no verify block
+  // must not get a header promising commands followed by nothing — an empty "how to check this"
+  // section on a machine-opened PR reads as "there was nothing to check", which is a stronger
+  // claim than "this harness was not configured to check anything".
+  const bare = prBody({ item: ITEM, gate: PASS, runId: 'r1' });
+  assert.doesNotMatch(bare, /commands the gate ran/i, 'an unconfigured repo got an empty verify section');
+
+  // A non-string command is not a command. Guards the shape rather than trusting the config loader,
+  // because this value reaches a PUBLISHED surface.
+  const junk = prBody({ item: ITEM, gate: PASS, runId: 'r1', config: { verify: { test: null, lint: '   ' } } });
+  assert.doesNotMatch(junk, /commands the gate ran/i, 'a config with no usable command still printed the header');
+});
+
+test('ADDED 2026-08-03: the verify section survives the trip through deliver() to the real --body argv', async () => {
+  // WHY THIS EXISTS AS A SECOND TEST, and it is the more important of the two. The test above calls
+  // `prBody` directly, so it proves the FUNCTION composes the section — and proves nothing about
+  // whether `deliver()` passes `config` to it. Mutation-checked: removing `config` from the
+  // `prBody({...})` call inside `deliver()` left 33/33 GREEN.
+  //
+  // That is this project's recorded defect shape, twice over. `3aba45b` added `delivery.steps` to
+  // `buildRecord`, asserted it at that layer, suite green — and every record still had `steps: []`,
+  // because `run.mjs` hand-built the object above it. A fix verified only at the layer it edits is
+  // not verified. So this reads the bytes `gh pr create` was actually handed.
+  const { root } = tempRepo();
+  dirtyWith(root);
+  const gh = ghRecorder();
+  const out = await deliver({ repoRoot: root, config: cfg(), item: ITEM, gate: PASS, runId: 'r1', gh });
+
+  assert.equal(out.pr_url, 'https://github.com/acme/repo/pull/42');
+  const create = gh.calls.find((c) => c.args.includes('create'));
+  assert.ok(create, 'gh pr create was never called');
+  const body = create.args[create.args.indexOf('--body') + 1];
+  assert.match(body, /commands the gate ran/i, 'deliver() dropped config on the way to prBody');
+  // CONFIG.verify.test, reaching the published surface from the config the caller passed.
+  assert.match(body, /npm test/);
+});
+
 test('a preflight refusal is disclosed in the body', () => {
   const body = prBody({ item: ITEM, gate: FAIL, runId: 'r1', preflight: { refused: true, reason: 'quote-not-in-body', detail: 'AC2’s quote is not in the ticket' } });
   assert.match(body, /REFUSED/);
