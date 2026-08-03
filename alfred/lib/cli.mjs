@@ -226,6 +226,27 @@ export function reportRecord(record, { out, recordError = null, recordPath = nul
   else if (recordWriteError) out(`  NOT SAVED — ${recordWriteError}`);
 }
 
+// Where the record went, or did not (A4). `executeWork` has returned `result.sync` since the sink
+// was wired and `main` printed none of it — the same computed-and-discarded shape as #63/#69/#72/
+// #73, in the one field that says whether the accounting left this machine.
+//
+// LOCAL-ONLY IS NAMED, NOT IMPLIED. `{synced: true, remote: null}` means the record is committed in
+// exactly one place; printed as a bare "synced" it reads as "safe off-machine", which is the
+// misreading that matters when the disk it is on is the only copy.
+//
+// AN UNCONFIGURED SINK IS SILENT. Most repos carry no telemetry block, and a "NOT SYNCED" line on
+// every one of those runs is how an operator learns to skip the line that means something.
+export function reportSync(sync, { out }) {
+  if (!sync) return;
+  if (!sync.synced) {
+    if (sync.reason === 'telemetry_not_configured') return;
+    out(`sink: NOT SYNCED — ${sync.reason ?? 'no reason given'}`);
+    return;
+  }
+  const where = sync.remote ? `pushed to ${sync.remote}` : 'local only, no remote configured';
+  out(`sink: ${sync.path ?? '(path not reported)'} (${where})`);
+}
+
 // The verdict, printed for whoever reads the tick's output. Findings first: an operator reading
 // a failure wants the rule that fired, not the run's plumbing.
 export function reportVerdict(gate, { out }) {
@@ -358,6 +379,7 @@ export async function main(
     recordPath: result.record_path ?? null,
     recordWriteError: result.record_write_error ?? null,
   });
+  reportSync(result.sync ?? null, { out });
   reportVerdict(result.gate ?? { pass: false, findings: [] }, { out });
 
   return result.gate?.pass ? EXIT.pass : EXIT.gate_failed;

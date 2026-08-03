@@ -704,19 +704,26 @@ test('ADDED: telemetry with no remote/dir at all still validates — sync is sim
   assert.equal(r.ok, true, r.error);
 });
 
-test('ADDED: telemetry.remote and telemetry.dir must be set together, or neither', () => {
-  // The measured reason this rule exists: `syncRecord` treats either missing as
-  // `telemetry_not_configured` and silently no-ops. A typo that drops one of the pair would
-  // otherwise validate clean and read as "sync is on" while nothing ever syncs.
+test('AMENDED (A4): telemetry.remote requires telemetry.dir — but a dir alone is a local sink', () => {
+  // REWRITTEN, NOT ADDED TO. This test previously asserted `dirOnly.ok === false`, which was the
+  // *second* of two layers making the local sink at ~/Desktop/Repos/alfred-telemetry unreachable
+  // (the other was telemetry.mjs's own guard). A4 keeps the half of the rule that catches a typo
+  // and drops the half that forbade a configuration.
+  //
+  // The rule is ASYMMETRIC because the two shapes fail differently:
+  //   remote, no dir  — nowhere to clone to. Can only ever sync nothing. Still refused.
+  //   dir, no remote  — a local-only sink: `git init` + commit, no push. Now valid.
   const remoteOnly = loadConfig(repoWith({ ...VALID, telemetry: { remote: 'https://example.invalid/x.git' } }));
   assert.equal(remoteOnly.ok, false);
-  assert.match(remoteOnly.error, /telemetry\.remote and telemetry\.dir/);
+  assert.match(remoteOnly.error, /telemetry\.remote needs telemetry\.dir/);
 
-  const dirOnly = loadConfig(repoWith({ ...VALID, telemetry: { dir: '~/.harness/telemetry' } }));
-  assert.equal(dirOnly.ok, false);
-  assert.match(dirOnly.error, /telemetry\.remote and telemetry\.dir/);
+  // THE AMENDMENT. A dir with no remote validates, because `syncRecord` now really syncs it.
+  const dirOnly = loadConfig(repoWith({ ...VALID, telemetry: { dir: '~/Desktop/Repos/alfred-telemetry' } }));
+  assert.equal(dirOnly.ok, true, dirOnly.error);
+  assert.equal(dirOnly.config.telemetry.dir, '~/Desktop/Repos/alfred-telemetry');
+  assert.equal(dirOnly.config.telemetry.remote ?? null, null, 'a remote appeared that was never configured');
 
-  // Both together, or both absent, still validate — the falsifier for the two refusals above.
+  // Both together, or both absent, still validate — the falsifier for the refusal above.
   const both = loadConfig(repoWith({
     ...VALID,
     telemetry: { remote: 'https://example.invalid/x.git', dir: '~/.harness/telemetry' },

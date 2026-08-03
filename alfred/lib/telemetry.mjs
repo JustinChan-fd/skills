@@ -1,4 +1,9 @@
-// telemetry — pushes `record.json` to the real sink, a git-cloned remote.
+// telemetry — commits `record.json` into the real sink, and pushes it when the sink has a remote.
+//
+// TWO SINK SHAPES (A4). `telemetry.dir` alone is a LOCAL-ONLY sink: `git init`, commit, no push,
+// and the result carries `remote: null` so a reader can tell these records exist on exactly one
+// machine. `dir` + `remote` is the original clone-and-push path. A remote added to config later is
+// reconciled onto an already-initialized sink, so the local phase is not a dead end.
 //
 // A FRESH, INDEPENDENT IMPLEMENTATION, not an import. `harness-core/tools/lib/telemetry.mjs`
 // already does this (`syncRun`), and its mechanics are mirrored here deliberately, but Alfred
@@ -60,22 +65,82 @@ function atomicWrite(destPath, content) {
   renameSync(tmp, destPath);
 }
 
-export function ensureClone({ dir, remote }) {
-  if (!existsSync(join(dir, '.git'))) {
+// Makes `dir` a git repo that syncs are safe to commit into, and reconciles `origin` against the
+// configured remote. Returns `{ dir, remote }` — the remote actually reachable from this repo, or
+// null for a local-only sink — or `{ error }` for a divergence this must not resolve on its own.
+//
+// THREE CASES, and they are not interchangeable:
+//
+//   remote, no repo yet    `git clone`. The original behaviour, unchanged.
+//   no remote              `git init`. A LOCAL-ONLY SINK (A4). Committing rather than merely
+//                          writing is what lets a remote added later carry the whole history off
+//                          the machine in one push.
+//   repo exists            reconcile. This is the case the pre-A4 code got wrong: it cloned only
+//                          `if (!existsSync(dir/.git))`, so after an init it was a permanent
+//                          no-op, and NOTHING in this module ever ran `git remote add`. Adding a
+//                          remote to config later failed `'origin' does not appear to be a git
+//                          repository` → 3 retries → `push_failed`, forever. Reproduced, then
+//                          fixed here rather than left for whoever hit it in six months.
+//
+// A DISAGREEING ORIGIN IS NAMED, NEVER REWRITTEN. Silently re-pointing `origin` would push this
+// machine's records into a repo its operator did not aim at; silence would make the divergence
+// unobservable. So the sync refuses with both urls in the reason.
+export function ensureSink({ dir, remote = null }) {
+  const isRepo = existsSync(join(dir, '.git'));
+
+  if (!isRepo) {
     mkdirSync(dir, { recursive: true });
-    execFileSync('git', ['clone', remote, dir], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+    if (remote) {
+      execFileSync('git', ['clone', remote, dir], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+      return { dir, remote };
+    }
+    // `-b main` to match the branch a clone of the real sink would be on, rather than inheriting
+    // whatever `init.defaultBranch` this machine happens to have — a sink whose branch name
+    // depends on who initialized it needs a merge nobody asked for the first time it is shared.
+    git(dir, 'init', '--quiet', '-b', 'main');
+    return { dir, remote: null };
   }
-  return dir;
+
+  // The repo already exists. What it is pointed at may or may not be what config now says.
+  let existing = null;
+  try {
+    existing = git(dir, 'remote', 'get-url', 'origin').trim() || null;
+  } catch {
+    existing = null;
+  }
+
+  // CONFIG IS THE AUTHORITY, NOT THE LEFTOVER GIT REMOTE. Returning `existing` here was a defect
+  // in this fix's first draft: a sink that had once been a clone kept pushing after its config was
+  // deliberately retargeted local-only — which is exactly the retarget webtarsthree's config gets.
+  // The origin is left in place (this refuses to push, it does not tear config down), but a run
+  // whose config names no remote does not leave the machine.
+  if (!remote) return { dir, remote: null };
+  if (!existing) {
+    git(dir, 'remote', 'add', 'origin', remote);
+    return { dir, remote };
+  }
+  if (existing !== remote) {
+    return {
+      error:
+        `origin_mismatch: the sink at ${dir} has origin ${existing}, but telemetry.remote is ${remote}. ` +
+        'Refusing rather than re-pointing it — a rewritten origin pushes these records somewhere nobody aimed at.',
+    };
+  }
+  return { dir, remote };
 }
 
-// Pushes `<runDir>/record.json` to `<telemetry.dir>/log/<slug(record.session.repo)>/
-// <record.session.run_id>.json` in a git clone of `telemetry.remote`, and commits + pushes it.
+// Writes `<runDir>/record.json` to `<telemetry.dir>/log/<slug(record.session.repo)>/
+// <record.session.run_id>.json` in the sink repo, commits it, and pushes only when the sink has a
+// remote (A4). Returns `{synced: true, path, remote}` — `remote: null` for a local-only sink.
 //
 // `record` is passed in rather than re-read from disk: `lib/run.mjs` already holds it in memory
 // at Step 7c, and re-reading would be a second, potentially different, source of truth for what
 // this call is syncing.
 export function syncRecord({ runDir, telemetry, record, now = new Date(), retries = 3 }) {
-  if (!telemetry?.remote || !telemetry?.dir) return { synced: false, reason: 'telemetry_not_configured' };
+  // `dir` IS THE REQUIREMENT; `remote` IS OPTIONAL (A4). A remote with no dir has nowhere to clone
+  // into and stays a no-op — `loadConfig` refuses that shape too, but this module is called
+  // directly by tests and by the backfill, so the guard is not redundant.
+  if (!telemetry?.dir) return { synced: false, reason: 'telemetry_not_configured' };
   if (!record?.session?.repo || !record?.session?.run_id) {
     return { synced: false, reason: 'record_missing_session_identity' };
   }
@@ -83,8 +148,8 @@ export function syncRecord({ runDir, telemetry, record, now = new Date(), retrie
   const dir = expandHome(telemetry.dir);
 
   // The lock's parent may not exist yet on a fresh machine (e.g. ~/.harness/ absent). Ensure the
-  // chain up to the clone dir's parent exists before taking the lock; `ensureClone` creates the
-  // clone dir itself.
+  // chain up to the sink dir's parent exists before taking the lock; `ensureSink` creates the
+  // sink dir itself.
   try {
     mkdirSync(dirname(dir), { recursive: true });
   } catch (err) {
@@ -118,7 +183,10 @@ export function syncRecord({ runDir, telemetry, record, now = new Date(), retrie
 
   try {
     try {
-      ensureClone({ dir, remote: telemetry.remote });
+      const sink = ensureSink({ dir, remote: telemetry.remote ?? null });
+      // Refused BEFORE anything is written. A record staged into a repo whose origin disagrees
+      // with config would sit there uncommitted and unexplained.
+      if (sink.error) return { synced: false, reason: sink.error };
       const destDir = join(dir, 'log', slugifyRepo(record.session.repo));
       mkdirSync(destDir, { recursive: true });
       atomicWrite(join(destDir, `${record.session.run_id}.json`), readFileSync(join(runDir, 'record.json')));
@@ -151,10 +219,19 @@ export function syncRecord({ runDir, telemetry, record, now = new Date(), retrie
         // Otherwise: nothing new to commit — still try to push.
       }
 
+      const path = join(destDir, `${record.session.run_id}.json`);
+
+      // NO PUSH LOOP FOR A LOCAL SINK (A4). Left unconditional, `push -u origin HEAD` against a
+      // repo with no origin fails 3 times and returns `push_failed` — a record that committed
+      // perfectly, reported as unsynced. `remote: null` is the field that carries the distinction:
+      // the contract is `{synced, reason?}` / `{synced: true, path}`, so without it nothing
+      // downstream could tell a local-only sync from one that left the machine.
+      if (!sink.remote) return { synced: true, path, remote: null };
+
       for (let attempt = 0; attempt < retries; attempt += 1) {
         try {
           git(dir, 'push', '-u', 'origin', 'HEAD');
-          return { synced: true, path: join(destDir, `${record.session.run_id}.json`) };
+          return { synced: true, path, remote: sink.remote };
         } catch {
           try {
             git(dir, 'pull', '--rebase');

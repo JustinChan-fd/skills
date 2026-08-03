@@ -272,12 +272,19 @@ function validateSemantics(raw) {
     }
   }
 
-  // #32: a config with one but not the other looks configured and isn't — `syncRecord`
-  // treats either missing as `telemetry_not_configured` and silently no-ops, so a typo
-  // that drops one of the pair would otherwise read as "sync is on" while nothing syncs.
+  // #32, AMENDED BY A4. The original rule refused either half alone, on the reasoning that a
+  // config which looks configured and isn't is worse than one that is obviously absent. Half of
+  // that still holds and half was wrong, because the two halves fail differently:
+  //
+  //   remote, no dir — there is nowhere to clone the remote to. `syncRecord` can only ever
+  //                    no-op, so this is a typo every time. STILL REFUSED.
+  //   dir, no remote — a LOCAL-ONLY SINK: `git init`, commit, no push. A deliberate
+  //                    configuration, and the one this machine actually runs
+  //                    (~/Desktop/Repos/alfred-telemetry has no remote and is not getting one).
+  //                    Refusing it was the first of two layers making that sink unreachable.
   const telemetry = raw.telemetry ?? null;
-  if (telemetry && !nullish(telemetry.remote) !== !nullish(telemetry.dir)) {
-    return 'telemetry.remote and telemetry.dir must be set together — one without the other silently syncs nothing';
+  if (telemetry && !nullish(telemetry.remote) && nullish(telemetry.dir)) {
+    return 'telemetry.remote needs telemetry.dir — a remote with nowhere to clone it into syncs nothing';
   }
 
   if (!nullish(raw.loop?.poll_interval_minutes)) {

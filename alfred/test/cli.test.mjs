@@ -39,7 +39,7 @@ import { join } from 'node:path';
 import { after, test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 
-import { EXIT, parseArgv, reportRecord, reportVerdict, usage } from '../lib/cli.mjs';
+import { EXIT, parseArgv, reportRecord, reportSync, reportVerdict, usage } from '../lib/cli.mjs';
 import { SOURCE_FILENAME } from '../lib/item.mjs';
 import { DEFAULT_WALL_CAP_MS } from '../lib/run.mjs';
 
@@ -633,4 +633,53 @@ test('a record that could not be written says so AND still prints the cost', () 
   // The load-bearing half: the figures survive the write failure.
   assert.match(lines, /\$1\.500000/, 'a failed write suppressed the only surviving copy of the cost');
   assert.doesNotMatch(lines, /FAILED to build/, 'blamed the reporter for a filesystem failure');
+});
+
+// ---------------------------------------------------------------------------
+// A4: the sink's answer reaches the operator.
+//
+// `executeWork` has returned `result.sync` since the sink was wired, and `main` printed NONE of
+// it. So a sync that silently failed — locked, push_failed, origin_mismatch — looked on the
+// console exactly like one that landed, which is this project's recurring defect (#63/#69/#72/#73:
+// computed and discarded) in the one field that says whether the accounting left the machine.
+// ---------------------------------------------------------------------------
+
+test('A4: a local-only sync SAYS it is local-only, rather than reading as an off-machine push', () => {
+  const printed = [];
+  reportSync({ synced: true, path: '/sink/log/skills/run-1.json', remote: null }, { out: (l) => printed.push(l) });
+  const lines = printed.join('\n');
+  assert.match(lines, /\/sink\/log\/skills\/run-1\.json/, 'the operator was not told where it landed');
+  // The distinction, in words. `remote: null` is representable in the record; it has to be
+  // legible on the console too, or "synced" is read as "safe off this machine".
+  assert.match(lines, /local only|no remote/i, `a local-only sync read as a push: ${lines}`);
+});
+
+test('A4: a pushed sync names the remote, so the two outcomes are not one word', () => {
+  const printed = [];
+  reportSync(
+    { synced: true, path: '/sink/log/skills/run-1.json', remote: 'https://example.invalid/x.git' },
+    { out: (l) => printed.push(l) },
+  );
+  const lines = printed.join('\n');
+  assert.match(lines, /https:\/\/example\.invalid\/x\.git/);
+  assert.doesNotMatch(lines, /local only/i, 'a real push was labelled local-only');
+});
+
+test('A4: a FAILED sync says so with its reason — the outcome this most needs to stop hiding', () => {
+  const printed = [];
+  reportSync({ synced: false, reason: 'origin_mismatch: the sink at /sink has origin A' }, { out: (l) => printed.push(l) });
+  const lines = printed.join('\n');
+  assert.match(lines, /origin_mismatch/);
+  assert.match(lines, /NOT SYNCED|failed/i, `a failed sync did not say it failed: ${lines}`);
+});
+
+test('A4: telemetry_not_configured is quiet — an unconfigured sink is not a failure to report', () => {
+  // The falsifier for the line above. Most repos have no telemetry block at all; printing
+  // "NOT SYNCED" on every one of those runs trains an operator to ignore the line that matters.
+  const printed = [];
+  reportSync({ synced: false, reason: 'telemetry_not_configured' }, { out: (l) => printed.push(l) });
+  assert.deepEqual(printed, []);
+  // And no sync at all (no record to sync) is likewise silent, not a phantom failure.
+  reportSync(null, { out: (l) => printed.push(l) });
+  assert.deepEqual(printed, []);
 });

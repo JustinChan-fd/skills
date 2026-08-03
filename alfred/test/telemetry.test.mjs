@@ -57,14 +57,14 @@ test('not configured — telemetry null no-ops rather than requiring a call-site
   assert.deepEqual(result, { synced: false, reason: 'telemetry_not_configured' });
 });
 
-test('not configured — remote or dir alone still no-ops', () => {
+test('not configured — a remote with no dir still no-ops', () => {
+  // ASYMMETRIC WITH `dir` ALONE, on purpose (A4). A `remote` with nowhere to clone it can only
+  // ever sync nothing, so it stays a no-op; a `dir` with no remote is a deliberate local-only
+  // sink and now works (see the git-init tests below). One of these is a typo, the other is a
+  // configuration, and treating them alike is what made the local sink unreachable.
   const runDir = runDirWithRecord(record());
   assert.equal(
     syncRecord({ runDir, telemetry: { remote: 'x' }, record: record() }).synced,
-    false,
-  );
-  assert.equal(
-    syncRecord({ runDir, telemetry: { dir: 'x' }, record: record() }).synced,
     false,
   );
 });
@@ -227,4 +227,168 @@ test('a fresh (non-stale) lock refuses the sync rather than racing the other hol
   const rec = record();
   const result = syncRecord({ runDir: runDirWithRecord(rec), telemetry: { remote, dir }, record: rec });
   assert.deepEqual(result, { synced: false, reason: 'locked' });
+});
+
+// ---------------------------------------------------------------------------
+// A4: a LOCAL sink — `dir` with no `remote`.
+//
+// The sink this project is actually about to write into (~/Desktop/Repos/alfred-telemetry) has
+// no remote and is not going to get one today. Before this, `dir`-without-`remote` was refused
+// at two layers: `loadConfig` rejected the config outright, and this module's own guard turned
+// it into `telemetry_not_configured`. So the sink existed and nothing could reach it.
+// ---------------------------------------------------------------------------
+
+test('A4: a dir with no remote initializes a repo and commits — no clone, no push attempted', () => {
+  const dir = join(mktemp('local'), 'sink');
+  const rec = record();
+  const result = syncRecord({ runDir: runDirWithRecord(rec), telemetry: { dir }, record: rec });
+
+  assert.equal(result.synced, true, JSON.stringify(result));
+  assert.ok(existsSync(join(dir, '.git')), 'no repo was initialized at the local sink');
+  // THE DISTINGUISHING FIELD, not a boolean nothing reads. `{synced: true}` alone cannot tell an
+  // operator that these records exist on exactly one machine.
+  assert.equal(result.remote, null);
+  // A local sink has no origin at all — the falsifier for "it quietly cloned from somewhere".
+  assert.throws(() => git(dir, ['remote', 'get-url', 'origin']));
+  // And the record is really a commit, not just a file sitting in a worktree: a `git show` of
+  // HEAD is what a later reader (or a push, once a remote arrives) would actually carry.
+  const committed = git(dir, ['show', `HEAD:log/webtarsthree/run-1.json`]);
+  assert.deepEqual(JSON.parse(committed), rec);
+  // `main`, explicitly, not whatever `init.defaultBranch` this machine has. A sink whose branch
+  // name depends on who initialized it needs a merge nobody asked for the first time it is
+  // shared. Asserted because otherwise `-b main` is a line no test could contradict.
+  assert.equal(git(dir, ['branch', '--show-current']).trim(), 'main');
+});
+
+test('A4: no push is attempted against a remote-less sink — a failed push must not read as push_failed', () => {
+  // The specific wrong outcome this guards: leaving the push loop in place would run
+  // `git push -u origin HEAD` against a repo with no origin, fail 3 times, and return
+  // `{synced: false, reason: 'push_failed'}` — a *successfully committed* record reported as
+  // unsynced. Asserting `synced: true` above is half of it; this asserts the branch did not run,
+  // by proving no upstream was ever configured on the branch.
+  const dir = join(mktemp('local'), 'sink');
+  const rec = record();
+  const result = syncRecord({ runDir: runDirWithRecord(rec), telemetry: { dir }, record: rec });
+  assert.equal(result.synced, true, JSON.stringify(result));
+  // `push -u` is what sets branch.<name>.remote. Absent means it never ran.
+  const branch = git(dir, ['branch', '--show-current']).trim();
+  assert.throws(
+    () => git(dir, ['config', '--get', `branch.${branch}.remote`]),
+    'an upstream was configured, so `push -u` ran against a sink that has no remote',
+  );
+});
+
+test('A4: a second run into the same local sink lands as a second commit, not an overwrite', () => {
+  const dir = join(mktemp('local'), 'sink');
+  const rec1 = record();
+  assert.equal(syncRecord({ runDir: runDirWithRecord(rec1), telemetry: { dir }, record: rec1 }).synced, true);
+  const rec2 = record({ session: { repo: 'webtarsthree', run_id: 'run-2' } });
+  const second = syncRecord({ runDir: runDirWithRecord(rec2), telemetry: { dir }, record: rec2 });
+  assert.equal(second.synced, true, JSON.stringify(second));
+
+  assert.ok(existsSync(join(dir, 'log', 'webtarsthree', 'run-1.json')));
+  assert.ok(existsSync(join(dir, 'log', 'webtarsthree', 'run-2.json')));
+  assert.equal(git(dir, ['rev-list', '--count', 'HEAD']).trim(), '2');
+});
+
+test('A4: an EXISTING local sink dir that is not yet a repo is initialized in place, not refused', () => {
+  // The real shape of the sink on this machine: the directory exists (with content), and has no
+  // .git. `ensureClone`'s `git clone` into a non-empty dir fails outright, so "init when there is
+  // no remote" has to work against a populated directory, not only a fresh one.
+  const dir = mktemp('local-existing');
+  writeFileSync(join(dir, 'README.md'), '# sink\n');
+  const rec = record();
+  const result = syncRecord({ runDir: runDirWithRecord(rec), telemetry: { dir }, record: rec });
+  assert.equal(result.synced, true, JSON.stringify(result));
+  assert.ok(existsSync(join(dir, '.git')));
+  // Scoped commit, same rule as the remote case: README.md was never asked for.
+  const committedFiles = git(dir, ['show', '--name-only', '--format=', 'HEAD']).trim().split('\n').filter(Boolean);
+  assert.deepEqual(committedFiles, ['log/webtarsthree/run-1.json']);
+});
+
+test('A4: adding a remote LATER reconciles origin and pushes — the init is not a permanent dead end', () => {
+  // REPRODUCED BEFORE IT WAS FIXED. `ensureClone` clones only `if (!existsSync(dir/.git))`, so
+  // after a `git init` it is a no-op forever, and nothing in this module ever ran `git remote
+  // add`. Adding `remote` to config later therefore failed with `'origin' does not appear to be a
+  // git repository`, 3 retries, `push_failed`, permanently. A local sink that can never become a
+  // shared one is a different product than the one the config implies.
+  const dir = join(mktemp('local-then-remote'), 'sink');
+  const rec1 = record();
+  assert.equal(syncRecord({ runDir: runDirWithRecord(rec1), telemetry: { dir }, record: rec1 }).synced, true);
+
+  const remote = bareRemote();
+  const rec2 = record({ session: { repo: 'webtarsthree', run_id: 'run-2' } });
+  const result = syncRecord({ runDir: runDirWithRecord(rec2), telemetry: { remote, dir }, record: rec2 });
+  assert.equal(result.synced, true, JSON.stringify(result));
+  assert.equal(result.remote, remote, 'a push that really happened still reported remote: null');
+  assert.equal(git(dir, ['remote', 'get-url', 'origin']).trim(), remote);
+
+  // BOTH records reach the remote, including the one committed while the sink was local-only.
+  // That is the whole value of committing rather than merely writing during the local phase.
+  const readback = mktemp('readback-local-then-remote');
+  git(readback, ['clone', '--quiet', remote, '.']);
+  assert.ok(existsSync(join(readback, 'log', 'webtarsthree', 'run-1.json')), 'the local-era record never left the machine');
+  assert.ok(existsSync(join(readback, 'log', 'webtarsthree', 'run-2.json')));
+});
+
+test('A4: a DISAGREEING origin is reported as a gap, never silently rewritten', () => {
+  // A sink already pointed at remote A, config now naming remote B. Rewriting the url would push
+  // this machine's records into a repo its operator did not aim at, and silence would make the
+  // divergence unobservable. Neither: refuse this sync and say which two urls disagree.
+  const remoteA = bareRemote();
+  const remoteB = bareRemote();
+  const dir = join(mktemp('origin-conflict'), 'sink');
+  const rec = record();
+  assert.equal(syncRecord({ runDir: runDirWithRecord(rec), telemetry: { remote: remoteA, dir }, record: rec }).synced, true);
+
+  const rec2 = record({ session: { repo: 'webtarsthree', run_id: 'run-2' } });
+  const result = syncRecord({ runDir: runDirWithRecord(rec2), telemetry: { remote: remoteB, dir }, record: rec2 });
+  assert.equal(result.synced, false, JSON.stringify(result));
+  assert.match(result.reason, /origin_mismatch/);
+  // Both urls named, because "they disagree" is not actionable without knowing which is which.
+  assert.ok(result.reason.includes(remoteA), `configured-vs-actual not named: ${result.reason}`);
+  assert.ok(result.reason.includes(remoteB), `configured-vs-actual not named: ${result.reason}`);
+  // And the existing origin survives — the point of refusing.
+  assert.equal(git(dir, ['remote', 'get-url', 'origin']).trim(), remoteA);
+});
+
+test('A4: config DROPPING remote stops the push, even though the clone still has an origin', () => {
+  // A DEFECT IN THE FIRST DRAFT OF THIS FIX, found by writing the case down rather than by
+  // reasoning about it. `ensureSink` returned the repo's *existing* origin when config named no
+  // remote, so a sink that had once been a clone kept pushing after its config was deliberately
+  // retargeted local-only — which is precisely the retarget B5 performs on webtarsthree's config.
+  // Config is the authority on where records go; the leftover git remote is not.
+  const remote = bareRemote();
+  const dir = mktemp('clone-then-local');
+  const rec1 = record();
+  assert.equal(syncRecord({ runDir: runDirWithRecord(rec1), telemetry: { remote, dir }, record: rec1 }).synced, true);
+
+  const rec2 = record({ session: { repo: 'webtarsthree', run_id: 'run-2' } });
+  const result = syncRecord({ runDir: runDirWithRecord(rec2), telemetry: { dir }, record: rec2 });
+  assert.equal(result.synced, true, JSON.stringify(result));
+  assert.equal(result.remote, null, 'reported a remote for a sync that config asked to keep local');
+
+  // The load-bearing half: run-2 committed locally and did NOT reach the remote.
+  const readback = mktemp('readback-clone-then-local');
+  git(readback, ['clone', '--quiet', remote, '.']);
+  assert.ok(existsSync(join(readback, 'log', 'webtarsthree', 'run-1.json')), 'the pre-retarget record should still be there');
+  assert.ok(
+    !existsSync(join(readback, 'log', 'webtarsthree', 'run-2.json')),
+    'a record pushed off-machine after config asked for local-only',
+  );
+  // Still committed locally, so a later re-added remote carries it — not silently dropped.
+  assert.ok(existsSync(join(dir, 'log', 'webtarsthree', 'run-2.json')));
+  // The origin itself survives untouched; this refuses to push, it does not tear config down.
+  assert.equal(git(dir, ['remote', 'get-url', 'origin']).trim(), remote);
+});
+
+test('A4: a successful remote sync reports the remote it pushed to, not null', () => {
+  // The falsifier for `remote: null` above. If this field were hardcoded, an off-machine sync and
+  // a local-only one would be indistinguishable in exactly the direction that matters.
+  const remote = bareRemote();
+  const dir = mktemp('clone-remote-field');
+  const rec = record();
+  const result = syncRecord({ runDir: runDirWithRecord(rec), telemetry: { remote, dir }, record: rec });
+  assert.equal(result.synced, true, JSON.stringify(result));
+  assert.equal(result.remote, remote);
 });
