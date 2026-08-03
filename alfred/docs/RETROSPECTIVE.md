@@ -318,6 +318,34 @@ real system cron invoking `claude -p` headlessly.
   push, and jarvis#7 committed locally but was killed at the 25-minute wall cap, so the gate
   failed and delivery correctly stopped. `never_merge: true` and the draft-PR path are
   therefore still only test-covered, and no draft PR has been opened anywhere.
+
+  **AMENDED 2026-08-03, four runs later, and the reason it keeps not executing has changed.**
+  The first two avoided the push by accident. The next three were each stopped earlier, and
+  by a *different* mechanism — which is more informative than one repeated failure:
+
+  - **jarvis#6**, refused in its first turn for `low-confidence` at $0.224755. AC6 is
+    "verify fix across common mobile breakpoints (375px/390px/414px)", which admits no
+    deterministic check, and it scored 0.5 against the 0.6 threshold. The refusal is
+    **correct**: the ticket is visual-confirmation ACs end to end, so it is the wrong
+    *shape* for this harness, and that was established for one turn's spend rather than a
+    full run's. First time the confidence filter fired on a real ticket.
+  - **jarvis#11, first attempt**, refused for `quote-not-in-body` at $0.067002 — and the
+    refusal was **wrong**. That body holds eight literal backslashes (the author typed
+    escaped quotes into GitHub), an attestation arrives as JSON, so `JSON.parse` collapsed
+    `\"` to `"` and the comparison rejected a faithful quotation as a paraphrase. Fixed in
+    `9ad6476`. A refusal path is the one place a false positive is invisible, because it
+    looks exactly like the guard working.
+  - **jarvis#11, re-run**, preflight **passed live** — the first confirmation that
+    `9ad6476` works in the run path rather than only under test.
+
+  A hazard found while checking whether delivery was even armed, and it is why a passing
+  run may still not push: jarvis's `.husky/pre-push` blocks any push touching `src/`,
+  `server/`, or `scripts/` without a `docs/brain/` entry, generating one by spawning
+  `claude -p` before exiting 1. Delivery passes `--no-verify` to `commit` but deliberately
+  not to `push` (see `lib/delivery.mjs`), so that hook will fail the push substep — and
+  correctly, since it is the repo owner's guard on state other people see and `.husky` is
+  in that repo's `off_limits`. It also spends tokens no record can attribute, which is
+  worth knowing before reading a cost figure from any run that pushed.
 - **No aggregation exists.** Records land; nothing rolls them up. The dashboard refuses to
   run (`build.js`: *"v2/ was retired on 2026-07-28; log/ is now the only sink"*). Per-run
   metrics being correct and per-epic metrics not existing are two different states, and
