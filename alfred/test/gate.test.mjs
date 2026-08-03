@@ -1023,6 +1023,362 @@ test('ADDED: an ac_map command that runs the suite is enough on its own — no d
 });
 
 // ---------------------------------------------------------------------------
+// ADDED 2026-08-02 (#74). evidence_weakened fired on an honest refactor.
+// ---------------------------------------------------------------------------
+//
+// MEASURED, on the real jarvis#7 diff: `NotesPageHeader.test.tsx  88  36`. That arm
+// COLLAPSED BOILERPLATE INTO A HELPER and went from 5 tests to 9 — it strengthened the
+// evidence, and the gate failed it. Net lines cannot separate the two cases, because the
+// real arm-C exploit (`test/channels.test.js  39  3`) is ALSO net-positive: the three
+// deleted lines were the only assertion that could fail. Both are "+many -few".
+//
+// So the discriminating signal is not churn at all. It is WHAT SURVIVED. Two counts,
+// because either one alone is defeated by a measured attack:
+//
+//   tests_before/after       — blocks, so mass deletion is visible
+//   assertions_before/after  — so gutting the bodies of kept tests is visible
+//
+// THE ATTACKS THAT FORCED THE SECOND COUNT, each with a test below. Counting blocks alone:
+//   * delete 3 real assertions, add 4 no-op `it('x', () => {})` → 5→9, identical in shape
+//     to the honest case above, so the exploit is EXCLUDED;
+//   * replace every assertion in kept tests with `expect(true).toBe(true)` → count
+//     unchanged, `deleted > 0`, so a rule keyed on blocks alone would now MISS what today's
+//     line-based rule catches. That is not backward compatibility, it is a new hole.
+//
+// ABSENT IS UNOBSERVED, and it keeps today's behaviour EXPLICITLY rather than by NaN luck:
+// an entry with no counts is graded exactly as before. The `!= null` guards below are the
+// mechanism, and this is stated because `9 >= undefined` being false is an accident of
+// coercion, not a decision anyone made.
+
+test('ADDED: a refactor that collapses boilerplate and ADDS tests is not weakened evidence', async () => {
+  // The real jarvis#7 numstat, plus the counts observeTree now attaches. This is the false
+  // positive: 36 lines deleted, and every one of them was duplication.
+  const verdict = await runGate({
+    config: CONFIG,
+    repoRoot: tempRepo(),
+    acs: [{ id: 'AC2', text: '`npm test` passes' }],
+    acMap: [{ ac: 'AC2', command: 'npm test' }],
+    touched: ['src/components/NotesPageHeader.test.tsx'],
+    diffstat: [
+      {
+        file: 'src/components/NotesPageHeader.test.tsx',
+        added: 88,
+        deleted: 36,
+        tests_before: 5,
+        tests_after: 9,
+        assertions_before: 12,
+        assertions_after: 24,
+      },
+    ],
+    run: allGreen(),
+  });
+
+  assert.deepEqual(
+    findingRules(verdict).filter((r) => r === GATE_RULES.evidence_weakened),
+    [],
+    'more tests and more assertions after than before: the evidence got stronger, not weaker',
+  );
+  assert.equal(verdict.pass, true, JSON.stringify(verdict.findings));
+});
+
+test('ADDED: the arm-C exploit still fires once counts are available — the fix must not be an amnesty', async () => {
+  // The falsifier for the whole change. If the exclusion were keyed on `deleted` alone, or
+  // on the counts being merely PRESENT, this would go quiet and the fix would have deleted
+  // the rule rather than sharpened it. 2 tests down to 1.
+  const verdict = await runGate({
+    config: CONFIG,
+    repoRoot: tempRepo(),
+    acs: [{ id: 'AC1', text: 'all three channels retry up to 3 attempts with exponential backoff' }],
+    acMap: [{ ac: 'AC1', command: 'npm test -- channels retry attempts' }],
+    touched: ['test/channels.test.js'],
+    diffstat: [
+      {
+        file: 'test/channels.test.js',
+        added: 39,
+        deleted: 3,
+        tests_before: 2,
+        tests_after: 1,
+        assertions_before: 6,
+        assertions_after: 2,
+      },
+    ],
+    run: allGreen(),
+  });
+
+  assert.ok(
+    verdict.findings.some((f) => f.rule === GATE_RULES.evidence_weakened),
+    `a test disappeared: ${JSON.stringify(findingRules(verdict))}`,
+  );
+  assert.equal(verdict.pass, false);
+});
+
+test('ADDED: padding with no-op tests does not buy an exclusion — assertions are counted too', async () => {
+  // ATTACK 1, measured against the block-count-only rule: delete the 3 assertions that
+  // could fail, add 4 empty `it()` blocks. Block counts read 5→9 — BYTE-IDENTICAL to the
+  // honest jarvis#7 shape above. Only the assertion count separates them, and it is the
+  // reason this rule needs two numbers rather than one.
+  const verdict = await runGate({
+    config: CONFIG,
+    repoRoot: tempRepo(),
+    acs: [{ id: 'AC2', text: '`npm test` passes' }],
+    acMap: [{ ac: 'AC2', command: 'npm test' }],
+    touched: ['test/channels.test.js'],
+    diffstat: [
+      {
+        file: 'test/channels.test.js',
+        added: 30,
+        deleted: 9,
+        tests_before: 5,
+        tests_after: 9,
+        assertions_before: 12,
+        assertions_after: 4,
+      },
+    ],
+    run: allGreen(),
+  });
+
+  assert.ok(
+    verdict.findings.some((f) => f.rule === GATE_RULES.evidence_weakened),
+    `nine tests carrying four assertions where five carried twelve: ${JSON.stringify(findingRules(verdict))}`,
+  );
+});
+
+test('ADDED: gutting the bodies of kept tests fires, even though the test count never moves', async () => {
+  // ATTACK 2, and the one that makes a block-count-only rule WORSE than the line-based rule
+  // it replaces. Every `it()` survives; every assertion inside becomes
+  // `expect(true).toBe(true)`. Blocks 5→5 satisfies `tests_after >= tests_before`, so a
+  // single-count rule would newly EXCLUDE a case today's rule catches on `deleted > 0`.
+  const verdict = await runGate({
+    config: CONFIG,
+    repoRoot: tempRepo(),
+    acs: [{ id: 'AC2', text: '`npm test` passes' }],
+    acMap: [{ ac: 'AC2', command: 'npm test' }],
+    touched: ['test/channels.test.js'],
+    diffstat: [
+      {
+        file: 'test/channels.test.js',
+        added: 5,
+        deleted: 14,
+        tests_before: 5,
+        tests_after: 5,
+        assertions_before: 12,
+        assertions_after: 2,
+      },
+    ],
+    run: allGreen(),
+  });
+
+  assert.ok(
+    verdict.findings.some((f) => f.rule === GATE_RULES.evidence_weakened),
+    `same tests, a fifth of the assertions: ${JSON.stringify(findingRules(verdict))}`,
+  );
+});
+
+test('ADDED: a test that DISAPPEARED fires even when the surviving assertions are more numerous', async () => {
+  // FALSIFIER FOR THE `tests` CONJUNCT, and it exists because mutation found the hole rather
+  // than because I reasoned my way to it. Deleting `tests_after >= tests_before` from
+  // `evidenceGrew` left all 81 tests GREEN: every case above that fires does so with the
+  // assertion count falling, so the assertion conjunct alone decided every one of them and
+  // the block count was never load-bearing anywhere. Two propositions, one observable — the
+  // recorded unfalsifiable-conjunct shape, inside the very rule this fix rewrote to avoid it.
+  //
+  // The shape that separates them: a file goes 4 tests to 2 while assertions go 8 to 20,
+  // i.e. two whole scenarios were deleted and the survivors were padded with assertions about
+  // what remains. Coverage of the deleted behaviour is gone and no assertion total can see
+  // it. If the block conjunct is removed, this test fails ALONE.
+  const verdict = await runGate({
+    config: CONFIG,
+    repoRoot: tempRepo(),
+    acs: [{ id: 'AC2', text: '`npm test` passes' }],
+    acMap: [{ ac: 'AC2', command: 'npm test' }],
+    touched: ['test/channels.test.js'],
+    diffstat: [
+      {
+        file: 'test/channels.test.js',
+        added: 26,
+        deleted: 18,
+        tests_before: 4,
+        tests_after: 2,
+        assertions_before: 8,
+        assertions_after: 20,
+      },
+    ],
+    run: allGreen(),
+  });
+
+  assert.ok(
+    verdict.findings.some((f) => f.rule === GATE_RULES.evidence_weakened),
+    `two scenarios vanished; piling assertions onto the survivors does not restore them: ${JSON.stringify(findingRules(verdict))}`,
+  );
+});
+
+test('ADDED: an entry with no counts is graded exactly as before — absent is unobserved, not clean', async () => {
+  // The compatibility statement, asserted rather than assumed. `observeTree` attaches counts
+  // only where it could read both sides, so a rename it failed to resolve, a binary file, or
+  // a `git show` that threw arrives here with nothing. That entry must keep firing on
+  // `deleted > 0`: this rule cannot tell "unobserved" from "unchanged", and defaulting the
+  // unobserved case to an exclusion would silently switch the rule off under exactly the
+  // conditions an evasive worker can create.
+  const verdict = await runGate({
+    config: CONFIG,
+    repoRoot: tempRepo(),
+    acs: [{ id: 'AC2', text: '`npm test` passes' }],
+    acMap: [{ ac: 'AC2', command: 'npm test' }],
+    touched: ['test/channels.test.js'],
+    diffstat: [{ file: 'test/channels.test.js', added: 39, deleted: 3 }],
+    run: allGreen(),
+  });
+
+  assert.ok(
+    verdict.findings.some((f) => f.rule === GATE_RULES.evidence_weakened),
+    `no counts means unobserved, which is not a pass: ${JSON.stringify(findingRules(verdict))}`,
+  );
+});
+
+test('ADDED: a rename arrow reaching the gate would blind it, so the gate is asserted on a real path', async () => {
+  // THE PRODUCER-SIDE DEFECT, PINNED FROM THE GATE'S SIDE. `observeTree` used to pass
+  // `--numstat`'s raw rename form straight through as `file`, and this rule went silent on it:
+  // `isEvidence('src/{a.test.js => b.test.js}')` is FALSE, because the last segment is
+  // `b.test.js}` — the brace defeats the `\.test\.js$` regex — and no segment equals `test`.
+  //
+  // Asserted here rather than only in run.test.mjs because the two sides can drift: this states
+  // what the gate REQUIRES of whatever feeds it, so a future producer that reintroduces the arrow
+  // fails a test that names the reason. The first assertion is the blindness itself, so the fix
+  // cannot be quietly reverted; the second is the behaviour a resolved path buys.
+  const arrowVerdict = await runGate({
+    config: CONFIG,
+    repoRoot: tempRepo(),
+    acs: [{ id: 'AC2', text: '`npm test` passes' }],
+    acMap: [{ ac: 'AC2', command: 'npm test' }],
+    touched: ['src/{channels.test.js => notify.test.js}'],
+    diffstat: [{ file: 'src/{channels.test.js => notify.test.js}', added: 3, deleted: 33 }],
+    run: allGreen(),
+  });
+  assert.ok(
+    !arrowVerdict.findings.some((f) => f.rule === GATE_RULES.evidence_weakened),
+    'the arrow form is NOT recognised as evidence — this is why the producer must resolve it',
+  );
+
+  const resolvedVerdict = await runGate({
+    config: CONFIG,
+    repoRoot: tempRepo(),
+    acs: [{ id: 'AC2', text: '`npm test` passes' }],
+    acMap: [{ ac: 'AC2', command: 'npm test' }],
+    touched: ['src/notify.test.js'],
+    diffstat: [
+      {
+        file: 'src/notify.test.js',
+        renamed_from: 'src/channels.test.js',
+        added: 3,
+        deleted: 33,
+        tests_before: 12,
+        tests_after: 4,
+        assertions_before: 12,
+        assertions_after: 4,
+      },
+    ],
+    run: allGreen(),
+  });
+  assert.ok(
+    resolvedVerdict.findings.some((f) => f.rule === GATE_RULES.evidence_weakened),
+    `a resolved path with fallen counts fires: ${JSON.stringify(findingRules(resolvedVerdict))}`,
+  );
+});
+
+test('ADDED: counts of zero on both sides are unobserved, not growth — the dialect the counter cannot read', async () => {
+  // THIS DEFECT WAS FOUND BY AN OLDER TEST, NOT BY REASONING, and that is the point of keeping it
+  // named: `run.test.mjs`'s end-to-end case gutted a fixture reading `test one\ntest two` — no
+  // parens, so the counter scored 0/0 on both sides, `0 >= 0 && 0 >= 0` was TRUE, and the rewrite
+  // suppressed a finding the rule had fired on since it was written. A green fix, a red suite.
+  //
+  // The blast radius is every evidence file whose dialect the counter does not parse: a pytest
+  // file, a `.feature`, a `__snapshots__` entry, a JSON fixture. Each would have been forgiven
+  // any deletion at all — the rule at its weakest exactly where it could see least, which is the
+  // opposite of how an unobserved case must degrade. So an exclusion now requires something to
+  // have SURVIVED, not merely to have not decreased.
+  const verdict = await runGate({
+    config: CONFIG,
+    repoRoot: tempRepo(),
+    acs: [{ id: 'AC2', text: '`npm test` passes' }],
+    acMap: [{ ac: 'AC2', command: 'npm test' }],
+    touched: ['test/behaviour.feature'],
+    diffstat: [
+      {
+        file: 'test/behaviour.feature',
+        added: 0,
+        deleted: 12,
+        tests_before: 0,
+        tests_after: 0,
+        assertions_before: 0,
+        assertions_after: 0,
+      },
+    ],
+    run: allGreen(),
+  });
+
+  assert.ok(
+    verdict.findings.some((f) => f.rule === GATE_RULES.evidence_weakened),
+    `zero-before is unreadable, not grown: ${JSON.stringify(findingRules(verdict))}`,
+  );
+});
+
+test('ADDED: a partial count pair is unobserved too — half a measurement is not a measurement', async () => {
+  // `tests_*` present, `assertions_*` absent. The tempting read is "use what you have," but
+  // the two counts exist because each alone is defeated by a measured attack — so honouring
+  // the half that is present would grant an exclusion on exactly the evidence that was shown
+  // to be insufficient. It also makes the rule's behaviour depend on which git call happened
+  // to fail, which is not something a worker should be able to steer.
+  const verdict = await runGate({
+    config: CONFIG,
+    repoRoot: tempRepo(),
+    acs: [{ id: 'AC2', text: '`npm test` passes' }],
+    acMap: [{ ac: 'AC2', command: 'npm test' }],
+    touched: ['test/channels.test.js'],
+    diffstat: [
+      { file: 'test/channels.test.js', added: 39, deleted: 3, tests_before: 5, tests_after: 9 },
+    ],
+    run: allGreen(),
+  });
+
+  assert.ok(
+    verdict.findings.some((f) => f.rule === GATE_RULES.evidence_weakened),
+    `assertions were never counted, so no exclusion is earned: ${JSON.stringify(findingRules(verdict))}`,
+  );
+});
+
+test('ADDED: the finding names the counts, so an operator can see WHY it fired', async () => {
+  // The counts are the diagnostic now, the way the deleted-line total was before. A finding
+  // that says "evidence weakened" while the operator is looking at a diff that ADDED tests
+  // is the false positive all over again, one layer up — they need to see that the
+  // assertions fell even though the blocks rose.
+  const verdict = await runGate({
+    config: CONFIG,
+    repoRoot: tempRepo(),
+    acs: [{ id: 'AC2', text: '`npm test` passes' }],
+    acMap: [{ ac: 'AC2', command: 'npm test' }],
+    touched: ['test/channels.test.js'],
+    diffstat: [
+      {
+        file: 'test/channels.test.js',
+        added: 30,
+        deleted: 9,
+        tests_before: 5,
+        tests_after: 9,
+        assertions_before: 12,
+        assertions_after: 4,
+      },
+    ],
+    run: allGreen(),
+  });
+
+  const finding = verdict.findings.find((f) => f.rule === GATE_RULES.evidence_weakened);
+  assert.ok(finding);
+  assert.match(finding.evidence, /assertions/, 'the assertion counts belong in the evidence');
+  assert.match(finding.evidence, /12/);
+  assert.match(finding.evidence, /4/);
+});
+
+// ---------------------------------------------------------------------------
 // ADDED 2026-07-31 (#69). The off_limits pattern form the fixtures actually ship.
 // ---------------------------------------------------------------------------
 //

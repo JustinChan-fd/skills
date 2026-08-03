@@ -388,6 +388,442 @@ test('an untracked new file is touched — a worker delivers by adding, not only
   assert.equal(entry.deleted, 0);
 });
 
+// --- #74: COUNTING WHAT SURVIVED, against real git ------------------------------------------
+//
+// These run against a real repository on purpose. The gate's own tests hand `checkEvidence`
+// recorded counts, which proves the RULE but says nothing about whether anything produces those
+// counts from an actual `git show` — the mocked-seam shape, where a test injecting a fake at a
+// seam cannot see the seam is missing. So the numbers here come from git.
+//
+// The counting regex is exercised through this path rather than unit-tested in isolation for the
+// same reason: what matters is the count for a file as git hands it over, not for a string I
+// wrote to match my own regex.
+
+// A repo whose test file has real blocks and real assertions, so the counts have something to
+// count. Deliberately includes the shapes the naive regex gets wrong.
+function repoWithRealTests() {
+  const dir = mktemp('repo-counts');
+  git(dir, ['init', '--quiet', '-b', 'main']);
+  git(dir, ['config', 'user.email', 'alfred@example.invalid']);
+  git(dir, ['config', 'user.name', 'Alfred Test']);
+  mkdirSync(join(dir, 'test'), { recursive: true });
+  writeFileSync(
+    join(dir, 'test', 'channels.test.js'),
+    [
+      "import { test } from 'node:test';",
+      "import assert from 'node:assert/strict';",
+      '',
+      "test('sms retries three times', () => {",
+      '  assert.equal(send("sms"), 3);',
+      '  assert.equal(attempts(), 3);',
+      '});',
+      '',
+      "test('push retries three times', () => {",
+      '  assert.equal(send("push"), 3);',
+      '  assert.equal(attempts(), 3);',
+      '});',
+      '',
+    ].join('\n'),
+  );
+  git(dir, ['add', '-A']);
+  git(dir, ['commit', '--quiet', '-m', 'base']);
+  return dir;
+}
+
+test('#74: counts are attached from real git for an evidence file that lost lines', async () => {
+  const repo = repoWithRealTests();
+  // The arm-C shape: one whole test deleted, so the surviving assertions halve.
+  writeFileSync(
+    join(repo, 'test', 'channels.test.js'),
+    [
+      "import { test } from 'node:test';",
+      "import assert from 'node:assert/strict';",
+      '',
+      "test('sms retries three times', () => {",
+      '  assert.equal(send("sms"), 3);',
+      '});',
+      '',
+    ].join('\n'),
+  );
+
+  const seen = await observeTree({ repoRoot: repo, withEvidenceCounts: true });
+  const entry = seen.diffstat.find((e) => e.file === 'test/channels.test.js');
+  assert.ok(entry, 'the evidence file is missing from the diffstat');
+  assert.equal(entry.tests_before, 2, 'two test blocks before');
+  assert.equal(entry.tests_after, 1, 'one after');
+  assert.equal(entry.assertions_before, 4);
+  assert.equal(entry.assertions_after, 1);
+});
+
+test('#74: counts are NOT attached without the flag — the pre-spawn check pays no git calls', async () => {
+  // `treeIsDirty` asks a different question and has no `since` to diff against. If the counts
+  // were unconditional, every dirty check would shell out per evidence file to compare HEAD with
+  // itself, and the pre-spawn path would start failing in repos where a path cannot resolve.
+  const repo = repoWithRealTests();
+  writeFileSync(join(repo, 'test', 'channels.test.js'), 'test("one", () => {});\n');
+
+  const seen = await observeTree({ repoRoot: repo });
+  const entry = seen.diffstat.find((e) => e.file === 'test/channels.test.js');
+  assert.equal(entry.tests_before, undefined);
+  assert.equal(entry.assertions_after, undefined);
+});
+
+test('#74: a pure addition to an evidence file gets no counts — nothing was deleted to explain', async () => {
+  // `checkEvidence` never looks at an entry with `deleted === 0`, so counting it would be work
+  // whose result nothing reads. Asserted so the gating stays deliberate rather than incidental.
+  const repo = repoWithRealTests();
+  const src = readFileSync(join(repo, 'test', 'channels.test.js'), 'utf8');
+  writeFileSync(
+    join(repo, 'test', 'channels.test.js'),
+    `${src}\ntest('email retries', () => {\n  assert.equal(send("email"), 3);\n});\n`,
+  );
+
+  const seen = await observeTree({ repoRoot: repo, withEvidenceCounts: true });
+  const entry = seen.diffstat.find((e) => e.file === 'test/channels.test.js');
+  assert.equal(entry.deleted, 0, 'this fixture must be a pure addition or the test proves nothing');
+  assert.equal(entry.tests_before, undefined);
+});
+
+test('#74: a deleted evidence file counts to zero — an absence measured, not an absence of measurement', async () => {
+  // The strongest signal this rule can receive, and it must not arrive as "unobserved". Deleting
+  // the file outright is the crudest version of the exploit.
+  const repo = repoWithRealTests();
+  rmSync(join(repo, 'test', 'channels.test.js'));
+
+  const seen = await observeTree({ repoRoot: repo, withEvidenceCounts: true });
+  const entry = seen.diffstat.find((e) => e.file === 'test/channels.test.js');
+  assert.ok(entry, 'a deleted file is still a diffstat entry');
+  assert.equal(entry.tests_before, 2);
+  assert.equal(entry.tests_after, 0);
+  assert.equal(entry.assertions_after, 0);
+});
+
+test('#74: it.each and test.skip are counted — the bare regex scores them zero', async () => {
+  // MEASURED: `/\b(it|test)\s*\(/` matches neither `it.each(` nor `test.skip(`, so converting a
+  // suite to `it.each` reads as mass deletion while skipping every test in a file can read as no
+  // change at all. Both are wrong in a direction that moves a verdict.
+  const repo = repoWithRealTests();
+  writeFileSync(
+    join(repo, 'test', 'channels.test.js'),
+    [
+      "test.skip('sms retries three times', () => {",
+      '  assert.equal(send("sms"), 3);',
+      '});',
+      "it.each([1, 2])('push retries %i', (n) => {",
+      '  assert.equal(attempts(), n);',
+      '});',
+      '',
+    ].join('\n'),
+  );
+
+  const seen = await observeTree({ repoRoot: repo, withEvidenceCounts: true });
+  const entry = seen.diffstat.find((e) => e.file === 'test/channels.test.js');
+  assert.equal(entry.tests_after, 2, 'test.skip and it.each are both test blocks');
+});
+
+test('#74: a commented-out test and a test name inside a string do not inflate the count', async () => {
+  // Both inflate a raw-source count, and the second is the one a worker reaches for: comment the
+  // assertions out, leave the block, and a naive counter reports the evidence intact.
+  const repo = repoWithRealTests();
+  writeFileSync(
+    join(repo, 'test', 'channels.test.js'),
+    [
+      "// test('sms retries three times', () => {",
+      "//   assert.equal(send('sms'), 3);",
+      '// });',
+      "const label = \"test('push retries', () => {})\";",
+      '/* test("block comment", () => { assert.ok(true); }); */',
+      "test('the only real one', () => {",
+      '  assert.equal(attempts(), 3);',
+      '});',
+      '',
+    ].join('\n'),
+  );
+
+  const seen = await observeTree({ repoRoot: repo, withEvidenceCounts: true });
+  const entry = seen.diffstat.find((e) => e.file === 'test/channels.test.js');
+  assert.equal(entry.tests_after, 1, 'only the uncommented, unquoted block counts');
+  assert.equal(entry.assertions_after, 1);
+});
+
+test('#74: a renamed evidence file resolves both sides through the arrow', async () => {
+  // MEASURED, and the fixture is what the measurement changed: --numstat only emits
+  // `test/{old => new}.test.js` when RENAME DETECTION fires, which needs >50% similarity — not
+  // merely a `git mv`. The two-test fixture above renamed-and-cut falls under the threshold and
+  // git reports two ordinary entries instead. So this uses a 12-test file with one test removed,
+  // which is both over the threshold and the honest-refactor shape the arrow actually shows up
+  // for in practice. `git show HEAD:test/{a => b}.test.js` fails `path does not exist`, so
+  // unresolved this file arrives with no counts — safe but blind, and rename-plus-gut is real.
+  const repo = mktemp('repo-rename');
+  git(repo, ['init', '--quiet', '-b', 'main']);
+  git(repo, ['config', 'user.email', 'alfred@example.invalid']);
+  git(repo, ['config', 'user.name', 'Alfred Test']);
+  mkdirSync(join(repo, 'test'), { recursive: true });
+  const block = (i) => [`test('case ${i}', () => {`, `  assert.equal(f(${i}), ${i});`, '});'];
+  const all = Array.from({ length: 12 }, (_, i) => block(i)).flat();
+  writeFileSync(join(repo, 'test', 'channels.test.js'), `${all.join('\n')}\n`);
+  git(repo, ['add', '-A']);
+  git(repo, ['commit', '--quiet', '-m', 'base']);
+
+  git(repo, ['mv', 'test/channels.test.js', 'test/notify.test.js']);
+  writeFileSync(join(repo, 'test', 'notify.test.js'), `${all.slice(0, 33).join('\n')}\n`);
+  git(repo, ['add', '-A']);
+
+  const seen = await observeTree({ repoRoot: repo, withEvidenceCounts: true });
+  const entry = seen.diffstat.find((e) => /notify\.test\.js/.test(e.file));
+  assert.ok(entry, `expected a rename entry, got ${JSON.stringify(seen.diffstat)}`);
+  assert.equal(entry.file, 'test/notify.test.js', 'the arrow is RESOLVED, not passed downstream');
+  assert.equal(entry.renamed_from, 'test/channels.test.js', 'and the pre-image is not lost');
+  assert.equal(entry.tests_before, 12, 'the pre-image is read through the rename arrow');
+  assert.equal(entry.tests_after, 11, 'and the post-image from the worktree');
+});
+
+test('#74: a below-threshold rename is two entries and the vanished side counts to zero', async () => {
+  // The other measured half: under 50% similarity git reports an all-deleted old path and an
+  // all-added new one. Nothing needs resolving, and the old path counting to zero is the correct
+  // reading of a file that is gone — which is what makes gutting-via-rename visible either way.
+  const repo = repoWithRealTests();
+  git(repo, ['mv', 'test/channels.test.js', 'test/notify.test.js']);
+  writeFileSync(
+    join(repo, 'test', 'notify.test.js'),
+    ["test('sms retries three times', () => {", '  assert.equal(send("sms"), 3);', '});', ''].join('\n'),
+  );
+  git(repo, ['add', '-A']);
+
+  const seen = await observeTree({ repoRoot: repo, withEvidenceCounts: true });
+  assert.equal(seen.diffstat.length, 2, `expected two entries, got ${JSON.stringify(seen.diffstat)}`);
+  const gone = seen.diffstat.find((e) => e.file === 'test/channels.test.js');
+  assert.equal(gone.tests_before, 2);
+  assert.equal(gone.tests_after, 0, 'the old path is gone from the worktree');
+});
+
+test('#74: an unreadable pre-image degrades that file alone and leaves the rest of the diffstat intact', async () => {
+  // The failure mode that matters most, because `observeTree`'s post-spawn call site sits inside
+  // a try whose catch turns the ENTIRE diffstat to undefined — which would blind
+  // evidence_weakened AND instrument_modified for the whole run, not just for this file.
+  //
+  // The first version of this test passed a nonexistent `since` and failed for the wrong reason:
+  // `git diff --numstat <bad-ref>` throws before any `git show` runs, so it proved the diff can
+  // fail, not that ONE file's read can. The per-file failure is reproduced instead by a path git
+  // reports but cannot show — a submodule gitlink, whose `HEAD:<path>` is a commit object, not a
+  // blob. The plain file beside it must keep its counts.
+  const repo = repoWithRealTests();
+  const inner = mktemp('submodule');
+  git(inner, ['init', '--quiet', '-b', 'main']);
+  git(inner, ['config', 'user.email', 'alfred@example.invalid']);
+  git(inner, ['config', 'user.name', 'Alfred Test']);
+  mkdirSync(join(inner, 'test'), { recursive: true });
+  writeFileSync(join(inner, 'test', 'inner.test.js'), 'test("a", () => { assert.ok(1); });\n');
+  git(inner, ['add', '-A']);
+  git(inner, ['commit', '--quiet', '-m', 'one']);
+
+  git(repo, ['-c', 'protocol.file.allow=always', 'submodule', '--quiet', 'add', inner, 'test/vendor']);
+  git(repo, ['commit', '--quiet', '-m', 'add submodule']);
+  // Move the submodule's HEAD so the gitlink itself shows as changed in the parent.
+  writeFileSync(join(inner, 'test', 'inner.test.js'), 'test("a", () => { assert.ok(1); });\ntest("b", () => { assert.ok(1); });\n');
+  git(inner, ['commit', '--quiet', '-am', 'two']);
+  git(join(repo, 'test', 'vendor'), ['fetch', '--quiet', 'origin']);
+  git(join(repo, 'test', 'vendor'), ['checkout', '--quiet', 'origin/main']);
+  // ...and gut the ordinary evidence file in the same tree.
+  writeFileSync(join(repo, 'test', 'channels.test.js'), 'test("one", () => { assert.ok(1); });\n');
+
+  const seen = await observeTree({ repoRoot: repo, withEvidenceCounts: true });
+  assert.ok(Array.isArray(seen.diffstat), 'the diffstat survived an unreadable pre-image');
+  const plain = seen.diffstat.find((e) => e.file === 'test/channels.test.js');
+  assert.ok(plain, 'the ordinary evidence file is still reported');
+  assert.equal(plain.tests_before, 2, 'and still measured — one bad path costs the others nothing');
+  assert.equal(plain.tests_after, 1);
+});
+
+test('#74: a rename with NO common part has no braces at all, and still resolves', async () => {
+  // FOUND BY RUNNING IT, after the braced form was already handled and believed sufficient. Git
+  // factors out a common prefix/suffix, so the braces appear only when there is something to
+  // factor: a cross-directory move with nothing shared emits the bare
+  // `old/sub/a.test.js => new/deep/b.test.js`. The brace-only parse missed it completely — the
+  // whole 50-char string went to `git show`, which failed, and the file arrived unmeasured. The
+  // rename that moves furthest is the one that hid best.
+  const repo = mktemp('repo-nested');
+  git(repo, ['init', '--quiet', '-b', 'main']);
+  git(repo, ['config', 'user.email', 'alfred@example.invalid']);
+  git(repo, ['config', 'user.name', 'Alfred Test']);
+  mkdirSync(join(repo, 'old', 'sub'), { recursive: true });
+  const block = (i) => [`test('case ${i}', () => {`, `  assert.equal(f(${i}), ${i});`, '});'];
+  const all = Array.from({ length: 12 }, (_, i) => block(i)).flat();
+  writeFileSync(join(repo, 'old', 'sub', 'channels.test.js'), `${all.join('\n')}\n`);
+  git(repo, ['add', '-A']);
+  git(repo, ['commit', '--quiet', '-m', 'base']);
+
+  mkdirSync(join(repo, 'new', 'deep'), { recursive: true });
+  git(repo, ['mv', 'old/sub/channels.test.js', 'new/deep/notify.test.js']);
+  writeFileSync(join(repo, 'new', 'deep', 'notify.test.js'), `${all.slice(0, 33).join('\n')}\n`);
+  git(repo, ['add', '-A']);
+
+  const seen = await observeTree({ repoRoot: repo, withEvidenceCounts: true });
+  const entry = seen.diffstat.find((e) => /notify\.test\.js/.test(e.file));
+  assert.ok(entry, `expected a rename entry, got ${JSON.stringify(seen.diffstat)}`);
+  assert.doesNotMatch(entry.file, /[{}]/, 'this fixture must produce the BRACELESS form');
+  assert.equal(entry.tests_before, 12, 'the pre-image resolved from the left of a bare arrow');
+  assert.equal(entry.tests_after, 11);
+});
+
+test('#74: braces holding whole path segments resolve — one factoring, slashes inside', async () => {
+  // The third rename shape, and the one that settled how strict the inner captures need to be.
+  // Asked for a move where BOTH an intermediate directory and the filename change, git does not
+  // emit two braced groups — it factors once and puts the slashes inside:
+  // `a/{b/c/x.test.js => z/c/y.test.js}`. So `[^{}]*` must still match a path containing `/`,
+  // which this asserts, and the two-braced-segment hazard the tighter regex was supposed to
+  // guard against does not exist in git's output.
+  const repo = mktemp('repo-segments');
+  git(repo, ['init', '--quiet', '-b', 'main']);
+  git(repo, ['config', 'user.email', 'alfred@example.invalid']);
+  git(repo, ['config', 'user.name', 'Alfred Test']);
+  mkdirSync(join(repo, 'a', 'b', 'c'), { recursive: true });
+  const block = (i) => [`test('case ${i}', () => {`, `  assert.equal(f(${i}), ${i});`, '});'];
+  const all = Array.from({ length: 12 }, (_, i) => block(i)).flat();
+  writeFileSync(join(repo, 'a', 'b', 'c', 'x.test.js'), `${all.join('\n')}\n`);
+  git(repo, ['add', '-A']);
+  git(repo, ['commit', '--quiet', '-m', 'base']);
+
+  mkdirSync(join(repo, 'a', 'z', 'c'), { recursive: true });
+  git(repo, ['mv', 'a/b/c/x.test.js', 'a/z/c/y.test.js']);
+  writeFileSync(join(repo, 'a', 'z', 'c', 'y.test.js'), `${all.slice(0, 33).join('\n')}\n`);
+  git(repo, ['add', '-A']);
+
+  // Raw git output asserted directly, because the point of the fixture is which SHAPE git emits,
+  // and `observeTree` no longer passes that shape on — it resolves it.
+  const raw = git(repo, ['diff', '--numstat', 'HEAD', '--']);
+  assert.match(raw, /\{a\/b\/c|\{b\/c/, `expected slashes inside the braces, got ${raw}`);
+
+  const seen = await observeTree({ repoRoot: repo, withEvidenceCounts: true });
+  const entry = seen.diffstat.find((e) => /y\.test\.js/.test(e.file));
+  assert.ok(entry, `expected a rename entry, got ${JSON.stringify(seen.diffstat)}`);
+  assert.equal(entry.file, 'a/z/c/y.test.js', 'a braced group spanning path segments resolved');
+  assert.equal(entry.renamed_from, 'a/b/c/x.test.js');
+  assert.equal(entry.tests_before, 12);
+  assert.equal(entry.tests_after, 11);
+});
+
+test('#74: a rename OUT of test/ is still evidence — the gate sees a real path either way', async () => {
+  // THE DEFECT THIS RESOLUTION EXISTS FOR, and it reached past the rule being fixed. Handed the
+  // raw `src/{a.test.js => b.test.js}`, the gate's own `isEvidence` returns FALSE: the last
+  // segment is `b.test.js}` — with the brace, so `\.test\.js$` misses — and no segment is
+  // `test`. So a renamed test file outside a `test/` directory was invisible to
+  // `evidence_weakened` altogether, and `scope_violation`/`off_limits` were globbing the same
+  // unreal string. `test/{a => b}.test.js` survived only because its prefix happened to be
+  // literally `test`, which is why this was not caught by the first pass of these tests.
+  const repo = mktemp('repo-out-of-test');
+  git(repo, ['init', '--quiet', '-b', 'main']);
+  git(repo, ['config', 'user.email', 'alfred@example.invalid']);
+  git(repo, ['config', 'user.name', 'Alfred Test']);
+  mkdirSync(join(repo, 'src'), { recursive: true });
+  const block = (i) => [`test('case ${i}', () => {`, `  assert.equal(f(${i}), ${i});`, '});'];
+  const all = Array.from({ length: 12 }, (_, i) => block(i)).flat();
+  writeFileSync(join(repo, 'src', 'channels.test.js'), `${all.join('\n')}\n`);
+  git(repo, ['add', '-A']);
+  git(repo, ['commit', '--quiet', '-m', 'base']);
+
+  git(repo, ['mv', 'src/channels.test.js', 'src/notify.test.js']);
+  writeFileSync(join(repo, 'src', 'notify.test.js'), `${all.slice(0, 33).join('\n')}\n`);
+  git(repo, ['add', '-A']);
+
+  const seen = await observeTree({ repoRoot: repo, withEvidenceCounts: true });
+  const entry = seen.diffstat.find((e) => /notify\.test\.js/.test(e.file));
+  assert.ok(entry, `expected a rename entry, got ${JSON.stringify(seen.diffstat)}`);
+  assert.equal(entry.file, 'src/notify.test.js', 'a path the gate can actually match');
+  assert.equal(entry.tests_before, 12, 'and one it will measure, with no test/ segment anywhere');
+  assert.equal(entry.tests_after, 11);
+});
+
+test('#74: a rename that STOPS looking like evidence is still measured — either side counts', async () => {
+  // The falsifier for checking both sides, and it needed a fixture the earlier rename tests could
+  // not provide: every one of them keeps a `.test.js` suffix, so the post-image alone still
+  // satisfies `looksLikeEvidence` and the pre-image check is never load-bearing. Renaming
+  // `test/channels.test.js` to `src/channels.js` is the shape that separates them — the file that
+  // arrives is ordinary source by every rule, while what LEFT was the suite.
+  //
+  // This is not hypothetical evasion so much as the honest version of it: "I moved the assertions
+  // into the module" is a real refactor, and the counts are how the two are told apart. Measured
+  // either way, the operator sees 12 tests became 0.
+  const repo = mktemp('repo-unevidence');
+  git(repo, ['init', '--quiet', '-b', 'main']);
+  git(repo, ['config', 'user.email', 'alfred@example.invalid']);
+  git(repo, ['config', 'user.name', 'Alfred Test']);
+  mkdirSync(join(repo, 'test'), { recursive: true });
+  mkdirSync(join(repo, 'src'), { recursive: true });
+  const block = (i) => [`test('case ${i}', () => {`, `  assert.equal(f(${i}), ${i});`, '});'];
+  const all = Array.from({ length: 12 }, (_, i) => block(i)).flat();
+  writeFileSync(join(repo, 'test', 'channels.test.js'), `${all.join('\n')}\n`);
+  git(repo, ['add', '-A']);
+  git(repo, ['commit', '--quiet', '-m', 'base']);
+
+  git(repo, ['mv', 'test/channels.test.js', 'src/channels.js']);
+  writeFileSync(join(repo, 'src', 'channels.js'), `${all.slice(0, 33).join('\n')}\n`);
+  git(repo, ['add', '-A']);
+
+  const seen = await observeTree({ repoRoot: repo, withEvidenceCounts: true });
+  const entry = seen.diffstat.find((e) => /channels\.js$/.test(e.file));
+  assert.ok(entry, `expected a rename entry, got ${JSON.stringify(seen.diffstat)}`);
+  assert.equal(entry.file, 'src/channels.js', 'the post-image is plain source by every rule');
+  assert.equal(entry.renamed_from, 'test/channels.test.js');
+  assert.equal(entry.tests_before, 12, 'measured anyway, because what LEFT was evidence');
+  assert.equal(entry.tests_after, 11);
+});
+
+test('#74: a literal quote in a filename is decoded — quotePath=false does not cover it', async () => {
+  // The measurement that removed `-c core.quotePath=false` rather than adding it. That flag
+  // unescapes non-ASCII, but a name holding a literal `"` stays quoted under it regardless
+  // (`"test/we\"ird.test.js"`), because raw quotes would make the output unparseable. So the
+  // decoder has to exist either way — and with the flag present, the decoder would only ever run
+  // for names like this one, leaving the common path untested by anything.
+  const repo = mktemp('repo-quote');
+  git(repo, ['init', '--quiet', '-b', 'main']);
+  git(repo, ['config', 'user.email', 'alfred@example.invalid']);
+  git(repo, ['config', 'user.name', 'Alfred Test']);
+  mkdirSync(join(repo, 'test'), { recursive: true });
+  const name = 'we"ird.test.js';
+  writeFileSync(
+    join(repo, 'test', name),
+    'test("a", () => { assert.ok(1); });\ntest("b", () => { assert.ok(1); });\n',
+  );
+  git(repo, ['add', '-A']);
+  git(repo, ['commit', '--quiet', '-m', 'base']);
+  writeFileSync(join(repo, 'test', name), 'test("a", () => { assert.ok(1); });\n');
+
+  const seen = await observeTree({ repoRoot: repo, withEvidenceCounts: true });
+  const entry = seen.diffstat.find((e) => e.file === `test/${name}`);
+  assert.ok(entry, `expected the decoded path, got ${JSON.stringify(seen.touched)}`);
+  assert.equal(entry.tests_before, 2, 'the pre-image resolved, so the counts arrived');
+  assert.equal(entry.tests_after, 1);
+});
+
+test('#74: a non-ASCII path is unescaped, so the gate scores the file that exists on disk', async () => {
+  // MEASURED: git C-quotes any path with a byte outside ASCII, so `test/ünï.test.js` arrives from
+  // BOTH --numstat and ls-files as `"test/\303\274n\303\257.test.js"` — a literal 30-character
+  // string. Left as-is that string is what `isEvidence` matches, what the operator reads in
+  // `touched`, and what `git show HEAD:<path>` is handed. All three are wrong at once, and the
+  // last one silently: the counts just never arrive.
+  const repo = mktemp('repo-utf8');
+  git(repo, ['init', '--quiet', '-b', 'main']);
+  git(repo, ['config', 'user.email', 'alfred@example.invalid']);
+  git(repo, ['config', 'user.name', 'Alfred Test']);
+  mkdirSync(join(repo, 'test'), { recursive: true });
+  const two = 'test("a", () => { assert.ok(1); });\ntest("b", () => { assert.ok(1); });\n';
+  writeFileSync(join(repo, 'test', 'ünï.test.js'), two);
+  git(repo, ['add', '-A']);
+  git(repo, ['commit', '--quiet', '-m', 'base']);
+  writeFileSync(join(repo, 'test', 'ünï.test.js'), 'test("a", () => { assert.ok(1); });\n');
+  writeFileSync(join(repo, 'test', 'nüw.test.js'), two); // untracked, via ls-files
+
+  const seen = await observeTree({ repoRoot: repo, withEvidenceCounts: true });
+  const entry = seen.diffstat.find((e) => e.file === 'test/ünï.test.js');
+  assert.ok(entry, `expected an unescaped path, got ${JSON.stringify(seen.touched)}`);
+  assert.equal(entry.tests_before, 2, 'the pre-image resolved, so the counts arrived');
+  assert.equal(entry.tests_after, 1);
+  const fresh = seen.diffstat.find((e) => e.file === 'test/nüw.test.js');
+  assert.ok(fresh, 'the untracked non-ASCII path is unescaped too');
+  assert.equal(fresh.added, 2, 'and its line count resolved, which needs the real filename');
+});
+
 // --- executeWork: the eight steps, and what must happen before anything spends ---
 
 const stubSpawn = (impl) => (argv, opts) => Promise.resolve(impl(argv, opts));

@@ -193,6 +193,195 @@ const numstat = async (repoRoot, args) => {
   return stdout;
 };
 
+// GIT C-QUOTES PATHS, AND THE ESCAPED FORM IS WHAT THE GATE WOULD SCORE. Measured: a path with
+// any byte outside ASCII arrives from `--numstat` AND `ls-files` as
+// `"test/\303\274n\303\257.test.js"` — surrounding quotes and octal escapes, a literal 30-char
+// string for a 16-char filename. Left encoded, three things break at once: `isEvidence` matches
+// against an escaped path, the operator reads the escaped path in `touched`, and
+// `git show HEAD:<that>` cannot resolve it — the last one silently, as absent counts.
+//
+// `-c core.quotePath=false` WAS the first fix here and was removed deliberately. It handles the
+// non-ASCII case, but a name containing a literal `"`, a tab, or a newline is still quoted under
+// it (verified: `"test/we\"ird.test.js"`), because leaving those raw would make the output
+// unparseable. So a decoder is needed regardless — and once it exists, the flag only serves to
+// keep the common case AWAY from it, leaving the decoder exercised solely by names nobody has.
+// One path that always runs beats two where the tested one is the rare one.
+//
+// Octal before the simple escapes: decoding `\\` first would eat the backslash `\303` needs.
+// Bytes are collected and decoded as UTF-8 at the end because one character is several octal
+// escapes, and decoding each alone yields mojibake.
+const unquotePath = (raw) => {
+  const s = String(raw);
+  if (!(s.startsWith('"') && s.endsWith('"') && s.length >= 2)) return s;
+  const body = s.slice(1, -1);
+  const bytes = [];
+  for (let i = 0; i < body.length; i += 1) {
+    if (body[i] !== '\\') {
+      bytes.push(...Buffer.from(body[i], 'utf8'));
+      continue;
+    }
+    const next = body[i + 1];
+    if (next >= '0' && next <= '7') {
+      bytes.push(Number.parseInt(body.slice(i + 1, i + 4), 8));
+      i += 3;
+      continue;
+    }
+    const simple = { n: 10, t: 9, r: 13, b: 8, f: 12, v: 11, a: 7, '\\': 92, '"': 34 };
+    if (next in simple) {
+      bytes.push(simple[next]);
+      i += 1;
+      continue;
+    }
+    bytes.push(92);
+  }
+  return Buffer.from(bytes).toString('utf8');
+};
+
+// COUNTING WHAT SURVIVED (#74). The two numbers `checkEvidence` needs to tell a refactor from
+// an exploit — see `evidenceGrew` in gate.mjs for why one number is not enough.
+//
+// STRIP BEFORE COUNTING, in this order. A commented-out `it(` and an `it(` inside a string
+// literal both inflate the block count, and a worker that comments out its assertions would
+// otherwise read as having kept them. Block comments first, then line comments, then string
+// and template bodies — the naive regex-on-raw-source version counts all three.
+const stripNonCode = (src) =>
+  String(src)
+    .replace(/\/\*[\s\S]*?\*\//g, ' ')
+    .replace(/(^|[^:])\/\/[^\n]*/g, '$1')
+    .replace(/`(?:\\.|[^`\\])*`/g, '``')
+    .replace(/'(?:\\.|[^'\\\n])*'/g, "''")
+    .replace(/"(?:\\.|[^"\\\n])*"/g, '""');
+
+// `(\.\w+)*` is load-bearing and was measured: the bare `/\b(it|test)\s*\(/` form scores ZERO
+// for `it.each`, `test.skip`, and `it.todo`, so converting a suite to `it.each` looks like mass
+// deletion while skipping every test in a file can look like no change at all. `describe` counts
+// because a deleted describe block takes its children with it.
+const TEST_BLOCK = /\b(?:it|test|describe)(?:\.\w+)*\s*\(/g;
+
+// Assertion shapes across the runners Alfred actually meets (vitest/jest `expect`, node:test
+// `assert`, chai `.should`). Counted rather than pattern-matched for correctness: the question
+// is only "did the number of things that can fail go down", so a broad count is right and a
+// missed dialect shows up as an unobserved pair, which is graded as before.
+const ASSERTION = /\bexpect\s*\(|\bassert\b\s*(?:\.\w+)?\s*\(|\.\s*should\b|\btoBe(?:Truthy|Falsy|Null|Defined)?\s*\(|\btoEqual\s*\(/g;
+
+const countMatches = (src, re) => {
+  re.lastIndex = 0;
+  let n = 0;
+  while (re.exec(src) !== null) n += 1;
+  return n;
+};
+
+const countsFor = (src) => ({
+  tests: countMatches(stripNonCode(src), TEST_BLOCK),
+  assertions: countMatches(stripNonCode(src), ASSERTION),
+});
+
+// Same shape as gate.mjs's `isEvidence`, and DUPLICATED rather than imported on purpose: the
+// gate must stay a pure function of its inputs (no repo reads), and this side must stay free to
+// widen what it measures without moving the rule that grades. A file this misses arrives at the
+// gate with no counts, which is graded exactly as it was before #74 — the safe direction.
+const looksLikeEvidence = (file) => {
+  const parts = String(file).split('\\').join('/').replace(/^\.\//, '').split('/');
+  if (parts.some((p) => ['test', 'tests', 'spec', '__tests__'].includes(p))) return true;
+  return /\.(test|spec)\.[cm]?[jt]sx?$/.test(parts[parts.length - 1] ?? '');
+};
+
+// `test/{old.js => new.js}` is what --numstat emits for a rename, and `git show <ref>:<that>`
+// fails `fatal: path does not exist` — reproduced, no config needed. Both sides are recoverable
+// from the one path, so the rename is resolved rather than dropped.
+//
+// WHEN THE ARROW APPEARS AT ALL, measured, because I had assumed `git mv` was enough: the arrow
+// is a RENAME-DETECTION artifact, not a `git mv` one. Moving a 12-test file and cutting one test
+// yields `test/{channels => notify}.test.js`; moving a 2-test file and cutting one yields TWO
+// separate entries, an all-deleted old path and an all-added new one, because similarity fell
+// under git's 50% threshold. Both shapes are handled — the split shape needs nothing, since each
+// path resolves on its own side, and the all-deleted old path counting to zero is the correct
+// reading of a file that is gone.
+//
+// TWO SHAPES, NOT ONE, and the second was missed until a nested rename was actually run. Git
+// factors out a COMMON prefix and suffix, so the braces only appear when there is something to
+// factor. Measured:
+//
+//   test/{channels.test.js => notify.test.js}          same directory  → braces
+//   {test => spec}/channels.test.js                    sibling dir     → braces
+//   old/sub/channels.test.js => new/deep/notify.test.js nothing shared  → NO BRACES
+//
+// The brace-only regex silently missed that third form entirely: `before` came back as the whole
+// 50-char string, `git show` failed, and the file arrived unmeasured — the exact blind spot this
+// function exists to close, for the rename that moves furthest and hides most.
+//
+// `[^{}]*` rather than `.*` on the inner captures, and the honest status of that choice: it is a
+// stricter parse of the documented format, NOT a fix for an observed failure. I claimed it
+// protected against a path with two braced segments; git does not emit one. Asked for a move
+// where both the middle directory and the filename change, it factors once and puts the slashes
+// INSIDE the braces — `a/{b/c/x.test.js => z/c/y.test.js}` — which greedy and lazy parse
+// identically. The mutation to `.*` survived the whole suite, and rather than keep a comment
+// asserting a hazard nothing can produce, this records that the two forms are indistinguishable
+// on real git output and the tighter one is kept on principle alone.
+//
+// The braced form is tried FIRST, and that order is load-bearing. A braced path also contains
+// ` => `, so splitting on the arrow first would tear `test/{a => b}.test.js` into `test/{a` and
+// `b}.test.js`. Only a path with no braces at all can be split on the bare arrow.
+const renamePaths = (file) => {
+  const braced = /^([^{}]*)\{([^{}]*) => ([^{}]*)\}([^{}]*)$/.exec(file);
+  if (braced) {
+    const [, prefix, from, to, suffix] = braced;
+    // `split('//')` handles git's `{ => sub}/f.js` form, where one side is empty and the naive
+    // join leaves a doubled separator.
+    const clean = (s) => `${prefix}${s}${suffix}`.split('//').join('/');
+    return { before: clean(from), after: clean(to) };
+  }
+  // A filename may legally contain ` => ` (verified: git emits `test/old => new.test.js`
+  // unquoted, so the output is genuinely ambiguous and no parse can be certain). Split anyway —
+  // it is the only reading that makes the no-common-part rename measurable — but only when
+  // BOTH halves resolve to something git can show. `evidenceCounts` returns null if the
+  // pre-image read fails, so a misread arrives as unobserved, which is the pre-#74 grade.
+  const arrow = /^(.+?) => (.+)$/.exec(file);
+  if (arrow) return { before: arrow[1], after: arrow[2] };
+  return { before: file, after: file };
+};
+
+// ONE try/catch PER SIDE PER FILE, and this is the whole reason this is a separate function.
+// `observeTree`'s post-spawn call site sits inside a try whose catch turns the ENTIRE diffstat
+// to undefined — so an unguarded `git show` throw here would blind `evidence_weakened` AND
+// `instrument_modified` for the run, on any repo where one path failed to resolve. A file that
+// cannot be read on both sides contributes nothing and costs nothing.
+// `before`/`after` are passed IN rather than re-derived from `file`, because `observeTree` now
+// resolves the rename at the parse and `file` is already the post-image — re-parsing it here
+// would find no arrow and read the pre-image at the new path, which does not exist at `since`.
+async function evidenceCounts({ repoRoot, since, before, after }) {
+  const read = async (ref, path) => {
+    try {
+      return await numstat(repoRoot, ['show', `${ref}:${path}`]);
+    } catch {
+      return null;
+    }
+  };
+
+  const src0 = await read(since, before);
+  if (src0 === null) return null;
+
+  // The worktree, not `HEAD:` — the gate scores what the worker left on disk, and the post-spawn
+  // observation happens before anything is committed.
+  let src1 = null;
+  try {
+    src1 = readFileSync(join(repoRoot, after), 'utf8');
+  } catch {
+    // Deleted outright. The counts go to zero, which is a real observation and the strongest
+    // possible signal for this rule — not an absence.
+    src1 = '';
+  }
+
+  const b = countsFor(src0);
+  const a = countsFor(src1);
+  return {
+    tests_before: b.tests,
+    tests_after: a.tests,
+    assertions_before: b.assertions,
+    assertions_after: a.assertions,
+  };
+}
+
 // What the worker actually did to the tree, in the shape the gate reads.
 //
 // `added`/`deleted` PER FILE, because `checkEvidence` filters on `Number(entry.deleted) > 0` and
@@ -203,27 +392,59 @@ const numstat = async (repoRoot, args) => {
 // whole new module could land outside the declared scope unseen. `--intent-to-add` on a
 // throwaway index would mutate the tree being scored, so the untracked files are listed
 // separately and counted by hand.
-export async function observeTree({ repoRoot, since = 'HEAD' } = {}) {
+// COUNTS ARE OPT-IN (#74), and the flag exists because there are two call sites with different
+// questions. `treeIsDirty` asks "is anything here at all" BEFORE the spawn — it has no `since` to
+// diff a worker's edits against, and counting there would spend git calls to compare HEAD with
+// itself. The post-spawn observation is the one whose answer the gate grades.
+export async function observeTree({ repoRoot, since = 'HEAD', withEvidenceCounts = false } = {}) {
   const entries = new Map();
 
   const tracked = await numstat(repoRoot, ['diff', '--numstat', since, '--']);
   for (const line of tracked.split('\n')) {
     if (!line.trim()) continue;
     const [added, deleted, ...rest] = line.split('\t');
-    const file = rest.join('\t');
-    if (!file) continue;
+    // `rest.join('\t')` because a path may contain a tab — in which case git quotes it and the
+    // tab arrives as the two characters `\t`, so the join is defensive rather than load-bearing.
+    // Unquoted here, at the parse, so every downstream consumer (the gate's `isEvidence`, the
+    // operator-facing `touched`, `git show`) sees the path as it exists on disk.
+    const raw = unquotePath(rest.join('\t'));
+    if (!raw) continue;
+
+    // THE RENAME ARROW IS RESOLVED HERE, NOT LEFT FOR THE GATE, and this was the last defect the
+    // #74 tests found — the one that reached furthest past the rule being fixed.
+    //
+    // Shipping `a/{b/c/x.test.js => z/c/y.test.js}` as `file` hands the gate a string that is not
+    // a path, and EVERY rule keyed on the path then reads it wrong. Measured on the real
+    // predicates: `isEvidence` is false, because the last segment is `y.test.js}` — with the
+    // brace, so the `\.test\.js$` regex misses — and no segment equals `test`. So a renamed test
+    // file OUTSIDE a `test/` directory was invisible to `evidence_weakened` entirely, and the
+    // same wrong string is what `scope_violation` and `off_limits` glob against and what
+    // `touched` shows the operator. `test/{a => b}.test.js` happened to survive only because its
+    // prefix segment was literally `test`, which is why the first pass of these tests missed it.
+    //
+    // `after` is the right identity: it is what exists on disk now, what the operator can open,
+    // and what every path pattern is written against. The pre-image is not lost — `renamePaths`
+    // recovers it from the raw string for the counts, and `renamed_from` records it so a reader
+    // is not left wondering why a file with deletions has no history at that path.
+    const { before, after } = renamePaths(raw);
+    const file = after;
     // `-` for a binary file. Zero would read as "observed and unchanged", which is a claim this
     // cannot make, so it is carried as null and the gate's `Number(null) > 0` reads false.
     entries.set(file, {
       file,
       added: added === '-' ? null : Number(added),
       deleted: deleted === '-' ? null : Number(deleted),
+      ...(before === after ? {} : { renamed_from: before }),
     });
   }
 
+  // MEASURED: `ls-files` quotes on the same rule as `--numstat`, so an untracked non-ASCII path
+  // arrives escaped here too. Unquoted before it is used as an argv path, or the `--no-index`
+  // count below runs against a filename that does not exist and the file lands with `added: null`.
   const untracked = await numstat(repoRoot, ['ls-files', '--others', '--exclude-standard']);
-  for (const file of untracked.split('\n')) {
-    if (!file.trim()) continue;
+  for (const raw of untracked.split('\n')) {
+    if (!raw.trim()) continue;
+    const file = unquotePath(raw);
     let added = 0;
     try {
       // `git diff --no-index /dev/null <file>` counts the lines without touching the index.
@@ -239,6 +460,23 @@ export async function observeTree({ repoRoot, since = 'HEAD' } = {}) {
   }
 
   const diffstat = [...entries.values()];
+
+  // Evidence files only, and only when asked. Each file's counts are attached or omitted
+  // independently — one unresolvable path must not cost the others their measurement, and an
+  // omitted pair is graded exactly as it was before #74.
+  if (withEvidenceCounts) {
+    for (const entry of diffstat) {
+      // EITHER SIDE OF A RENAME COUNTS AS EVIDENCE. A file moved OUT of `test/` into `src/` is
+      // still a deletion of evidence, and asking only about the post-image would grant an
+      // exclusion for the move itself.
+      const before = entry.renamed_from ?? entry.file;
+      if (!(looksLikeEvidence(entry.file) || looksLikeEvidence(before))) continue;
+      if (!(Number(entry.deleted) > 0)) continue;
+      const counts = await evidenceCounts({ repoRoot, since, before, after: entry.file });
+      if (counts) Object.assign(entry, counts);
+    }
+  }
+
   return { diffstat, touched: diffstat.map((e) => e.file) };
 }
 
@@ -492,7 +730,10 @@ export async function executeWork({
   // `instrument_modified` while the verdict reads exactly like a pass (#63).
   let observed = { diffstat: undefined, touched: [] };
   try {
-    observed = await observeTree({ repoRoot: root });
+    // `withEvidenceCounts` HERE and not in the pre-spawn dirty check: this is the observation
+    // the gate grades, and `since` defaults to HEAD, which is the worker's true baseline
+    // precisely because `treeIsDirty` refused to spawn against anything uncommitted.
+    observed = await observeTree({ repoRoot: root, withEvidenceCounts: true });
   } catch (err) {
     // UNOBSERVED, and left as `undefined` rather than `[]`. `[]` would assert "no evidence was
     // weakened" off a measurement that failed, which is the exact collapse #63 removed.

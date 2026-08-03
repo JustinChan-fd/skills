@@ -537,6 +537,64 @@ function checkClaims({ claims, commands, findings }) {
 // observes the tree — the gate never runs git itself, per PLAN.md:186 ("the gate never edits
 // the repo") and because a gate that measured its own inputs could not be handed recorded
 // ones by a test.
+// DID THE EVIDENCE GET STRONGER? (#74). The exclusion that separates a refactor from an
+// exploit — and it needs TWO counts, because either alone is defeated by a measured attack.
+//
+// WHY NOT LINES. The rule above fired on the real jarvis#7 refactor
+// (`NotesPageHeader.test.tsx 88 36`), which collapsed boilerplate into a helper and took the
+// file from 5 tests to 9. No churn threshold can separate that from arm C's
+// `test/channels.test.js 39 3`, where the 3 deleted lines were the only assertion that could
+// fail: both are "+many -few". What separates them is what SURVIVED.
+//
+// WHY BOTH COUNTS, each attack measured against the single-count version:
+//
+//   Blocks only    — delete 3 real assertions, add 4 empty `it()`. 5→9, byte-identical to the
+//                    honest shape, so the exploit is excluded.
+//   Blocks only    — replace every assertion in kept tests with `expect(true).toBe(true)`.
+//                    Count unchanged, so the rule newly MISSES what the line-based rule
+//                    caught. A regression dressed as a fix.
+//   Assertions only— split one strong test into two weak ones and the total can hold while
+//                    the structure rots; the block count is what notices a test vanished.
+//
+// BOTH PAIRS OR NEITHER. A partial pair is unobserved, not partially observed: honouring the
+// half that is present would grant an exclusion on exactly the evidence shown above to be
+// insufficient, and it would make the verdict depend on which git call happened to fail —
+// something a worker must not be able to steer. Absence is stated explicitly with `!= null`
+// rather than left to `9 >= undefined` evaluating false, because that is a coercion accident
+// and not a decision.
+//
+// ZERO BEFORE IS NOT GROWTH, AND THIS ONE WAS CAUGHT BY AN OLDER TEST RATHER THAN REASONED OUT.
+// `run.test.mjs`'s end-to-end case deletes lines from a fixture reading `test one\ntest two` —
+// no parens, so the counter scores 0/0 both sides, `0 >= 0 && 0 >= 0` was true, and the rule
+// SUPPRESSED a finding it had fired on for as long as it has existed. The blast radius is every
+// evidence file whose dialect the counter does not read: a pytest file, a `.feature`, a
+// `__snapshots__` entry, a JSON fixture. Each would have been silently forgiven for any
+// deletion, and the more foreign the file the more complete the exemption — the rule would have
+// been weakest exactly where it was least able to see. So an exclusion requires something to
+// have survived: `after > 0` on both counts. A file measured at zero before is a file this
+// counter cannot read, which is the unobserved case and graded as it was before #74.
+const evidenceGrew = (entry) => {
+  const { tests_before: tb, tests_after: ta, assertions_before: ab, assertions_after: aa } = entry;
+  if (tb == null || ta == null || ab == null || aa == null) return false;
+  if (![tb, ta, ab, aa].every((n) => Number.isFinite(Number(n)))) return false;
+  if (!(Number(ta) > 0 && Number(aa) > 0)) return false;
+  return Number(ta) >= Number(tb) && Number(aa) >= Number(ab);
+};
+
+// The counts, for the finding's evidence string. They are the diagnostic now, the way the
+// deleted-line total was before: an operator staring at a diff that ADDED tests needs to see
+// that the assertions fell anyway, or the finding reads as the false positive it replaced.
+const countsOf = (entry) => {
+  const parts = [];
+  if (entry.tests_before != null && entry.tests_after != null) {
+    parts.push(`tests ${entry.tests_before} -> ${entry.tests_after}`);
+  }
+  if (entry.assertions_before != null && entry.assertions_after != null) {
+    parts.push(`assertions ${entry.assertions_before} -> ${entry.assertions_after}`);
+  }
+  return parts.length ? ` (${parts.join(', ')})` : '';
+};
+
 function checkEvidence({ diffstat, config, acMap, findings }) {
   // Absent is UNOBSERVED, not clean — and this rule cannot tell the two apart, which is a
   // real limit rather than a safe default. A caller that passes nothing gets no finding and
@@ -547,7 +605,12 @@ function checkEvidence({ diffstat, config, acMap, findings }) {
 
   const weakened = diffstat
     .filter((entry) => entry && isEvidence(entry.file) && Number(entry.deleted) > 0)
-    .map((entry) => ({ file: normalize(entry.file), deleted: Number(entry.deleted) }));
+    .filter((entry) => !evidenceGrew(entry))
+    .map((entry) => ({
+      file: normalize(entry.file),
+      deleted: Number(entry.deleted),
+      counts: countsOf(entry),
+    }));
   if (weakened.length === 0) return;
 
   // Conjunct 2. Both sources, because the dependency is a property of the RUN and not of the
@@ -568,7 +631,7 @@ function checkEvidence({ diffstat, config, acMap, findings }) {
       // and what leans on them. Counts included: "evidence was weakened" without a number
       // sends the operator back to git to learn whether it was three lines or three hundred.
       [
-        ...weakened.map((w) => `${w.file}: ${w.deleted} line(s) deleted`),
+        ...weakened.map((w) => `${w.file}: ${w.deleted} line(s) deleted${w.counts}`),
         ...suiteCommands.map((c) => `${c.source} runs the suite: ${c.command}`),
       ].join('\n'),
     ),
