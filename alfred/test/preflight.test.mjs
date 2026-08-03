@@ -281,6 +281,114 @@ test('case is NOT normalised, and that is a decision with a reason', () => {
   assert.equal(out.reason, 'quote-not-in-body');
 });
 
+// --- D2: the transport unescapes what the body still holds -------------------
+//
+// MEASURED ON A REAL TICKET, jarvis#11, run 20260803T150555Z-11 — a live refusal that cost
+// $0.067 and was WRONG. Its body contains eight literal backslashes, because the author typed
+// escaped quotes into the GitHub issue: the bytes on disk are `the AI-generated \"Today's
+// Focus\"`. The worker quoted that sentence FAITHFULLY, backslashes and all. But an attestation
+// arrives as JSON, so `JSON.parse` turned the worker's `\\"` into a bare `"` — and
+// `text.includes(quote)` then compared a body holding `\"` against a quote holding `"` and
+// refused a correct quotation as a paraphrase.
+//
+// WHY THIS IS THE SAME DECISION AS WHITESPACE, NOT THE SAME AS CASE. This module's own header
+// draws the line where the AUTHOR had no choice: markdown reflow is imposed by the renderer, so
+// whitespace is normalised; nothing imposes capitalisation, so case is not. JSON escaping is
+// imposed by the TRANSPORT — the worker cannot emit a backslash-quote through a JSON string
+// without it being decoded on arrival — so it falls on the whitespace side of that line. The
+// worker's compliance is not what varies; the encoding is.
+//
+// AND IT DOES NOT WIDEN INTO PARAPHRASE. The next two tests are the falsifiers: a real
+// paraphrase and a case change must still refuse after this. Unescaping is a fixed, finite
+// rewrite of two characters into one, not a similarity relaxation — it has the natural stopping
+// point that case-folding was rejected for lacking.
+test('ADDED D2: a JSON-unescaped quote still matches a body that holds the escape', () => {
+  // The literal jarvis#11 bytes. `\\"` in a JS source string is one backslash then one quote —
+  // exactly what is in the issue body — and the worker's quote is what JSON.parse yields from it.
+  const body = [
+    '## Details',
+    '',
+    '**Acceptance criteria:**',
+    '- [ ] Completed todos never reappear in the AI-generated \\"Today\'s Focus\\" section',
+    '',
+  ].join('\n');
+  const criteria = [
+    { id: 'AC1', text: 'Completed todos never reappear in the AI-generated \\"Today\'s Focus\\" section' },
+  ];
+
+  const out = checkAttestation({
+    attestation: {
+      // What `JSON.parse` hands back: the backslashes are gone, consumed as escapes.
+      criteria: [
+        { id: 'AC1', quote: 'Completed todos never reappear in the AI-generated "Today\'s Focus" section', confidence: 0.9 },
+      ],
+    },
+    criteria,
+    body,
+  });
+
+  assert.equal(out.refused, false, out.detail ?? '');
+  assert.equal(out.attested, 1, 'the criterion must count as attested, not merely escape refusal');
+});
+
+test('ADDED D2: unescaping does NOT let a paraphrase through', () => {
+  // The falsifier that matters. If the fix were implemented by loosening the comparison — stripping
+  // punctuation, or comparing on alphanumerics only — this would start passing, and the check would
+  // have lost the one thing it exists for. Same body as above, quote reworded.
+  const body = '- [ ] Completed todos never reappear in the AI-generated \\"Today\'s Focus\\" section';
+  const criteria = [
+    { id: 'AC1', text: 'Completed todos never reappear in the AI-generated \\"Today\'s Focus\\" section' },
+  ];
+
+  const out = checkAttestation({
+    attestation: {
+      criteria: [
+        { id: 'AC1', quote: 'Finished todo items should not show up again in the daily focus summary', confidence: 0.9 },
+      ],
+    },
+    criteria,
+    body,
+  });
+
+  assert.equal(out.refused, true, 'a paraphrase must still refuse after unescaping');
+  assert.equal(out.reason, 'quote-not-in-body');
+});
+
+test('ADDED D2: unescaping does NOT quietly start normalising case', () => {
+  // The second falsifier, guarding the OTHER boundary the header drew. Unescaping is a rewrite of
+  // the encoding; case-folding is a relaxation of the content. A fix that reached for
+  // `toLowerCase()` would pass the first test and this one would catch it.
+  const body = '- [ ] Completed todos never reappear in the AI-generated \\"Today\'s Focus\\" section';
+  const criteria = [
+    { id: 'AC1', text: 'Completed todos never reappear in the AI-generated \\"Today\'s Focus\\" section' },
+  ];
+
+  const out = checkAttestation({
+    attestation: {
+      criteria: [
+        { id: 'AC1', quote: 'completed todos never reappear in the ai-generated "today\'s focus" section', confidence: 0.9 },
+      ],
+    },
+    criteria,
+    body,
+  });
+
+  assert.equal(out.refused, true, 'case must still refuse — only the escaping is forgiven');
+  assert.equal(out.reason, 'quote-not-in-body');
+});
+
+test('ADDED D2: a body with no escapes at all is unaffected', () => {
+  // The regression guard on the ordinary case, which is every other ticket. A rewrite applied to
+  // both sides must be a no-op when there is nothing to rewrite, or this fix silently changes the
+  // behaviour of the seven records already in the sink.
+  const out = checkAttestation({
+    attestation: good({ criteria: [{ id: 'AC1', quote: CRITERIA[0].text, confidence: 0.9 }] }),
+    criteria: CRITERIA.slice(0, 1),
+    body: BODY,
+  });
+  assert.equal(out.refused, false, out.detail ?? '');
+});
+
 test('a quote in the body but from the WRONG criterion refuses', () => {
   // Without this, one true sentence satisfies every id. The worker quotes AC2's text under AC1:
   // both halves of a naive check pass — it IS in the body — and the attestation says nothing about

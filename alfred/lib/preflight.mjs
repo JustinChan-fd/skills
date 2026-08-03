@@ -79,7 +79,31 @@ const isObject = (v) => v !== null && typeof v === 'object' && !Array.isArray(v)
 // renderer; nothing forces case. Relaxing it has no natural stopping point — punctuation next, then
 // stemming, and at the end the check passes for a paraphrase, which is the one thing it exists to
 // catch. A worker that cannot reproduce capitalisation is not quoting.
-const norm = (s) => String(s ?? '').replace(/\s+/g, ' ').trim();
+//
+// JSON ESCAPING IS NORMALISED, FOR THE WHITESPACE REASON AND NOT THE CASE ONE. Measured on
+// jarvis#11 (run 20260803T150555Z-11): a live refusal that cost $0.067 and was wrong. That issue
+// body contains eight literal backslashes — the author typed escaped quotes into GitHub, so the
+// bytes are `the AI-generated \"Today's Focus\"`. The worker quoted the sentence faithfully,
+// backslashes included. But an attestation arrives as JSON, so parsing turned its `\\"` into a
+// bare `"`, and `text.includes(quote)` then compared a body holding `\"` against a quote holding
+// `"` and called a correct quotation a paraphrase.
+//
+// The line this module draws is whether the AUTHOR had a choice. Markdown reflow is imposed by
+// the renderer, so whitespace collapses; nothing imposes capitalisation, so case does not. JSON
+// escaping is imposed by the TRANSPORT — a worker cannot put a backslash-quote through a JSON
+// string and have it survive parsing — which puts it on the whitespace side. What varies is the
+// encoding, not the worker's compliance.
+//
+// AND IT DOES NOT WIDEN TOWARD PARAPHRASE, which is the objection that killed case-folding. This
+// is a fixed rewrite of two characters into one, applied identically to both sides; it has the
+// natural stopping point that "punctuation next, then stemming" lacked. Both falsifiers are
+// asserted: a reworded quote and a lowercased quote must still refuse.
+//
+// APPLIED TO BOTH SIDES, deliberately. Unescaping only the body would leave a worker that DOES
+// emit the backslashes (through a raw fenced block rather than a JSON string) refused for the
+// mirror-image reason — the same defect facing the other way.
+const unescapeJsonish = (s) => s.replace(/\\(["'\\])/g, '$1');
+const norm = (s) => unescapeJsonish(String(s ?? '').replace(/\s+/g, ' ').trim());
 
 function refuse(reason, detail, extra = {}) {
   return { refused: true, reason, detail, attested: 0, checks: [], ...extra };
