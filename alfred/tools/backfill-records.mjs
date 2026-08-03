@@ -312,6 +312,19 @@ for (const run of RUNS) {
     // else. Carried, never re-resolved: the library deliberately never resolves this field
     // (PLAN.md deviation 5), so re-deriving it would invent a value the run never had.
     sink: before.sink ?? null,
+    // AND `stop`, ADDED 2026-08-03 THE SAME DAY THE FIELD WAS. Enumerated here immediately rather
+    // than left for the `emptied` guard to catch, because this is the third instance of the pattern
+    // the two comments above describe — `preflight` found by hand, `sink` found by an audit — and
+    // the lesson recorded there is that the shape is not "I forgot a field", it is "this tool
+    // reconstructs a record by enumerating keys, so every NEW key is a loss until it is named here."
+    //
+    // CARRIED, NEVER RE-DERIVED. How a run stopped is knowable only from the launcher's own timer
+    // and the log as it stood at the time; re-deriving it today would invent a stop the run never
+    // reported. The nine records that predate the field carry no `stop` at all, and `?? null` keeps
+    // them null — correct, and exactly what `stopBlock`'s null means: this record cannot answer
+    // that question. Reading them as `killed: false` would put nine pre-field runs into the
+    // denominator of the cap-rate as runs that did not hit the cap.
+    stop: before.stop ?? null,
     provenance: { arm: ARM_IDS.THIN, backfilled: true, notes: run.notes },
   });
 

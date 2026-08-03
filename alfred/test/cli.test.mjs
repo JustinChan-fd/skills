@@ -1180,3 +1180,52 @@ test('ADDED B3: mode push with no pr wanted does not read as a failure', () => {
   assert.doesNotMatch(out, /NOT opened/, 'a run that wanted no pr is reported as missing one');
   assert.doesNotMatch(out, /NOT DELIVERED/);
 });
+
+test('ADDED 2026-08-03: a run stopped short says so on the console, and a clean one stays silent', () => {
+  // THE OPERATOR HALF of the `stop` field. `record: ok cost $6.030214` was the entire console
+  // summary of `20260803T141200Z-7` — a run killed at the wall cap with 12 edits half-applied.
+  // `ok` is correct there: it reports on the ACCOUNTING, and the accounting of a truncated run
+  // succeeds. So the one line an operator reads said nothing about the run being cut off.
+  //
+  // NOT COVERED BY THE GATE'S FINDINGS, which do carry the prose: they print further down, and the
+  // question "was this run complete?" should not require reading a rule name to answer.
+  const capped = [];
+  reportRecord(
+    {
+      ok: true, error: null, gaps: [], cost: { total_usd: 6.030214, vendor_usd: 6.352074599999998 },
+      stop: { killed: true, reason: 'wall_cap', signal: 'SIGTERM', at_ms: 1500264 },
+    },
+    { out: (line) => capped.push(line) },
+  );
+  const lines = capped.join('\n');
+  assert.match(lines, /STOPPED SHORT/, 'a capped run printed as an ordinary success');
+  assert.match(lines, /wall_cap/);
+  assert.match(lines, /1500s/, 'the operator is not told WHEN — a 4s stop and a 25min stop read alike');
+  // The cost line survives, for `NOT SAVED`'s reason directly above: this is added information, not
+  // a replacement, and a truncated run's spend is exactly the figure that must not be suppressed.
+  assert.match(lines, /\$6\.030214/, 'the stop line suppressed the cost of the run that was cut off');
+
+  // SILENT ON A CLEAN RUN — the falsifier, and the rule `reportSync`'s unconfigured sink follows: a
+  // line printed on every tick is a line an operator learns to skip.
+  const clean = [];
+  reportRecord(
+    {
+      ok: true, error: null, gaps: [], cost: { total_usd: 1.5, vendor_usd: 1.5 },
+      stop: { killed: false, reason: null, signal: null, at_ms: null },
+    },
+    { out: (line) => clean.push(line) },
+  );
+  assert.doesNotMatch(clean.join('\n'), /STOPPED SHORT/, 'a completed run was announced as stopped short');
+
+  // AND A CLI-SIDE STOP IS ANNOUNCED TOO, though `killed` is false. This is the case a reader of the
+  // boolean alone would miss: measured on TARS-1351, the CLI spent the whole budget and exited 0.
+  const budget = [];
+  reportRecord(
+    {
+      ok: true, error: null, gaps: [], cost: { total_usd: 8, vendor_usd: 8 },
+      stop: { killed: false, reason: 'budget_exhausted', signal: null, at_ms: null },
+    },
+    { out: (line) => budget.push(line) },
+  );
+  assert.match(budget.join('\n'), /STOPPED SHORT: budget_exhausted/, 'a CLI-side truncation printed as a clean run');
+});

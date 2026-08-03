@@ -208,6 +208,20 @@ export function reportRecord(record, { out, recordError = null, recordPath = nul
   // The reason, on its own line. `ok: false` without a cause is indistinguishable from a run
   // nobody asked to report on.
   if (!record.ok && record.error) out(`  reason: ${record.error}`);
+
+  // HOW THE RUN STOPPED, when something stopped it. Printed here because `record: ok cost $6.03`
+  // is otherwise the whole console summary of a run that was cut off at the wall cap with 12 edits
+  // half-applied — `ok` reports on the ACCOUNTING, and the accounting of a truncated run succeeds.
+  // The gate's findings do carry the prose, but they print further down and behind a failed gate;
+  // this is the cost line's own sibling.
+  //
+  // SILENT ON A CLEAN RUN, the rule `reportSync` and `reportDelivery` both follow: a "not stopped"
+  // line on every successful tick is how an operator learns to skip the line that means something.
+  if (record.stop?.killed || record.stop?.reason) {
+    const at = Number.isFinite(record.stop.at_ms) ? ` at ${Math.round(record.stop.at_ms / 1000)}s` : '';
+    const sig = record.stop.signal ? ` (${record.stop.signal})` : '';
+    out(`  STOPPED SHORT: ${record.stop.reason ?? 'unknown reason'}${at}${sig}`);
+  }
   // A gap does not condemn the record — it says which part of a record worth reading is missing.
   for (const gap of record.gaps ?? []) out(`  gap ${gap.code}: ${gap.detail ?? ''}`.trimEnd());
 

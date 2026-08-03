@@ -102,7 +102,9 @@ export const ARM = ARM_IDS.THIN;
 // change behaviour. This constant governs live runs and is free to move.
 //
 // WHAT THE 10-RECORD SINK SHOWS. Exactly ONE run ever hit the 25-minute cap
-// (20260803T141200Z-7, jarvis#7, killed at 1500264ms). It was not thrashing: 148 turns, 12 edits
+// (20260803T141200Z-7, jarvis#7, killed at 1500264ms). It was not thrashing: 148 assistant events
+// in its stream — the CLI's own `num_turns` on the same run says 102, and both are honest counts of
+// different things, which is why the number is named here rather than called "turns" — 12 edits
 // already applied, first edit at turn 85, and its last words were "Now writing the failing test
 // for the frontend button" — a run mid-stride, not a run in a loop. The next-longest run
 // (20260803T151017Z-11) COMPLETED at 23.98 minutes, i.e. with 61 seconds of headroom against a
@@ -1169,6 +1171,65 @@ export async function executeWork({
       // reader sees a week from now, and the record is the only thing that outlives the console
       // line — the exact gap between "computed" and "carried" that #63/#69/#72/#73 all are.
       preflight,
+      // HOW THE RUN STOPPED (2026-08-03), and this object is the whole fix. `worker.killed`,
+      // `worker.signal` and `terminal` have all existed for weeks and all three reached the record
+      // only as English prose inside a `check_failed` finding — so the killed run
+      // `20260803T141200Z-7` and a clean run were indistinguishable at the top level, both
+      // `ok: true, error: null`. An aggregator asking "what fraction of runs hit the cap?" had to
+      // regex a sentence no test pinned.
+      //
+      // COMPOSED FROM THREE SOURCES BECAUSE NO ONE OF THEM CAN SEE THE OTHER TWO, which is the same
+      // reason the three `check_failed` clauses above are separate clauses:
+      //
+      //   worker.killed    OUR wall-cap timer fired. `spawnWorker` sets it.
+      //   worker.stopped   the PREFLIGHT predicate fired and we SIGTERM'd. Deliberately NOT `killed`
+      //                    — `spawnWorker` documents why at that variable: a refusal reported through
+      //                    the timeout flag would be diagnosed as a timeout, a different problem with
+      //                    a different fix.
+      //   terminal         the CLI stopped its own child (budget, context). MEASURED on TARS-1351:
+      //                    exit 0, no signal, `killed: false`, because that kill happens INSIDE the
+      //                    child and is visible only in the log.
+      //
+      // ORDERED, AND THE ORDER IS THE CAUSAL ONE. Our own two stops both send SIGTERM, which makes
+      // the CLI write an aborted-stream terminal reason of its own — so `terminal` is the EFFECT on
+      // those runs and reading it first would attribute Alfred's cap to the vendor. Measured on
+      // `20260803T141200Z-7`, which carries both: `killed: true` AND
+      // `terminal_reason: aborted_streaming`. Both prose findings are still raised above; this field
+      // has to name one cause, and it names the one that came first.
+      //
+      // `killed` STAYS THE NARROW FACT. It answers "did Alfred's wall cap bind?" — the question the
+      // 25→45 raise has to be evaluated against — and a preflight refusal is not that, so it reads
+      // `killed: false` with `reason: 'preflight_refused'`. Widening the boolean to mean "we stopped
+      // it somehow" would make the cap unmeasurable, which is `feedback_unfalsifiable_conjunct`: two
+      // propositions collapsed into one boolean that can no longer answer either.
+      //
+      // `reason` VERBATIM FROM THE CLI in the third case, never mapped to an enum —
+      // `terminalErrorFromWorkerLog` returns the vendor's string unchanged for exactly this reason,
+      // so the record names what happened rather than the nearest category this code had a name for.
+      // The two Alfred-side reasons are our own strings because the fact is ours.
+      //
+      // `at_ms` ONLY WHEN WE STOPPED IT, from whichever of our two timers did. `worker.wall_ms` is
+      // how long the run took, which for a CLI-side stop is not when anything was killed; filling it
+      // there would assert a kill time for a kill this process did not perform. `stopped.at_ms` is
+      // already measured from the same `startedAt` as `wall_ms`, so the two are comparable.
+      //
+      // NULL WHEN THERE WAS NO WORKER AT ALL, not a false block — `stopBlock`'s denominator argument.
+      stop: worker
+        ? {
+            killed: worker.killed === true,
+            reason:
+              worker.killed === true
+                ? 'wall_cap'
+                : worker.stopped
+                  ? 'preflight_refused'
+                  : (terminal?.reason ?? null),
+            signal: worker.signal ?? null,
+            at_ms:
+              worker.killed === true
+                ? (worker.wall_ms ?? null)
+                : (worker.stopped?.at_ms ?? null),
+          }
+        : null,
       // B3. WHAT DELIVERY DID. `report.mjs` has held this block since M2 and it has been three
       // empty fields on every record ever written, because no caller passed anything — its own
       // header says so: "both keys existed here and both were always empty". This is the caller.

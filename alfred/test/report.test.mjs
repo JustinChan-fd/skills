@@ -1570,3 +1570,69 @@ test('ADDED B2: attested 0 with no refusal is carried as 0 — the falsifier for
   assert.equal(record.preflight.attested, 0);
   assert.equal(record.preflight.refused, false);
 });
+
+test('ADDED 2026-08-03: stop is NULL, not a false block, when no worker ran at all', async () => {
+  // THE DENOMINATOR ARGUMENT, asserted. `buildRecord`'s hook path is a session reporting on
+  // ITSELF: no child process, no wall cap, nothing that could have been killed. Defaulting those
+  // to `killed: false` would put them in the denominator of "what fraction of runs hit the cap?"
+  // as runs that did not — driving the rate down with records that never had a cap to hit, and
+  // with no error anywhere. That is `feedback_denominator_asymmetry` exactly: a rate whose
+  // denominator counts the wrong population is worse than no rate.
+  //
+  // `null` MEANS "THIS RECORD CANNOT ANSWER THAT", which lets a consumer use `stop !== null` as
+  // its denominator. Contrast `provenance.backfilled`, which is `false` rather than null on the
+  // same path and correctly so: every record either is or is not a backfill.
+  const record = buildRecord({ transcriptPath: '/nonexistent/nothing.jsonl' });
+  assert.equal(record.stop, null, 'a record with no worker claims a worker that was not killed');
+
+  // AND ON THE SUCCESS PATH TOO, so the two are not distinguished by which branch was taken.
+  const home = tmp();
+  const sessionId = 'dddddddd-eeee-ffff-0000-555555555555';
+  const projectDir = join(home, 'hookpath');
+  mkdirSync(projectDir, { recursive: true });
+  const transcript = join(projectDir, `${sessionId}.jsonl`);
+  writeFileSync(
+    transcript,
+    JSON.stringify({
+      type: 'assistant',
+      timestamp: '2026-08-03T14:12:02.000Z',
+      message: { model: 'claude-sonnet-5', id: 'msg_hook', usage: { input_tokens: 10, output_tokens: 2 } },
+    }) + '\n',
+  );
+  const ok = buildRecord({ transcriptPath: transcript, session: { id: sessionId } });
+  assert.equal(ok.ok, true, ok.error);
+  assert.equal(ok.stop, null, 'the success path invented a stop block the failure path declines to');
+});
+
+test('ADDED 2026-08-03: stop survives ALL THREE failure exits — the one a mutant proved untested', () => {
+  // WRITTEN BECAUSE A MUTANT SURVIVED. Deleting `stop` from the unparseable-transcript exit left
+  // 151/151 green: the three tests that assert the field all take the SUCCESS path, so the two
+  // failure exits carried it only by inspection. That is the precise shape of the `provenance` loss
+  // the comment at that exit records — "the other two failure exits forwarded it from the day A5
+  // added the field; this third one silently dropped the arm label."
+  //
+  // AND IT IS THE EXIT THAT MATTERS MOST FOR THIS FIELD, which is what made the gap embarrassing
+  // rather than merely incomplete. A worker killed mid-write is the single most likely producer of a
+  // half-parseable transcript — so the branch a capped run is disproportionately likely to take was
+  // the branch with no assertion, on the field added to describe capped runs.
+  const STOP = { killed: true, reason: 'wall_cap', signal: 'SIGTERM', at_ms: 1500264 };
+
+  // Exit 1: a preset error, before a path is even composed.
+  const preset = buildRecord({ transcriptPath: null, session: { id: 's1' }, stop: STOP, error: 'no session id' });
+  assert.equal(preset.ok, false);
+  assert.deepEqual(preset.stop, STOP, 'the preset-error exit dropped how the run stopped');
+
+  // Exit 2: the file is not there.
+  const absent = buildRecord({ transcriptPath: join(tmp(), 'nope.jsonl'), session: { id: 's2' }, stop: STOP });
+  assert.equal(absent.ok, false);
+  assert.deepEqual(absent.stop, STOP, 'the absent-file exit dropped how the run stopped');
+
+  // Exit 3: the file reads and holds nothing parseable — the mutant's branch.
+  const dir = tmp();
+  const bad = join(dir, 'corrupt.jsonl');
+  writeFileSync(bad, 'this is not jsonl\nnor is this\n');
+  const corrupt = buildRecord({ transcriptPath: bad, session: { id: 's3' }, stop: STOP });
+  assert.equal(corrupt.ok, false);
+  assert.deepEqual(corrupt.stop, STOP, 'the unparseable-transcript exit dropped how the run stopped');
+  rmSync(dir, { recursive: true, force: true });
+});

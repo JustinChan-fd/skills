@@ -179,7 +179,7 @@ function readSubagents(subagentsDir) {
 // touches no transcript; delivery already happened against a remote. Neither is made
 // untrue by an unreadable file, and defaulting them empty asserts something false
 // rather than declining to answer.
-function failed({ session, work, sink, error, suite, gate = null, delivery = null, workerCostUsd = null, workerModelUsage = null, provenance = null, preflight = null }) {
+function failed({ session, work, sink, error, suite, gate = null, delivery = null, workerCostUsd = null, workerModelUsage = null, provenance = null, preflight = null, stop = null }) {
   return {
     ok: false,
     error,
@@ -259,6 +259,12 @@ function failed({ session, work, sink, error, suite, gate = null, delivery = nul
     // the worker writes anything, so a run that refused early is disproportionately likely to have
     // a transcript too thin to parse. See `preflightBlock`.
     preflight: preflightBlock(preflight),
+    // HOW THE RUN STOPPED, and this path is the one it exists for. A worker killed mid-write leaves
+    // a truncated log and often an unparseable transcript, which is exactly how a record lands
+    // HERE — so the failure path is where "why did this stop?" is least answerable from anything
+    // else and most needs a field. `suite`/`gate`/`provenance` above are carried for the same
+    // argument; this one is a stronger case of it. See `stopBlock`.
+    stop: stopBlock(stop),
   };
 }
 
@@ -276,6 +282,69 @@ function failed({ session, work, sink, error, suite, gate = null, delivery = nul
 // likely to erase that distinction is a convenience key someone adds upstream in six months. The
 // module's own test asserts the absence on the return value; this is the same assertion at the point
 // the verdict stops being a value and becomes a row.
+// HOW THE RUN STOPPED (2026-08-03) — the machine-readable sibling of a prose finding.
+//
+// MEASURED ON THE SINK. `20260803T141200Z-7` was killed at the 25-minute wall cap after 148 turns
+// and 12 edits, mid-sentence. Its record reads `ok: true, error: null`, byte-identical at the top
+// level to a run that finished cleanly — correctly, because `ok` reports on the ACCOUNTING and the
+// accounting succeeded. The only trace was one `check_failed` finding whose `detail` is the English
+// sentence "the worker was killed at the wall cap after 1500264ms (SIGTERM)".
+//
+// WHY THAT PROSE IS NOT ENOUGH. The standing separation of concerns is that Alfred writes raw
+// metrics and alfred-telemetry does the arithmetic. "What fraction of runs hit the cap?" is
+// arithmetic over a boolean, and there was no boolean — an aggregator had to regex over a sentence
+// that no test pinned. Rephrase the sentence and the consumer silently reports 0%.
+//
+// THREE FIELDS, BECAUSE ONE BOOLEAN CANNOT SAY IT. There are three distinct ways a run stops short
+// and a `truncated: true` would collapse them:
+//
+//   killed: true                            ALFRED's own wall-cap timer fired. `spawnWorker` set it.
+//   killed: false, reason non-null          the CLI stopped its own child (budget, context). MEASURED
+//                                           on TARS-1351: exit 0, no signal, `killed: false`, because
+//                                           that kill happens INSIDE the child. This is why
+//                                           `terminalErrorFromWorkerLog` exists as a separate clause.
+//   killed: false, reason null              nobody stopped it.
+//
+// "Did Alfred's cap bind?" and "was this run truncated at all?" are different questions, and the
+// cap-raise from 25→45 minutes is only evaluable if the first one stays answerable.
+//
+// `reason: null` FOR A CLEAN RUN, NOT `'completed'`. Absent is unobserved — the rule `gate.pass`,
+// `cost.total_usd` and `preflight` already follow. A run nobody stopped has no stop reason, and
+// naming one would make "we did not stop it" indistinguishable from a future vendor reason someone
+// spells `completed`. The CLI does in fact write `terminal_reason: 'completed'` on a genuine
+// finish; that string is deliberately NOT copied here.
+//
+// `at_ms` IS ALFRED'S TIMER KNOWLEDGE ONLY. A CLI-side stop leaves no wall-clock mark this process
+// can attribute, so it stays null there rather than being filled from `wall_ms` — which would read
+// as "we stopped it at 900000ms" for a run we did not stop. When the cap DID fire, `wall_ms` and
+// `at_ms` are the same measurement, and it is carried anyway: `session.wall_ms` means "how long the
+// run took" and this means "when the kill landed", and they diverge the moment a worker ignores
+// SIGTERM and keeps writing.
+//
+// CARRIED, NEVER DERIVED. There is no heuristic here — no "wall_ms near the cap means capped". The
+// caller states what its own timer and the CLI's own log said, for `provenanceBlock`'s reason: a
+// fact read back out of the data cannot be evidence about the data.
+//
+// AND `null` FOR "NO WORKER AT ALL", not `{killed: false}`. This is the one place a false default
+// would be actively wrong rather than merely thin, and it is `feedback_denominator_asymmetry`
+// exactly: `buildRecord`'s hook path is a session reporting on ITSELF, with no child process, no
+// wall cap, and nothing that could have been killed. Defaulting those to `killed: false` puts them
+// in the denominator of "what fraction of runs hit the cap?" as runs that did not — inflating it
+// with runs that never had a cap to hit, and driving the rate down with no error anywhere. `null`
+// means "this record cannot answer that question", which is the truth, and lets a consumer count
+// `stop !== null` as its denominator. `provenanceBlock.backfilled` takes the opposite choice for the
+// opposite reason: every record either is or is not a backfill, so `false` there is a fact.
+function stopBlock(stop) {
+  if (stop === null || stop === undefined) return null;
+  const s = typeof stop === 'object' && !Array.isArray(stop) ? stop : {};
+  return {
+    killed: s.killed === true,
+    reason: typeof s.reason === 'string' && s.reason.trim() ? s.reason : null,
+    signal: typeof s.signal === 'string' && s.signal.trim() ? s.signal : null,
+    at_ms: Number.isFinite(s.at_ms) ? s.at_ms : null,
+  };
+}
+
 function preflightBlock(preflight) {
   if (preflight === null || preflight === undefined) return null;
   const p = typeof preflight === 'object' && !Array.isArray(preflight) ? preflight : {};
@@ -375,13 +444,16 @@ export function buildRecord({
   // interpreted: this module does not decide whether a refusal should have stopped the run, and it
   // never lets a refusal move `ok`, which reports on the ACCOUNTING. See `preflightBlock`.
   preflight = null,
+  // HOW THE WORKER STOPPED — `{killed, reason, signal, at_ms}` from the caller's own timer and the
+  // CLI's own log, or `null` when there was no worker to stop (the hook path). See `stopBlock`.
+  stop = null,
   // A refusal the CALLER already reached, reported through the same shape as every other
   // failure. `recordForRun` needs this: "no session id in the log" is known before a path can be
   // composed, and inventing one to fail on would be the wrong-session defect.
   error: presetError = null,
 } = {}) {
   if (presetError) {
-    return failed({ session, work, sink, suite, gate, delivery, workerCostUsd, workerModelUsage, provenance, preflight, error: presetError });
+    return failed({ session, work, sink, suite, gate, delivery, workerCostUsd, workerModelUsage, provenance, preflight, stop, error: presetError });
   }
 
   let text;
@@ -401,6 +473,7 @@ export function buildRecord({
       workerModelUsage,
       provenance,
       preflight,
+      stop,
       error: `could not read transcript ${transcriptPath}: ${err?.code ?? err?.message ?? 'unknown'}`,
     });
   }
@@ -424,6 +497,11 @@ export function buildRecord({
       // to compare arms, on the branch Phase C's half-written historical transcripts take.
       provenance,
       preflight,
+      // AND `stop` FORWARDED ON ALL THREE EXITS, stated because the comment directly above is the
+      // record of what happens when one of them is missed. A worker killed mid-write is the single
+      // most likely producer of a half-parseable transcript, so dropping the field HERE would lose
+      // it on precisely the runs it was added to describe.
+      stop,
       error: collected.error?.detail ?? 'transcript could not be parsed',
     });
   }
@@ -598,6 +676,10 @@ export function buildRecord({
     provenance: provenanceBlock(provenance),
     // THE PREFLIGHT VERDICT (B2), from the same function as the failure path. See `preflightBlock`.
     preflight: preflightBlock(preflight),
+    // HOW THE RUN STOPPED, from the same function as the failure path — `sessionBlock`'s rule, and
+    // the one this whole family of fields exists to satisfy: a field present on one path and absent
+    // on the other is a field every reader must guard. See `stopBlock`.
+    stop: stopBlock(stop),
   };
 }
 

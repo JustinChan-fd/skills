@@ -3002,3 +3002,257 @@ test('ADDED B2: a quote is checked against the TICKET BODY, not against the prom
   assert.ok(stoppedWith, "a quote lifted from Alfred's own prompt was accepted as a quote of the ticket");
   assert.equal(stoppedWith.reason, 'quote-not-in-body');
 });
+
+// --- HOW THE RUN STOPPED: the field that made a cap kill invisible ------------------------
+
+test('ADDED 2026-08-03: a worker killed at the wall cap says so in a FIELD, not only in English prose', async () => {
+  // MEASURED, on the sink, not imagined. `20260803T141200Z-7` was killed at the 25-minute cap
+  // after 148 assistant events (the CLI's own `num_turns` says 102 — two honest counts of different
+  // things) and 12 edits, mid-sentence. Its record reads `ok: true, error: null` — which
+  // is CORRECT, because `ok` reports on the accounting and the accounting succeeded. The only
+  // trace that the run was cut short was one `check_failed` finding whose `detail` is the English
+  // sentence "the worker was killed at the wall cap after 1500264ms (SIGTERM)".
+  //
+  // WHY THAT IS A DEFECT AND NOT MERELY UNTIDY. The standing separation of concerns is that Alfred
+  // writes raw metrics and alfred-telemetry does the arithmetic. "What fraction of runs hit the
+  // cap?" is arithmetic over a boolean, and there was no boolean — an aggregator had to regex over
+  // a prose string that no test pinned and any future edit to the wording would silently break.
+  // A consumer joining on that sentence reports 0% the day someone rephrases it, with no error.
+  //
+  // THIS TEST USES THE REAL REPORTER. `report` keeps its default so the log is really parsed, the
+  // transcript really read, and the field has to survive the whole trip onto the record — the
+  // lesson of `3aba45b`, where `delivery.steps` was added to `buildRecord`, asserted at that
+  // layer, green, and still empty on every record because the CALLER hand-built its argument.
+  const repo = repoWithCommit();
+  const home = mktemp('home');
+  const sessionId = 'dddddddd-eeee-ffff-0000-111111111111';
+
+  const projectDir = join(home, '.claude', 'projects', realpathSync(repo).replace(/[^A-Za-z0-9]/g, '-'));
+  mkdirSync(projectDir, { recursive: true });
+  writeFileSync(
+    join(projectDir, `${sessionId}.jsonl`),
+    JSON.stringify({
+      type: 'assistant',
+      timestamp: '2026-08-03T14:12:02.000Z',
+      message: { model: 'claude-sonnet-5', id: 'msg_killed', usage: { input_tokens: 1000, output_tokens: 200 } },
+    }) + '\n',
+  );
+
+  const result = await executeWork({
+    ref: 'a job that runs past the cap',
+    config: CONFIG,
+    repoRoot: repo,
+    runRoot: mktemp('runs'),
+    stamp: '20260803T141200Z',
+    home,
+    newSessionId: () => sessionId,
+    spawn: stubSpawn((argv, opts) => {
+      // THE REAL RESULT LINE FROM `20260803T141200Z-7`, copied off disk rather than invented — and
+      // the correction matters. The first version of this fixture wrote a bare result with no
+      // terminal fields, and a mutant that read the CLI's reason BEFORE our own cap survived it
+      // 151/151: with no `terminal_reason` present, both orderings produce `wall_cap` and the
+      // ordering my own comment argues for was untested.
+      //
+      // The measured shape is that a capped run carries BOTH signals, because the SIGTERM we send
+      // is what makes the CLI abort its own stream. So `terminal_reason: 'aborted_streaming'` is the
+      // EFFECT of Alfred's cap, and a reader that takes it as the cause reports the vendor as
+      // responsible for a limit Alfred set.
+      writeFileSync(opts.logPath, JSON.stringify({
+        type: 'result',
+        session_id: sessionId,
+        is_error: true,
+        subtype: 'error_during_execution',
+        terminal_reason: 'aborted_streaming',
+        stop_reason: 'tool_use',
+        total_cost_usd: 6.352074599999998,
+        num_turns: 102,
+      }));
+      // What the real launcher returns on a cap kill: our own timer fired, so `killed` is true and
+      // the signal is the SIGTERM we sent to let the transcript flush.
+      return { exit: null, killed: true, signal: 'SIGTERM', wall_ms: 1500264, log: opts.logPath };
+    }),
+  });
+
+  assert.equal(result.ok, true, result.error);
+  assert.ok(result.record, 'a killed run produced no record — the case whose accounting matters most');
+
+  // THE ASSERTION. A field, reachable without reading a sentence.
+  assert.equal(result.record.stop.killed, true, 'the record does not say the worker was killed');
+  assert.equal(result.record.stop.reason, 'wall_cap', 'the record does not say WHY it was killed');
+  assert.equal(result.record.stop.signal, 'SIGTERM');
+  assert.equal(result.record.stop.at_ms, 1500264, 'the record does not say WHEN — a kill at 4s and at 25min are different facts');
+
+  // AND THE PROSE FINDING STAYS. It is what an operator reads; this adds a machine-readable
+  // sibling rather than replacing the human-readable one.
+  assert.ok(
+    result.record.gate.findings.some((f) => /killed at the wall cap/.test(f.detail ?? '')),
+    'the operator-facing finding was dropped in favour of the field',
+  );
+});
+
+test('ADDED 2026-08-03: a clean run records stop.killed FALSE with a null reason — the falsifier', async () => {
+  // Without this, `stop: {killed: true, reason: 'wall_cap'}` hardcoded would satisfy the test
+  // above and every run in the sink would read as capped. This is also the assertion that makes
+  // the field WORTH aggregating: `killed: false` on a completed run is what gives the ratio a
+  // denominator, and `feedback_denominator_asymmetry`'s rule is that a rate whose denominator is
+  // unobservable is not a rate.
+  //
+  // `reason: null`, NOT `'completed'`. Absent is unobserved, the rule `gate.pass`,
+  // `cost.total_usd` and `preflight` all already follow here: a run that was not stopped has no
+  // stop reason, and inventing one would make "we did not stop it" indistinguishable from a
+  // future stop reason someone spells 'completed'.
+  const repo = repoWithCommit();
+  const home = mktemp('home');
+  const sessionId = 'dddddddd-eeee-ffff-0000-222222222222';
+
+  const projectDir = join(home, '.claude', 'projects', realpathSync(repo).replace(/[^A-Za-z0-9]/g, '-'));
+  mkdirSync(projectDir, { recursive: true });
+  writeFileSync(
+    join(projectDir, `${sessionId}.jsonl`),
+    JSON.stringify({
+      type: 'assistant',
+      timestamp: '2026-08-03T14:12:02.000Z',
+      message: { model: 'claude-sonnet-5', id: 'msg_clean', usage: { input_tokens: 1000, output_tokens: 200 } },
+    }) + '\n',
+  );
+
+  const result = await executeWork({
+    ref: 'a job that finishes',
+    config: CONFIG,
+    repoRoot: repo,
+    runRoot: mktemp('runs'),
+    stamp: '20260803T141201Z',
+    home,
+    newSessionId: () => sessionId,
+    spawn: stubSpawn((argv, opts) => {
+      writeFileSync(opts.logPath, JSON.stringify({
+        type: 'result', session_id: sessionId, is_error: false,
+        terminal_reason: 'completed', subtype: 'success', total_cost_usd: 0.42, num_turns: 9,
+      }));
+      return { exit: 0, killed: false, signal: null, wall_ms: 1234, log: opts.logPath };
+    }),
+  });
+
+  assert.equal(result.record.stop.killed, false, 'a completed run reads as killed');
+  assert.equal(result.record.stop.reason, null, 'a run nobody stopped was given a stop reason');
+  assert.equal(result.record.stop.signal, null);
+  assert.equal(result.record.stop.at_ms, null, 'a run nobody stopped was given a stop time');
+});
+
+test('ADDED 2026-08-03: a run the CLI itself terminated is stop.killed FALSE and stop.reason NON-null', async () => {
+  // THE THIRD CASE, and the one a single boolean cannot express. MEASURED on TARS-1351: the CLI
+  // hit `--max-budget-usd 8`, terminated the worker mid-flight, and exited **0 with killed:
+  // false** — because that kill happened INSIDE the child. So `killed` means "ALFRED stopped it"
+  // and can never cover this, which is exactly why `lib/run.mjs` reads the log for a terminal
+  // reason as a SEPARATE clause from `worker.killed`.
+  //
+  // The field has to preserve that distinction rather than collapsing it. A consumer asking "did
+  // Alfred's cap bind?" and one asking "was this run truncated at all?" are asking different
+  // questions, and a single `truncated: true` would answer the second while destroying the first —
+  // which would make the cap-raise this field exists to evaluate unmeasurable.
+  const repo = repoWithCommit();
+  const home = mktemp('home');
+  const sessionId = 'dddddddd-eeee-ffff-0000-333333333333';
+
+  const projectDir = join(home, '.claude', 'projects', realpathSync(repo).replace(/[^A-Za-z0-9]/g, '-'));
+  mkdirSync(projectDir, { recursive: true });
+  writeFileSync(
+    join(projectDir, `${sessionId}.jsonl`),
+    JSON.stringify({
+      type: 'assistant',
+      timestamp: '2026-08-03T14:12:02.000Z',
+      message: { model: 'claude-sonnet-5', id: 'msg_budget', usage: { input_tokens: 1000, output_tokens: 200 } },
+    }) + '\n',
+  );
+
+  const result = await executeWork({
+    ref: 'a job the CLI cuts off',
+    config: CONFIG,
+    repoRoot: repo,
+    runRoot: mktemp('runs'),
+    stamp: '20260803T141202Z',
+    home,
+    newSessionId: () => sessionId,
+    spawn: stubSpawn((argv, opts) => {
+      writeFileSync(opts.logPath, JSON.stringify({
+        type: 'result', session_id: sessionId, is_error: true,
+        subtype: 'error_max_budget_usd', terminal_reason: 'budget_exhausted',
+        total_cost_usd: 8.0000012, num_turns: 102,
+      }));
+      // exit 0, no signal, killed FALSE. This is the measured shape, and it is why the log is read.
+      return { exit: 0, killed: false, signal: null, wall_ms: 900000, log: opts.logPath };
+    }),
+  });
+
+  assert.equal(result.record.stop.killed, false, 'a CLI-side termination was attributed to Alfred');
+  assert.equal(result.record.stop.reason, 'budget_exhausted', 'the CLI said why and the record did not carry it');
+  // VERBATIM FROM THE CLI, not mapped to a category this code guessed — `terminalErrorFromWorkerLog`
+  // returns `reason` verbatim for the same reason, so the record names what happened instead of
+  // what we had an enum for.
+  assert.equal(result.record.stop.at_ms, null, 'at_ms is Alfred timer knowledge and cannot be known for a CLI-side stop');
+});
+
+test('ADDED 2026-08-03: a PREFLIGHT refusal is stop.killed FALSE with reason preflight_refused — the fourth case', async () => {
+  // THE CASE THE BOOLEAN MUST NOT SWALLOW. A preflight refusal also SIGTERMs the worker, so the
+  // tempting implementation sets `killed: true` for it — and `spawnWorker` documents at its own
+  // `stopped` variable why that is wrong: "a preflight refusal reported through the same flag
+  // would be diagnosed as a timeout — a different problem with a different fix."
+  //
+  // AND IT WOULD BREAK THE THING THE FIELD WAS ADDED FOR. `stop.killed` exists to answer "did
+  // Alfred's 45-minute wall cap bind?", which is how the 25→45 raise gets evaluated. A refusal at
+  // four seconds counted as a cap hit inflates that rate with runs that never approached the cap —
+  // `feedback_unfalsifiable_conjunct`: two propositions collapsed into one boolean that can then
+  // answer neither.
+  //
+  // `at_ms` IS STILL FILLED, from the watch's own stamp. A refusal at 4s and one at 4 minutes are
+  // the same verdict and very different value — `spawnWorker` says so at that field — and this is
+  // the record that has to carry it.
+  const repo = repoWithCommit();
+  const home = mktemp('home');
+  const sessionId = 'dddddddd-eeee-ffff-0000-444444444444';
+
+  const projectDir = join(home, '.claude', 'projects', realpathSync(repo).replace(/[^A-Za-z0-9]/g, '-'));
+  mkdirSync(projectDir, { recursive: true });
+  writeFileSync(
+    join(projectDir, `${sessionId}.jsonl`),
+    JSON.stringify({
+      type: 'assistant',
+      timestamp: '2026-08-03T14:12:02.000Z',
+      message: { model: 'claude-sonnet-5', id: 'msg_refused', usage: { input_tokens: 1000, output_tokens: 200 } },
+    }) + '\n',
+  );
+
+  const result = await executeWork({
+    ref: '#9',
+    config: CONFIG,
+    repoRoot: repo,
+    runRoot: mktemp('runs'),
+    stamp: '20260803T141203Z',
+    home,
+    newSessionId: () => sessionId,
+    gh: ghIssue(AC_BODY),
+    spawn: stubSpawn((argv, opts) => {
+      // The predicate `executeWork` composed, fed a confabulated quote. The stub decides nothing.
+      const verdict = opts.watch(
+        attestLog([{ id: 'AC1', quote: 'a quote I invented wholesale', confidence: 0.9 }]),
+      );
+      writeFileSync(opts.logPath, JSON.stringify({ type: 'result', session_id: sessionId, total_cost_usd: 0.01, num_turns: 1 }));
+      // `at_ms` IS ADDED BY `spawnWorker`, NOT BY THE PREDICATE, and this stub replaces
+      // `spawnWorker` — so it has to supply the field the real launcher supplies or the assertion
+      // below would fail against correct code. Found by writing the assertion first: it went red
+      // with `stop.at_ms: null`, and the cause was the fixture, not the runner. The predicate
+      // returns `{reason, detail}`; the launcher stamps the clock, because only it knows
+      // `startedAt`. What is under test here is that `executeWork` THREADS that value onto the
+      // record — the `delivery.steps` failure shape, where a value existed one layer down and the
+      // hand-built caller argument dropped it.
+      const stopped = { ...verdict, at_ms: 4000 };
+      return { exit: 0, killed: false, signal: 'SIGTERM', stopped, wall_ms: 4000, log: opts.logPath };
+    }),
+  });
+
+  assert.equal(result.preflight.refused, true, 'the fixture did not actually refuse, so this asserts nothing');
+  assert.equal(result.record.stop.killed, false, 'a preflight refusal was recorded as a wall-cap kill');
+  assert.equal(result.record.stop.reason, 'preflight_refused');
+  assert.equal(result.record.stop.signal, 'SIGTERM');
+  assert.ok(Number.isFinite(result.record.stop.at_ms), 'the refusal has no timestamp, so early and late refusals are indistinguishable');
+});
