@@ -15,8 +15,10 @@ import { ratesFor, costOfBucket, PRICING_VERSION } from './pricing.mjs';
 
 export const SCHEMA_VERSION = '1';
 
-// Gap cap for active-time: idle stretches longer than this count as this much
-// (same convention as alfred-core's tokens-collect DEFAULT_GAP_CAP_MS).
+// Gap cap for active-time: idle stretches longer than this count as this much.
+// 5 minutes is not a round number picked for tidiness — it is the prompt-cache
+// TTL (see CACHE_TTL_MS below, which shares it), so a gap that exceeds the cap
+// is precisely a gap the cache did not survive.
 export const DEFAULT_GAP_CAP_MS = 5 * 60 * 1000;
 
 function emptyBucket() {

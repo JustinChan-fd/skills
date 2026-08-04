@@ -1,2 +1,0 @@
-{"type":"user","timestamp":"2026-07-27T03:00:00.000Z","message":{"role":"user","content":"SENSITIVE_TRANSCRIPT_TEXT hello"}}
-{"type":"assistant","timestamp":"2026-07-27T03:00:07.000Z","message":{"role":"assistant","model":"some-unrecognized-model-99","content":"SENSITIVE_TRANSCRIPT_TEXT response","usage":{"input_tokens":70,"output_tokens":25,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}}}

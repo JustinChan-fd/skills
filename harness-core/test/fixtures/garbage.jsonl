@@ -1,4 +1,0 @@
-this is not json at all {{{
-<<< neither is this line >>>
-{"type":"assistant","timestamp":"broken,,,
-%%% totally malformed %%%

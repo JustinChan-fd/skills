@@ -4,9 +4,10 @@ Deterministic, portable observability for skill runs. Every time a slash
 command or the Skill tool runs in a Claude Code session, a hook-driven Node
 script snapshots that run — token usage, cost, cache behavior, subagents,
 duration, outcome — into one JSON file per run, with **raw untouched values
-strictly separated from computed ones**. Not itself a skill (no SKILL.md, like
-`alfred-core`): it is engine-level infrastructure that any skill benefits from
-without opting in, because the trigger is the harness, not the skill.
+strictly separated from computed ones**. **Not itself a skill** — it has no
+SKILL.md and is never invoked. It is engine-level infrastructure every skill
+benefits from without opting in, because the trigger is the harness, not the
+skill: a skill cannot forget to be measured.
 
 ## Quick start
 
@@ -134,7 +135,7 @@ The options considered:
 | **Hooks (`Stop`/`StopFailure`/`SessionEnd`)** | ✅ Chosen. The only native trigger with *guaranteed* execution — a skill's own instructions are model-followed, a hook is harness-executed. `Stop` fires at end of every turn, `StopFailure` when a turn dies on an API/auth/rate-limit error (carries `error_type`), `SessionEnd` on interrupt/exit. One script on all three ⇒ success, failure, and early exit flow through the identical code path. Hooks receive `session_id`, `transcript_path`, `cwd` on stdin — everything needed to locate the data. |
 | Transcript parsing (data source) | ✅ Used. `~/.claude/projects/<slug>/<session>.jsonl` is written unconditionally, no configuration, and carries verbatim `message.usage` per assistant turn — including the per-TTL cache split (`cache_creation.ephemeral_5m/1h_input_tokens`), `service_tier`, `speed`, `iterations[]`, model id, `requestId`, timestamps. Subagent transcripts are siblings at `<session>/subagents/agent-*.jsonl` with a `meta.json` (agentType, spawnDepth, toolUseId). ⚠️ The docs mark this format internal and version-dependent — so the parser is defensive (any failure degrades to a note, never a crash), every record stamps `environment.claude_code_version`, and raw lines are copied verbatim so records survive re-interpretation. |
 | Cost from the harness | ❌ Not available. Hooks receive no cost object; `/usage` is interactive-only. Cost must be computed from token counts × a pricing table — done here, versioned (`pricing_version`) so historical records can be re-priced. |
-| OTel (`CLAUDE_CODE_ENABLE_TELEMETRY`) | ❌ Rejected for this use, consistent with `docs/specs/2026-07-31-otel-spike-findings.md`: enabled by process env the harness doesn't own per-run, attaches account PII to every record, and has no built-in file exporter. Transcripts need zero configuration. |
+| OTel (`CLAUDE_CODE_ENABLE_TELEMETRY`) | ❌ Rejected after a spike: enablement is process env the harness doesn't own per-run, every record carries account PII, and there is no built-in file exporter. Transcripts need zero configuration and are written unconditionally. |
 | `PostToolUse` matcher on `Skill` | Not needed. Transcript scanning already sees both Skill tool_use blocks *and* `<command-name>` slash-command tags (which never pass through PostToolUse), in one code path. |
 
 ## How it works
@@ -200,14 +201,15 @@ Normative schema: `schema/skill-run.schema.json`. The contract:
   - `tokens`: by-model × direction buckets with the 5m/1h cache-write split
     kept separate (and an `unattributed` bucket when the transcript omitted
     the split — flagged, never silently priced), `grand_total`, and
-    `boundary_total` (final-turn four-way sum — the dispatch-boundary quantity
-    from `docs/specs/2026-07-31-token-measurement-contract.md`, so these
-    records reconcile against alfred's `tokens_observed`).
+    `boundary_total` (four-way sum of the FINAL API call only — the one
+    quantity an observer outside the session can also see, and therefore the
+    one a record can be reconciled against from outside).
   - `cost`: per-model USD + total, `pricing_version`, cache multipliers
     (write 5m ×1.25, 1h ×2, read ×0.1). Unknown model ⇒ `usd: null`,
     `complete: false`, a note — never a guessed number.
-  - `duration`: wall clock + gap-capped active time (5-min cap, same
-    convention as alfred-core).
+  - `duration`: wall clock + gap-capped active time. The 5-minute cap is not
+    arbitrary — it is the prompt-cache TTL, so a gap that exceeds it is exactly
+    a gap the cache did not survive (`duration.gap_cap_ms` on every record).
   - `counts`: API calls, tool calls by name, subagents, subagent token share.
   - `outcome`: trigger event, `SessionEnd` reason / `StopFailure.error_type`,
     interrupted-tool flag.
@@ -292,15 +294,22 @@ this README. Three kinds of evidence fed the design:
   transcript: 99 API calls, two models, mixed cache TTLs, one subagent,
   zero degradation notes.
 
-**3. Prior art in this repo:**
-- `alfred-core/tools/lib/tokens-collect.mjs` — transcript parsing patterns,
-  gap-capped active time, discovery pitfalls (issue #16).
-- `docs/specs/2026-07-31-token-measurement-contract.md` — the
-  boundary-total quantity this system also computes, so records reconcile
-  with alfred's `tokens_observed`.
-- `docs/specs/2026-07-31-otel-spike-findings.md` — why OTel was rejected:
-  env-controlled enablement the harness doesn't own per-run, account PII on
-  every record, no file exporter, vs transcripts written unconditionally.
+**3. Prior art, now absorbed.** This tool grew out of a token collector in the
+alfred/harness skills, which were deleted from this repo once the observability
+work stood on its own. Nothing here imports them, and the lessons that survived
+travelled as *tests*, not as citations — see `test/regressions.test.mjs`, whose
+anchors are ported one-per-defect from those suites (per-direction MAX across
+`usage.iterations[]`, overcount-over-silent-undercount on ambiguous rows, the
+5-minute `gap_cap_ms` convention). Read the tests, not the history.
+
+Two findings from that era that still shape the design and have no other home:
+- **`boundary_total`** — the four-way sum of the *final* API call — exists
+  because a dispatcher observing a run from outside sees only that quantity, so
+  it is the one number an external observer and a record can reconcile on.
+- **OTel was evaluated and rejected**: enablement is env-controlled rather than
+  per-run, every record carries account PII, there is no file exporter, and the
+  data it would give us is a strict subset of what the transcript already
+  records unconditionally.
 
 Rejected alternatives, for the record: a *skill* that logs (model-followed,
 not guaranteed — the whole point is deterministic execution); *OTel* (above);
@@ -329,15 +338,16 @@ real data accumulates:
 4. **Multi-skill turns.** A turn invoking two skills yields one record with
    both names — token attribution between them is inherently ambiguous
    within a turn. Acceptable, or should invocation-level heuristics split it?
-5. **Cross-machine sync.** alfred-core syncs run records to a telemetry git
-   repo. Should `~/.claude/skill-runs/` sync the same way for a single
-   dashboard across machines?
+5. **Cross-machine sync.** Records are local-only: `~/.claude/skill-runs/` on
+   whichever machine ran the skill. A previous system in this repo pushed them
+   to a telemetry git repo. Worth doing here for a single cross-machine
+   dashboard, or is per-machine analysis enough?
 6. **Pricing maintenance.** The table is hand-captured with a
    `pricing_version`. Worth a periodic check against the live pricing page,
    or is re-pricing old records on demand enough?
 7. **Dashboard.** `index.jsonl` is dashboard-ready but nothing renders it
-   yet. Minimal static HTML over the pool? Fold into alfred's existing
-   telemetry dashboard?
+   yet — and `bin/verify-logs.mjs` exists to gate exactly that build. Minimal
+   static HTML over the pool, or a notebook against the JSONL?
 8. **Remote sessions.** Cloud/web sessions have their own container
    `~/.claude` — records only accumulate there if the repo is present and
    installed. Is local-only acceptable, or should remote sessions sync back?

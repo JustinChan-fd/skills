@@ -1,4 +1,0 @@
-# Built by workerEnv() on every live run — control 8's installed shim, not source.
-# Rewritten each call on purpose: a stale shim from an earlier commit is indistinguishable
-# from a current one, and this is a control.
-.shim-bin/
