@@ -345,9 +345,34 @@ real data accumulates:
 6. **Pricing maintenance.** The table is hand-captured with a
    `pricing_version`. Worth a periodic check against the live pricing page,
    or is re-pricing old records on demand enough?
-7. **Dashboard.** `index.jsonl` is dashboard-ready but nothing renders it
-   yet — and `bin/verify-logs.mjs` exists to gate exactly that build. Minimal
-   static HTML over the pool, or a notebook against the JSONL?
+7. **Dashboard — should it live in this directory, and should it be a build?**
+   `index.jsonl` is dashboard-ready and `bin/verify-logs.mjs` exists to gate
+   exactly that build, but nothing renders it yet. Two decisions, deliberately
+   deferred (out of scope for the branch that raised them, 2026-08-04):
+
+   *Where.* Co-locating is tempting — "the logs live here" — but they don't:
+   records are written to `~/.claude/skill-runs/` (`SKILL_OBS_DIR` to override),
+   outside any repo, on purpose. So co-location buys proximity to the *schema*,
+   not to the data. That is still a real argument: a dashboard's job is to render
+   `index.jsonl`, whose field list is defined in `hooks/skill-run-logger.mjs` and
+   documented in METRICS.md, and a reader that drifts from the writer is the
+   failure mode this whole tool exists to prevent. Keeping both in one directory
+   means one commit changes the field and its renderer together. The cost is that
+   this directory currently has **zero dependencies and needs no build step** —
+   which is why the hook can be wired by absolute path and just work. A Vite app
+   brings `node_modules`, a lockfile, and a dist step into a tree whose main
+   virtue is that it has none of those. A plausible split: keep the reader here
+   as a dependency-free script (a single self-contained HTML file, or a
+   `bin/report.mjs` that emits one) and only reach for Vite if the thing grows
+   interactive enough to need a component model. Do not let the build tool decide
+   the layout — decide whether the dashboard is a *report* or an *app* first, and
+   the packaging follows.
+
+   *What.* Minimal static HTML over the pool, a `bin/report.mjs` that prints a
+   terminal summary, or a notebook against the JSONL? Whichever it is, it must
+   filter on `marginal_comparable` before averaging any marginal cost — an
+   unfiltered mean mixes cold runs in at ~8x, and a dashboard that gets this
+   wrong is worse than no dashboard, because it looks authoritative.
 8. **Remote sessions.** Cloud/web sessions have their own container
    `~/.claude` — records only accumulate there if the repo is present and
    installed. Is local-only acceptable, or should remote sessions sync back?
