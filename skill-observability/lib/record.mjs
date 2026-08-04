@@ -253,6 +253,83 @@ export function aggregate(usageEntries, { gapCapMs = DEFAULT_GAP_CAP_MS } = {}) 
   };
 }
 
+// ---- attribution boundary ----
+//
+// The hook's window runs cursor -> EOF, which is what guarantees no spend is
+// ever counted twice. But a skill invoked partway through that window did not
+// cause the spend that preceded it. MEASURED on run e4c76f92-789-931: the
+// window opened at session line 789, research-this was invoked at window line
+// 35, and 2,687,434 of 5,452,701 four-way tokens (49%) belonged to the previous
+// turn. The record claimed $5.53 for a skill responsible for about half of it.
+//
+// Splitting by LINE would be wrong. Usage rows dedupe by message.id, and on
+// that same run exactly one message.id spanned lines 33/34/35 — the call that
+// emitted the Skill tool_use block itself. Aggregating a before-list and an
+// after-list would keep the max per direction on each side and count that
+// call's 159,040 tokens twice. So the split is by dedup KEY: every row sharing
+// a message.id goes wholly to one side, decided by the EARLIEST line that key
+// appears on relative to the invocation... except that a call which straddles
+// the boundary is the invoking call, and belongs to the skill. Hence: a key is
+// attributed if ANY of its rows sits at or after the invocation line.
+function dedupKeyOf(entry, anonSeq) {
+  const model = entry.model ?? 'unknown';
+  return entry.message_id ? `id:${model} ${entry.message_id}` : `anon:${anonSeq}`;
+}
+
+export function partitionByInvocation(usageEntries, invocationLine, { gapCapMs } = {}) {
+  // A null invocation line means no skill ran in this window: nothing may be
+  // attributed. Defaulting the other way is how a 49% overcount happens.
+  const attributedKeys = new Set();
+  let anon = 0;
+  const keyed = usageEntries.map((e) => {
+    const key = dedupKeyOf(e, e.message_id ? 0 : (anon += 1));
+    // A subagent row's line_index counts lines in ITS OWN transcript, so
+    // comparing it to a session line index is meaningless — an agent's line 0 is
+    // not "before" the invocation. Placement for those was already decided by
+    // subagentIsAttributed (via the spawning tool_use line) and callers pass only
+    // the attributed ones, so any non-session row here is attributed by
+    // construction. Letting the line comparison run on them instead silently
+    // moved every subagent's spend to the unattributed side.
+    const isSessionRow = e.source === undefined || e.source === 'session';
+    if (!isSessionRow) {
+      attributedKeys.add(key);
+    } else if (invocationLine !== null && invocationLine !== undefined && typeof e.line_index === 'number' && e.line_index >= invocationLine) {
+      attributedKeys.add(key);
+    }
+    return { entry: e, key };
+  });
+  const attributed = [];
+  const unattributed = [];
+  for (const { entry, key } of keyed) {
+    (attributedKeys.has(key) ? attributed : unattributed).push(entry);
+  }
+  return {
+    attributed: aggregate(attributed, { gapCapMs }),
+    unattributed: aggregate(unattributed, { gapCapMs }),
+    invocation_line: invocationLine ?? null,
+  };
+}
+
+// A subagent's usage rows carry line indices from ITS OWN transcript, so they
+// cannot be compared against a session line index — that is a category error.
+// The only sound join is meta.toolUseId -> the line of the Agent/Task tool_use
+// block that spawned it (MEASURED: both agents on the real run joined to lines
+// 46 and 48, against an invocation at 35).
+//
+// Unjoinable => ATTRIBUTED. Workflow subagents carry no toolUseId key at all,
+// and a workflow is the largest single spend a record can hold ($22.53 in one
+// measured call); defaulting those to unattributed would hide exactly the spend
+// this tool exists to surface. Over-crediting a skill that is visible beats
+// silently dropping the biggest number on the page.
+export function subagentIsAttributed(agent, toolCalls, invocationLine) {
+  const id = agent?.meta?.toolUseId;
+  if (typeof id !== 'string' || id === '') return true;
+  const spawn = (toolCalls ?? []).find((t) => t.id === id);
+  if (!spawn || typeof spawn.line_index !== 'number') return true;
+  if (invocationLine === null || invocationLine === undefined) return false;
+  return spawn.line_index >= invocationLine;
+}
+
 export function buildRecord({
   runId = null,
   hookPayload,
@@ -275,6 +352,26 @@ export function buildRecord({
   const agg = aggregate(allUsage, { gapCapMs });
   const sessionOnly = aggregate(usageEntries, { gapCapMs });
   const subagentTokenTotal = agg.tokens.grand_total - sessionOnly.tokens.grand_total;
+
+  // Attribution: the window is the turn, the run is the skill. Spend before the
+  // first invocation belongs to the previous turn and is reported SEPARATELY
+  // rather than folded into the skill's cost (measured 49% of one real record).
+  const invocationLines = (invocations ?? [])
+    .map((i) => i.line_index)
+    .filter((n) => typeof n === 'number');
+  const invocationLine = invocationLines.length ? Math.min(...invocationLines) : null;
+  const attributedSubagents = subagents.filter((a) => subagentIsAttributed(a, toolCalls, invocationLine));
+  const split = partitionByInvocation(
+    [...usageEntries, ...attributedSubagents.flatMap((a) => a.usage_entries)],
+    invocationLine,
+    { gapCapMs },
+  );
+  // Subagent rows carry their own transcript's line indices, so they cannot be
+  // partitioned by session line — they are placed wholesale by their spawning
+  // tool_use and then always land on the attributed side. Their usage is added
+  // to `attributed` above; unattributed subagent spend is the complement.
+  const unattributedSubagents = subagents.filter((a) => !subagentIsAttributed(a, toolCalls, invocationLine));
+  const unattributedSubagentAgg = aggregate(unattributedSubagents.flatMap((a) => a.usage_entries), { gapCapMs });
 
   const toolCounts = {};
   for (const t of toolCalls) {
@@ -337,6 +434,26 @@ export function buildRecord({
       tokens: agg.tokens,
       cost: agg.cost,
       duration: agg.duration,
+      // The window's spend split at the invocation boundary. `attributed` is
+      // what the skill caused; `unattributed` is the turn's pre-invocation tail,
+      // reported rather than discarded so the two always reconcile to the whole.
+      //
+      // Compare runs on attributed.cost.marginal_usd: measured flat at
+      // ~9,600-11,900 tokens/call at EVERY session depth (298 sessions), because
+      // a fresh session's higher cache WRITE and a deep session's higher cache
+      // READ land in different buckets. total_usd is real money but is NOT
+      // comparable across session positions — carry/call climbs 69K -> 120K and
+      // plateaus past ~line 400.
+      attribution: {
+        invocation_line: split.invocation_line,
+        session_depth_lines: window?.line_from ?? null,
+        attributed: { tokens: split.attributed.tokens, cost: split.attributed.cost, api_calls: split.attributed.api_calls },
+        unattributed: { tokens: split.unattributed.tokens, cost: split.unattributed.cost, api_calls: split.unattributed.api_calls },
+        subagents_attributed: attributedSubagents.length,
+        subagents_unattributed: unattributedSubagents.length,
+        unattributed_subagent_tokens: unattributedSubagentAgg.tokens.grand_total,
+        policy: 'a usage row is attributed when any row sharing its dedup key sits at/after the first invocation line; subagents are placed by their spawning tool_use line and default to attributed when unjoinable',
+      },
       counts: {
         api_calls: agg.api_calls,
         assistant_usage_lines: usageEntries.length,

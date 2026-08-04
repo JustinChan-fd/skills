@@ -15,6 +15,7 @@ import { tmpdir } from 'node:os';
 import { aggregate } from '../lib/record.mjs';
 import { ratesFor } from '../lib/pricing.mjs';
 import { readSubagentDelta, environmentFromLines, detectInvocations } from '../lib/transcript.mjs';
+import { partitionByInvocation, subagentIsAttributed, buildRecord } from '../lib/record.mjs';
 
 // ---------------------------------------------------------------------------
 // 1. message.id dedupe.
@@ -529,4 +530,186 @@ test('Workflow detection does not disturb Skill or slash-command detection', () 
   ]);
   assert.deepEqual(inv.map((i) => i.kind), ['slash_command', 'skill_tool', 'workflow']);
   assert.deepEqual(inv.map((i) => i.name), ['/model', 'research-this', 'wf']);
+});
+
+// ---------------------------------------------------------------------------
+// 8. Attribution boundary: the window is the TURN, the run is the SKILL.
+//
+// MEASURED on run e4c76f92-789-931 (research-this, 2026-08-04T18:11Z): the
+// cursor-to-EOF window opened at session line 789 but the Skill tool_use sat at
+// window line 35, so 2,687,434 of 5,452,701 four-way tokens — 49% of the
+// record, $2.7M-worth of the previous turn's TDD work — were charged to
+// research-this. The record claimed $5.53 for a skill that caused roughly half
+// that. Run 1 of the same skill happened to open at line 0 and showed 0%
+// contamination, which is why comparing the two produced a meaningless 0.31x
+// cost ratio rather than a stability signal.
+//
+// Cursor-to-EOF is still CORRECT for advancing state (it is what guarantees no
+// window is ever processed twice). The defect is attributing everything in that
+// span to whichever skill happens to appear in it.
+//
+// THE TRAP, and why partitioning must be per deduplicated CALL and not per
+// line: on the real run exactly one message_id (…gyhxknx7rskupedpi7cnta) spanned
+// lines 33, 34, 35 — the very call that emitted the Skill tool_use block. Since
+// dedupe keeps the max per direction, slicing the entries into two lists and
+// aggregating each would count that call's 159,040 tokens on BOTH sides. A
+// naive line-slice trades a 49% overcount for a smaller double-count and looks
+// like a fix.
+// ---------------------------------------------------------------------------
+
+function uEntry(line_index, message_id, tokens, extra = {}) {
+  return {
+    source: 'session',
+    line_index,
+    message_id,
+    model: 'claude-opus-5',
+    timestamp: `2026-08-04T18:${String(line_index).padStart(2, '0')}:00.000Z`,
+    usage: { input_tokens: tokens, output_tokens: 0, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 },
+    ...extra,
+  };
+}
+
+test('pre-invocation spend is NOT charged to the skill — the 49% contamination', () => {
+  const entries = [
+    uEntry(0, 'm-prev-a', 100), // previous turn's tail
+    uEntry(1, 'm-prev-b', 100),
+    uEntry(2, 'm-skill', 50), // the call that invoked the skill
+    uEntry(3, 'm-work', 700), // the skill's actual work
+  ];
+  const split = partitionByInvocation(entries, 2);
+  assert.equal(split.attributed.tokens.totals.input, 750, 'skill call + its work');
+  assert.equal(split.unattributed.tokens.totals.input, 200, 'the previous turn, kept separate');
+});
+
+test('a call STRADDLING the boundary is counted ONCE, on the skill side', () => {
+  // The real straddle: one message_id on lines 33,34,35 with the invocation at
+  // 35. Line-slicing then aggregating each half double-counts it.
+  const entries = [
+    uEntry(33, 'm-straddle', 159040),
+    uEntry(34, 'm-straddle', 159040),
+    uEntry(35, 'm-straddle', 159040),
+  ];
+  const split = partitionByInvocation(entries, 35);
+  const attributed = split.attributed.tokens.totals.input;
+  const unattributed = split.unattributed.tokens.totals.input;
+  assert.equal(attributed, 159040, 'the call that emitted the invocation belongs to the skill');
+  assert.equal(unattributed, 0, 'and must not ALSO appear as pre-skill spend');
+  assert.equal(attributed + unattributed, 159040, 'no double-count: 318,080 would be the naive-slice bug');
+});
+
+test('an id-less straddling row is not silently merged into one call', () => {
+  // Id-less rows are each their own call (section 1). Partitioning must not
+  // resurrect the shared-key bug by grouping them under a null id.
+  const entries = [uEntry(0, null, 10), uEntry(1, null, 20), uEntry(2, null, 30)];
+  const split = partitionByInvocation(entries, 1);
+  assert.equal(split.unattributed.tokens.totals.input, 10);
+  assert.equal(split.attributed.tokens.totals.input, 50);
+  assert.equal(split.attributed.api_calls, 2, 'two distinct id-less calls, not one');
+});
+
+test('subagents are placed by their spawning tool_use line, not by their own', () => {
+  // A subagent's usage entries carry line indices from ITS OWN transcript, so
+  // comparing them to a session line index is a category error. The join is
+  // meta.toolUseId -> the Agent tool_use block's line. MEASURED: both agents on
+  // the real run joined to lines 46 and 48, after the invocation at 35.
+  const before = subagentIsAttributed({ meta: { toolUseId: 't-early' } }, [{ id: 't-early', line_index: 10 }], 35);
+  const after = subagentIsAttributed({ meta: { toolUseId: 't-late' } }, [{ id: 't-late', line_index: 46 }], 35);
+  assert.equal(before, false, 'spawned by the previous turn');
+  assert.equal(after, true, 'spawned by the skill');
+});
+
+test('a subagent with no joinable tool_use_id is attributed, not dropped', () => {
+  // Workflow subagents carry NO toolUseId key at all (section 5). Defaulting
+  // them to unattributed would hide the single largest spend kind a record can
+  // carry; defaulting to attributed at worst over-credits a visible skill.
+  assert.equal(subagentIsAttributed({ meta: { agentType: 'workflow-subagent' } }, [], 35), true);
+  assert.equal(subagentIsAttributed({ meta: null }, [], 35), true);
+  assert.equal(subagentIsAttributed({ meta: { toolUseId: 't-missing' } }, [{ id: 't-other', line_index: 1 }], 35), true);
+});
+
+test('with no invocation at all, everything is unattributed — never defaulted to a skill', () => {
+  const entries = [uEntry(0, 'm1', 100), uEntry(1, 'm2', 100)];
+  const split = partitionByInvocation(entries, null);
+  assert.equal(split.attributed.tokens.totals.input, 0);
+  assert.equal(split.unattributed.tokens.totals.input, 200);
+});
+
+test('an invocation on window line 0 attributes everything — run 1 replayed', () => {
+  const entries = [uEntry(0, 'm1', 100), uEntry(1, 'm2', 100)];
+  const split = partitionByInvocation(entries, 0);
+  assert.equal(split.attributed.tokens.totals.input, 200);
+  assert.equal(split.unattributed.tokens.totals.input, 0);
+});
+
+test('attributed + unattributed reconcile to the whole window — no spend invented or lost', () => {
+  // The split must be a PARTITION. If it can lose or duplicate tokens it has
+  // replaced a 49% overcount with an unknown-sign error, which is worse: the
+  // first was at least measurable.
+  const entries = [
+    uEntry(0, 'm-prev', 100),
+    uEntry(1, 'm-straddle', 200),
+    uEntry(2, 'm-straddle', 200), // straddles: invocation is at 2
+    uEntry(3, null, 300), // id-less
+    uEntry(4, 'm-work', 400),
+  ];
+  const whole = aggregate(entries);
+  const split = partitionByInvocation(entries, 2);
+  const a = split.attributed.tokens.totals.input;
+  const u = split.unattributed.tokens.totals.input;
+  assert.equal(a + u, whole.tokens.totals.input, 'partition, not a filter');
+  assert.equal(split.attributed.api_calls + split.unattributed.api_calls, whole.api_calls, 'call counts partition too');
+});
+
+test('buildRecord reports the split and reconciles against its own totals', () => {
+  const usageEntries = [uEntry(0, 'm-prev', 1000), uEntry(5, 'm-skill', 500), uEntry(9, 'm-work', 2000)];
+  const record = buildRecord({
+    runId: 'r-1',
+    hookPayload: { session_id: 's', hook_event_name: 'Stop' },
+    invocations: [{ kind: 'skill_tool', name: 'research-this', line_index: 5 }],
+    usageEntries,
+    toolCalls: [{ name: 'Agent', id: 't-late', line_index: 7 }],
+    dispatchResults: [],
+    subagents: [
+      { file: 'agent-late.jsonl', meta: { toolUseId: 't-late' }, lines_from: 0, lines_to: 2,
+        usage_entries: [uEntry(0, 'm-sub', 750, { source: 'subagent:agent-late.jsonl' })] },
+    ],
+    interruption: false,
+    window: { line_from: 789, line_to: 931, transcript_lines_total: 931 },
+    environment: {},
+  });
+  const at = record.computed.attribution;
+  assert.equal(at.invocation_line, 5);
+  assert.equal(at.session_depth_lines, 789, 'depth is recorded so carry is explainable, never normalized away');
+  // 500 (invoking call) + 2000 (work) + 750 (subagent spawned after) = 3250
+  assert.equal(at.attributed.tokens.totals.input, 3250);
+  assert.equal(at.unattributed.tokens.totals.input, 1000, "the previous turn's tail");
+  assert.equal(at.subagents_attributed, 1);
+  assert.equal(at.subagents_unattributed, 0);
+  // and the two sides still reconcile to the record's own grand total
+  assert.equal(
+    at.attributed.tokens.totals.input + at.unattributed.tokens.totals.input,
+    record.computed.tokens.totals.input,
+  );
+});
+
+test('a subagent spawned BEFORE the invocation is excluded from attributed spend', () => {
+  const record = buildRecord({
+    runId: 'r-2',
+    hookPayload: { session_id: 's', hook_event_name: 'Stop' },
+    invocations: [{ kind: 'skill_tool', name: 'x', line_index: 50 }],
+    usageEntries: [uEntry(50, 'm-skill', 10)],
+    toolCalls: [{ name: 'Agent', id: 't-early', line_index: 3 }],
+    dispatchResults: [],
+    subagents: [
+      { file: 'agent-early.jsonl', meta: { toolUseId: 't-early' }, lines_from: 0, lines_to: 2,
+        usage_entries: [uEntry(0, 'm-sub-early', 9999, { source: 'subagent:agent-early.jsonl' })] },
+    ],
+    interruption: false,
+    window: { line_from: 0, line_to: 60, transcript_lines_total: 60 },
+    environment: {},
+  });
+  const at = record.computed.attribution;
+  assert.equal(at.subagents_unattributed, 1);
+  assert.equal(at.unattributed_subagent_tokens, 9999);
+  assert.equal(at.attributed.tokens.totals.input, 10, 'the early agent is not the skill\'s cost');
 });
