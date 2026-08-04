@@ -247,6 +247,13 @@ run, wall/active time per run, cache efficiency (from full records:
 Compare a skill's median run cost before/after a prompt change to answer "is
 this skill still worth it" quantitatively.
 
+Filter on `marginal_comparable` before you average a marginal cost. It is on the
+index line for that reason: a cold run pays 12.5x per token to write the prompt
+cache a warm run merely reads, so an unfiltered mean over `cost_marginal_usd`
+measures *when you happened to run the skill*, not the skill. The index also
+carries `repo`, `invocation_kinds`, `git_branch`, and `claude_code_version`, so
+grouping by any of those needs no record reads either.
+
 ## Sources — how this design was arrived at
 
 Recorded so future changes can re-check the ground truth rather than trusting

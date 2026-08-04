@@ -20,7 +20,7 @@
 //   SKILL_OBS_DIR      log folder (default ~/.claude/skill-runs)
 //   SKILL_OBS_LOG_ALL  "1" => snapshot every turn, not only skill turns
 import { mkdirSync, readFileSync, writeFileSync, renameSync, appendFileSync, existsSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, basename } from 'node:path';
 import { homedir } from 'node:os';
 import {
   readTranscriptLines,
@@ -174,7 +174,10 @@ function main() {
       atomicWriteJson(file, record);
 
       // One computed-only summary line per record: cheap to load for
-      // dashboards/KPIs without touching the full snapshots.
+      // dashboards/KPIs without touching the full snapshots. Every field is a
+      // scalar or a flat array of scalars, and a field with no answer is null
+      // rather than absent — an absent key silently shrinks the table a reader
+      // builds, and a group-by on it drops those rows instead of bucketing them.
       const summary = {
         file: file.slice(LOG_DIR.length + 1),
         run_id: record.run.run_id,
@@ -182,6 +185,23 @@ function main() {
         session_id: record.run.session_id,
         trigger_event: record.run.trigger_event,
         skills: record.run.skills,
+        // WHERE it ran. cwd is the truth; repo is its basename, denormalized so
+        // every consumer doing a cross-repo group-by need not parse paths.
+        cwd: record.run.cwd ?? null,
+        repo: record.run.cwd ? basename(record.run.cwd) : null,
+        // WHICH PATH invoked it. A slash line carries no usage of its own; a
+        // Skill tool_use is emitted BY an API call. That difference hid a defect
+        // behind 93 green tests, and `skills` alone cannot express it.
+        invocation_kinds: [...new Set(record.raw.invocations.map((i) => i.kind).filter(Boolean))],
+        // WHICH CODE was running, for regressions that track a version or branch.
+        claude_code_version: record.run.environment?.claude_code_version ?? null,
+        git_branch: record.run.environment?.git_branch ?? null,
+        // WHETHER THE COST MAY BE COMPARED. Without these on the index, a KPI
+        // averaged over index.jsonl mixes cold runs in with warm ones at 8x the
+        // marginal cost per call — the exact error the attribution work exists
+        // to prevent, reintroduced by the reader instead of the writer.
+        cache_state: record.computed.attribution.cache_state ?? null,
+        marginal_comparable: record.computed.attribution.marginal_comparable ?? null,
         models: Object.keys(record.computed.tokens.by_model),
         tokens_grand_total: record.computed.tokens.grand_total,
         boundary_total: record.computed.tokens.boundary_total,

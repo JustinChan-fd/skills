@@ -24,6 +24,11 @@ COST.md §4 for the measurement that retired it.
 | --- | --- | --- |
 | `run_id` | Deterministic record id: `<session8>-<line_from>-<line_to>` | Primary key. Subagent activity anywhere joins back to its spawning run via `spawned_by_run_id = run_id` (see KPIs.md, "The data model"). |
 | `skills` | Skill/command names detected in the turn | Group-by key for every KPI |
+| `cwd` / `repo` | The hook payload's cwd, and its basename | Cross-repo group-by. `repo` is denormalized so no consumer has to parse paths. |
+| `invocation_kinds` | Distinct `slash_command` / `skill_tool` / `workflow` in the turn | **Which path invoked it.** A slash line carries no usage of its own; a `Skill` tool_use is emitted *by* an API call. The two behave differently enough that a defect hid behind 93 green tests that all exercised only the `skill_tool` shape (COST.md §7b) — and `skills` alone cannot express the difference. |
+| `claude_code_version` / `git_branch` | From `run.environment` | Which code was running, for regressions that track a version or a branch. |
+| `cache_state` | `warm` / `cold` / `unknown` | **Filter before averaging.** Present on the index precisely so a cost KPI need not open records to avoid mixing cold runs in with warm ones. |
+| `marginal_comparable` | True only when `cache_state` is `warm` | The one-field version of the above. `unknown` is not a licence to compare. |
 | `models` | Model ids that served API calls in the run | **Confound #2.** A $4 Fable 5 run ≈ $1.20 of identical work on Sonnet ($10/$50 vs $3/$15 per MTok). Never compare costs across models without filtering or normalizing on this field. |
 | `tokens_grand_total` | Sum of all four directions (input + output + cache reads + cache writes), session + subagents | Volume of API traffic. NOT "what the run consumed of the context window" — see `boundary_total`. |
 | `boundary_total` | Four-way sum of the **last** API call only | The context footprint at run end (~"how deep in the session was this?"). **Confound #1's measuring stick.** Also the number that reconciles with an external dispatcher's observation (alfred's `tokens_observed`). |
@@ -38,6 +43,11 @@ COST.md §4 for the measurement that retired it.
 | `interrupted` | A tool result carried `interrupted: true` | You stopped something mid-run. |
 | `trigger_event` / `error_type` | `Stop` (normal), `StopFailure` + error type, `SessionEnd` | Failure-rate KPIs. |
 | `schema_version` | Record shape version | Filter/branch on this in dashboards when the shape evolves. |
+
+Every index field is a scalar or a flat array of scalars, and a field with
+nothing to report is `null` rather than absent. That is deliberate: an absent
+key silently shrinks the table a reader builds, and a group-by over it drops
+those rows instead of bucketing them as unknown.
 
 ## Full-record extras (`computed.*` in the dated JSON files)
 

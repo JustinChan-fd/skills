@@ -290,3 +290,59 @@ test('two records written in the same second do not overwrite each other', () =>
   const runIds = files.map((f) => JSON.parse(readFileSync(f, 'utf8')).run.run_id);
   assert.equal(new Set(runIds).size, 2, 'and they are distinct runs');
 });
+
+// The index line is the MACHINE surface: `index.jsonl` is what a dashboard
+// loads, and every field missing from it forces a reader to open every record
+// on disk to answer a question. Four questions could not be answered from the
+// index at all — which repo, which invocation shape, which branch/version, and
+// whether a run's marginal cost is even comparable — and that last one is the
+// whole point of the attribution work: a KPI computed over the index was
+// silently averaging cold runs in with warm ones at 8x the marginal cost.
+test('the index line answers repo, shape, environment, and comparability without opening a record', () => {
+  const { sessionId, transcript, logDir } = setup();
+  const payload = { session_id: sessionId, transcript_path: transcript, cwd: '/home/user/my-repo', hook_event_name: 'Stop', stop_hook_active: false };
+  runHook(payload, logDir);
+
+  const summary = JSON.parse(readFileSync(join(logDir, 'index.jsonl'), 'utf8').trim());
+
+  // Cross-repo grouping: cwd is the raw truth, repo is its basename so a
+  // group-by does not need to parse paths in every consumer.
+  assert.equal(summary.cwd, '/home/user/my-repo');
+  assert.equal(summary.repo, 'my-repo');
+
+  // The shape distinction that hid a defect for 93 tests: a slash line carries
+  // no usage of its own, a Skill tool_use is emitted BY an API call. A reader
+  // filtering on skills alone cannot tell the two paths apart.
+  assert.deepEqual(summary.invocation_kinds.sort(), ['skill_tool', 'slash_command']);
+
+  // Which code was running, for regressions across versions/branches.
+  assert.equal(summary.claude_code_version, '2.1.221');
+  assert.equal(summary.git_branch, 'main');
+
+  // Comparability, the field a cost KPI must filter on before averaging.
+  assert.equal(summary.cache_state, 'cold', "session's first call");
+  assert.equal(summary.marginal_comparable, false);
+
+  // Every index field must be a scalar or a flat array of scalars — an index
+  // line holding a nested object invites readers to depend on record shape.
+  for (const [k, v] of Object.entries(summary)) {
+    const flat = v === null || typeof v !== 'object' || (Array.isArray(v) && v.every((x) => typeof x !== 'object'));
+    assert.ok(flat, `index field ${k} is a scalar or flat array`);
+  }
+});
+
+test('index fields that have no answer are null, never absent', () => {
+  // A missing key and a null are the same thing to `jq`, but not to a reader
+  // building a table: absent columns silently shrink the schema, and a
+  // dashboard that group-bys an absent field drops those rows instead of
+  // bucketing them. The fixture carries no entrypoint-less lines, so this
+  // drives the case where the payload itself is thin.
+  const { sessionId, transcript, logDir } = setup();
+  runHook({ session_id: sessionId, transcript_path: transcript, hook_event_name: 'Stop' }, logDir);
+  const summary = JSON.parse(readFileSync(join(logDir, 'index.jsonl'), 'utf8').trim());
+  for (const k of ['cwd', 'repo', 'git_branch', 'claude_code_version', 'cache_state', 'marginal_comparable', 'invocation_kinds']) {
+    assert.ok(k in summary, `${k} is present even with nothing to report`);
+  }
+  assert.equal(summary.cwd, null, 'no cwd in the payload');
+  assert.equal(summary.repo, null, 'and so no repo to derive');
+});
