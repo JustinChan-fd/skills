@@ -262,7 +262,9 @@ this README. Three kinds of evidence fed the design:
 - Pricing — `platform.claude.com/docs/en/pricing.md` (via the claude-api
   reference skill, captured 2026-08-04): base rates per model; cache
   multipliers — read ×0.1, 5-minute write ×1.25, 1-hour write ×2; Sonnet 5
-  introductory window; Opus 5 fast-mode rates.
+  introductory window (**noted but deliberately not implemented** — we price
+  Sonnet 5 at its $3/$15 sticker on every date; see the model's `note` in
+  `config/model-rates.json`); Opus 5 fast-mode rates.
 
 **2. Empirical verification in a live session (this repo, 2026-08-04):**
 - Probed a real transcript: confirmed per-line schema (`message.usage` with

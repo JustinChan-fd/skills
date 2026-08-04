@@ -157,6 +157,13 @@ judge — but now the cost side is a number instead of a feeling.
    (`us.anthropic.claude-opus-5`, two dotted prefixes where the strip regex
    handled one) and Haiku 3.5 (whose real id inverts word order —
    `claude-3-5-haiku` — and now resolves via `prefix_aliases`).
+   **No rate is date-dependent.** Sonnet 5's introductory $2/$10 runs through
+   2026-08-31, and we deliberately price the $3/$15 sticker anyway rather than
+   carry a time-varying branch — so a Sonnet 5 figure dated in August reads
+   ~1.5x its actual invoice. One rate for all runs, so comparisons are clean;
+   reconciliation against an August bill is not. A test asserts no model carries
+   an `intro` block, and the mechanism stays in `lib/pricing.mjs` (covered by a
+   synthetic fixture) for the next window.
 11. **Absolute dollars may be ~10% low, uniformly.** Two independent 1.1x
     modifiers, neither detectable from the transcript. First-party: Claude 4.6+
     with `inference_geo: "us"` bills 1.1x, and `inference_geo` is a request

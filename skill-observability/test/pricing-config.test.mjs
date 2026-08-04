@@ -10,7 +10,7 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { ratesFor, normalizeModelId, RATE_CONFIG, PRICING_VERSION } from '../lib/pricing.mjs';
+import { ratesFor, ratesForEntry, normalizeModelId, RATE_CONFIG, PRICING_VERSION } from '../lib/pricing.mjs';
 
 const AT = '2026-08-04T00:00:00Z';
 const r = (id, opts) => ratesFor(id, { at: AT, ...opts });
@@ -91,32 +91,61 @@ test('config is internally well-formed: unique prefixes, all four prices present
 
 // --- variants ----------------------------------------------------------------
 
-test('Sonnet 5 introductory pricing applies through 2026-08-31 and not after', () => {
-  const intro = r('claude-sonnet-5');
-  assert.equal(intro.variant, 'introductory');
-  assert.equal(intro.input_per_mtok, 2);
-  assert.equal(intro.output_per_mtok, 10);
-  // Cache columns must follow the INTRO input, not the sticker input — pricing
-  // the cache off $3 while pricing input off $2 is the plausible wrong split.
-  assert.equal(intro.cache_write_5m_per_mtok, 2.5);
-  assert.equal(intro.cache_read_per_mtok, 0.2);
+test('Sonnet 5 prices at the STANDARD sticker on every date, intro window or not', () => {
+  // Decision 2026-08-04: roll forward to $3/$15 rather than carry a
+  // date-dependent branch through 2026-08-31. The point of this test is that
+  // the date no longer changes the answer — so it asserts ACROSS the boundary
+  // the old behaviour turned on. A regression that reinstates intro pricing
+  // fails here on the first assertion, not silently in September.
+  for (const at of [null, '2026-08-04T00:00:00Z', '2026-08-31T23:59:59Z', '2026-09-01T00:00:01Z']) {
+    const got = ratesFor('claude-sonnet-5', at ? { at } : {});
+    assert.equal(got.variant, 'standard', `variant at ${at}`);
+    assert.equal(got.input_per_mtok, 3, `input at ${at}`);
+    assert.equal(got.output_per_mtok, 15, `output at ${at}`);
+    assert.equal(got.cache_write_5m_per_mtok, 3.75, `5m at ${at}`);
+    assert.equal(got.cache_read_per_mtok, 0.3, `read at ${at}`);
+  }
+});
 
-  const post = ratesFor('claude-sonnet-5', { at: '2026-09-01T00:00:01Z' });
-  assert.equal(post.variant, 'standard');
-  assert.equal(post.input_per_mtok, 3);
-  assert.equal(post.cache_read_per_mtok, 0.3);
+test('no config model carries an intro block, so no figure is date-dependent', () => {
+  // Guards the claim the note above makes. If someone adds an intro block
+  // without reading that note, this fails and points them at it.
+  const dated = RATE_CONFIG.models.filter((m) => m.intro);
+  assert.deepEqual(dated.map((m) => m.prefix), [],
+    'a model gained an intro block — see the Sonnet 5 note on why we rolled forward');
+});
+
+// The intro MECHANISM outlives the data: vendors reuse introductory windows,
+// and a branch with no live config entry is exactly the branch that rots. These
+// three exercise it against a synthetic entry so the next window is a data edit.
+const SYNTHETIC_INTRO = {
+  prefix: 'test-model', input: 3, output: 15,
+  cache_write_5m: 3.75, cache_write_1h: 6, cache_read: 0.30,
+  intro: { input: 2, output: 10, cache_write_5m: 2.5, cache_write_1h: 4, cache_read: 0.2, through: '2026-08-31T23:59:59Z' },
+};
+
+test('intro override replaces the base columns when the call is inside the window', () => {
+  const got = ratesForEntry(SYNTHETIC_INTRO, { at: '2026-08-04T00:00:00Z' });
+  assert.equal(got.variant, 'introductory');
+  assert.equal(got.input_per_mtok, 2);
+  assert.equal(got.output_per_mtok, 10);
+  // Cache columns must follow the INTRO input, not the sticker input — pricing
+  // the cache off $3 while pricing input off $2 is the plausible wrong split,
+  // and it is the exact bug that shipped in fast mode.
+  assert.equal(got.cache_write_5m_per_mtok, 2.5);
+  assert.equal(got.cache_read_per_mtok, 0.2);
 });
 
 test('intro window boundary is inclusive of its final second', () => {
-  assert.equal(ratesFor('claude-sonnet-5', { at: '2026-08-31T23:59:59Z' }).variant, 'introductory');
-  assert.equal(ratesFor('claude-sonnet-5', { at: '2026-09-01T00:00:00Z' }).variant, 'standard');
+  assert.equal(ratesForEntry(SYNTHETIC_INTRO, { at: '2026-08-31T23:59:59Z' }).variant, 'introductory');
+  assert.equal(ratesForEntry(SYNTHETIC_INTRO, { at: '2026-09-01T00:00:00Z' }).variant, 'standard');
 });
 
 test('intro pricing needs a timestamp — no timestamp means sticker price', () => {
   // Deliberate: guessing the intro rate for an undated call would understate
   // cost, and a cost instrument should never guess downward.
-  assert.equal(ratesFor('claude-sonnet-5').variant, 'standard');
-  assert.equal(ratesFor('claude-sonnet-5').input_per_mtok, 3);
+  assert.equal(ratesForEntry(SYNTHETIC_INTRO).variant, 'standard');
+  assert.equal(ratesForEntry(SYNTHETIC_INTRO).input_per_mtok, 3);
 });
 
 test('fast mode doubles Opus 5 and Opus 4.8, and cache follows the fast input', () => {
@@ -215,11 +244,9 @@ test('every id spelling the config claims for every model actually prices', () =
       const got = r(id);
       assert.ok(got, `${platform} id "${id}" must price`);
       assert.equal(got.model_prefix, m.prefix, `${platform} id "${id}" resolved to the wrong model`);
-      // Expect the ACTIVE price, which for Sonnet 5 today is the intro rate —
-      // asserting the sticker here would fail for the right reason and teach
-      // the wrong lesson.
-      const wantInput = got.variant === 'introductory' ? m.intro.input : m.input;
-      assert.equal(got.input_per_mtok, wantInput, `${platform} id "${id}" priced wrong`);
+      // The sticker is the active price for every model now that no entry
+      // carries an intro block; the test above locks that in.
+      assert.equal(got.input_per_mtok, m.input, `${platform} id "${id}" priced wrong`);
     }
     // And the same ids under a Bedrock region scope and a 1M-context marker.
     for (const scope of ['us.', 'eu.', 'apac.', 'global.']) {

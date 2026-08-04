@@ -97,11 +97,13 @@ test('aggregate exposes the split at totals level and it sums to total_usd', () 
   assert.ok(c.by_model['claude-fable-5'].context_carry_usd < c.by_model['claude-fable-5'].marginal_usd);
 });
 
-test('pricing: longest-prefix wins, date suffix tolerated, fast + intro variants', () => {
+test('pricing: longest-prefix wins, date suffix tolerated, fast variant, date-independent', () => {
   assert.equal(ratesFor('claude-opus-4-5-20251101').model_prefix, 'claude-opus-4-5');
   assert.equal(ratesFor('claude-opus-5', { speed: 'fast' }).input_per_mtok, 10);
-  assert.equal(ratesFor('claude-sonnet-5', { at: '2026-08-04T00:00:00Z' }).variant, 'introductory');
-  assert.equal(ratesFor('claude-sonnet-5', { at: '2026-09-15T00:00:00Z' }).variant, 'standard');
+  // No model carries an intro block any more (see the Sonnet 5 note in the
+  // config), so the call timestamp must not move a rate.
+  assert.equal(ratesFor('claude-sonnet-5', { at: '2026-08-04T00:00:00Z' }).input_per_mtok, 3);
+  assert.equal(ratesFor('claude-sonnet-5', { at: '2026-09-15T00:00:00Z' }).input_per_mtok, 3);
   assert.equal(ratesFor('totally-unknown'), null);
 });
 

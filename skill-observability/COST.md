@@ -51,6 +51,15 @@ separates the snapshot date with `@`; and the 3.x family inverts word order
 `prefix_aliases` table. An id form we fail to normalize prices to **null**, which
 is the whole reason to carry them as data.
 
+**No rate here is date-dependent, by choice.** Sonnet 5 carries an introductory
+$2/$10 through 2026-08-31; we price its $3/$15 sticker on every date anyway,
+because a time-varying rate means two runs of the same skill three weeks apart
+aren't comparable and nobody remembers why. The cost: a Sonnet 5 figure dated in
+August reads ~1.5x the actual invoice — on the one existing record, $2.334834
+becomes $3.502251 and its total moves $17.68 → $18.85 (+6.6%). The `intro`
+mechanism stays in code against a synthetic fixture, since vendors reuse
+introductory windows and the next one should be a data edit.
+
 Four vendor modifiers are deliberately **not** implemented,
 each with its reason recorded in the config's `not_implemented` block. The one
 that could actually bite: **geography, twice over.** First-party, Claude 4.6+

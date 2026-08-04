@@ -104,6 +104,36 @@ export function normalizeModelId(modelId) {
 }
 
 /**
+ * Price one config entry, choosing between its base columns and a `fast` or
+ * `intro` override. Exported separately from `ratesFor` so both override
+ * mechanisms can be exercised against a synthetic entry.
+ *
+ * That matters for `intro` specifically: as of 2026-08-04 NO model in the
+ * config carries an intro block. Sonnet 5's introductory $2/$10 is still live
+ * through 2026-08-31, but we deliberately price it at the $3/$15 sticker (see
+ * its `note`) rather than carry a date-dependent branch for a few weeks. The
+ * mechanism stays because vendors reuse introductory windows and the next one
+ * should be a data edit — and an untested branch is one that has quietly
+ * rotted by the time you need it.
+ *
+ * `fast` applies when usage.speed === "fast"; `intro` applies when the call's
+ * timestamp falls on or before the window's end. Fast wins, because a model
+ * carrying both would be ambiguous and none currently does.
+ */
+export function ratesForEntry(entry, { speed = null, at = null } = {}) {
+  let override = null;
+  let variant = 'standard';
+  if (speed === 'fast' && entry.fast) {
+    override = entry.fast;
+    variant = 'fast';
+  } else if (entry.intro && at && Date.parse(at) <= Date.parse(entry.intro.through)) {
+    override = entry.intro;
+    variant = 'introductory';
+  }
+  return { variant, ...columnsOf(entry, override) };
+}
+
+/**
  * Longest-prefix match against the transcript's model id, which may carry a
  * date suffix (claude-opus-4-5-20251101) — and note that the config carries
  * both `claude-opus-4` and `claude-opus-4-5`, so longest-prefix is what keeps
@@ -112,10 +142,6 @@ export function normalizeModelId(modelId) {
  * Aliases from config.prefix_aliases compete in the SAME longest-prefix
  * contest, by their own length rather than the target's, so an alias can only
  * win where it is the most specific match.
- *
- * `fast` overrides apply when usage.speed === "fast"; `intro` applies when the
- * call's timestamp falls on or before the introductory window's end. Fast wins
- * over intro because no current model carries both.
  */
 export function ratesFor(modelId, { speed = null, at = null } = {}) {
   if (typeof modelId !== 'string') return null;
@@ -138,16 +164,7 @@ export function ratesFor(modelId, { speed = null, at = null } = {}) {
     }
   }
   if (!best) return null;
-  let override = null;
-  let variant = 'standard';
-  if (speed === 'fast' && best.fast) {
-    override = best.fast;
-    variant = 'fast';
-  } else if (best.intro && at && Date.parse(at) <= Date.parse(best.intro.through)) {
-    override = best.intro;
-    variant = 'introductory';
-  }
-  return { model_prefix: best.prefix, variant, ...columnsOf(best, override) };
+  return { model_prefix: best.prefix, ...ratesForEntry(best, { speed, at }) };
 }
 
 const n = (v) => (typeof v === 'number' && Number.isFinite(v) ? v : 0);

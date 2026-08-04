@@ -254,8 +254,10 @@ test('ratesFor still honours an explicit per-call speed override', () => {
   // Pin the rate table itself so a pricing edit cannot silently move history.
   assert.equal(ratesFor('claude-opus-5', { speed: 'fast' }).input_per_mtok, 10);
   assert.equal(ratesFor('claude-opus-5', {}).input_per_mtok, 5);
-  assert.equal(ratesFor('claude-sonnet-5', { at: '2026-08-04T00:00:00Z' }).variant, 'introductory');
-  assert.equal(ratesFor('claude-sonnet-5', { at: '2026-09-30T00:00:00Z' }).variant, 'standard');
+  // Sonnet 5 is date-independent as of 2026-08-04 — the introductory window was
+  // deliberately not implemented, so a timestamp must not move the rate.
+  assert.equal(ratesFor('claude-sonnet-5', { at: '2026-08-04T00:00:00Z' }).input_per_mtok, 3);
+  assert.equal(ratesFor('claude-sonnet-5', { at: '2026-09-30T00:00:00Z' }).input_per_mtok, 3);
 });
 
 // ---------------------------------------------------------------------------
