@@ -31,6 +31,7 @@ import {
   detectInterruption,
   readSubagentDelta,
   sessionDirForTranscript,
+  environmentFromLines,
 } from '../lib/transcript.mjs';
 import { buildRecord } from '../lib/record.mjs';
 
@@ -125,7 +126,6 @@ function main() {
 
   if (shouldLog && windowLines.length > 0) {
     const usageEntries = extractUsageEntries(windowLines, { source: 'session' });
-    const first = windowLines.find((l) => l && !l.__unparseable) ?? {};
     const record = buildRecord({
       runId,
       hookPayload: payload,
@@ -137,13 +137,9 @@ function main() {
       subagentSpawns: spawns,
       interruption: detectInterruption(windowLines),
       window: { line_from: from, line_to: lines.length, transcript_lines_total: lines.length },
-      environment: {
-        claude_code_version: first.version ?? null,
-        git_branch: first.gitBranch ?? null,
-        entrypoint: first.entrypoint ?? null,
-        platform: process.platform,
-        node: process.version,
-      },
+      // Scanned over the whole window, not read off line 0 — see
+      // environmentFromLines: line 0 carried none of these in 434/434 sessions.
+      environment: environmentFromLines(windowLines),
     });
 
     try {

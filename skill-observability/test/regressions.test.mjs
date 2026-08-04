@@ -14,7 +14,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { aggregate } from '../lib/record.mjs';
 import { ratesFor } from '../lib/pricing.mjs';
-import { readSubagentDelta } from '../lib/transcript.mjs';
+import { readSubagentDelta, environmentFromLines, detectInvocations } from '../lib/transcript.mjs';
 
 // ---------------------------------------------------------------------------
 // 1. message.id dedupe.
@@ -396,4 +396,137 @@ test('re-firing over the real tree adds no spend — cursors hold at scale', () 
   const second = readSubagentDelta(REAL_TREE, first.nextCursors);
   assert.equal(second.agents.flatMap((a) => a.usage_entries).length, 0, '24 agents, second pass, zero new rows');
   assert.equal(Object.keys(first.nextCursors).length, 24, 'one cursor per agent, no collisions across dirs');
+});
+
+// ---------------------------------------------------------------------------
+// 6. Environment stamping.
+//
+// MEASURED, and total: across all 434 real sessions on this machine, the FIRST
+// non-unparseable transcript line carries `version` in 0 of them — 0.0%. The
+// opening lines are session bookkeeping (`last-prompt`, `mode`,
+// `permission-mode`), and the harness only stamps version/gitBranch/entrypoint
+// on `attachment`/`user`/`assistant` lines (511 of 670 lines in the session
+// that found this).
+//
+// So `environment.claude_code_version` was null in every record ever written.
+// That is not a cosmetic gap: the README's whole defense against the transcript
+// format being officially internal and version-dependent is "every record
+// stamps claude_code_version", and 434-for-434 it stamped nothing. The fix
+// scans for the first line that actually HAS the field rather than assuming
+// line 0 is representative.
+
+test('environment is read from the first line that HAS it, not blindly from line 0', () => {
+  const lines = [
+    { type: 'last-prompt' },            // real sessions open with these:
+    { type: 'mode' },                   // no version, no gitBranch, no entrypoint
+    { type: 'permission-mode' },
+    { type: 'attachment', version: '2.1.221', gitBranch: 'alfred/minimal', entrypoint: 'cli' },
+  ];
+  const env = environmentFromLines(lines);
+  assert.equal(env.claude_code_version, '2.1.221', 'line 0 has no version; line 3 does');
+  assert.equal(env.git_branch, 'alfred/minimal');
+  assert.equal(env.entrypoint, 'cli');
+});
+
+test('each environment field is sought independently — a partial line cannot mask a later one', () => {
+  // Not one "first line with any field" but a per-field search: a line carrying
+  // only gitBranch must not stop the version search. Whether this shape occurs
+  // is not the point — deriving three fields from one arbitrary line is the
+  // same assumption that failed 434/434, so it is not repeated per-field.
+  const env = environmentFromLines([
+    { type: 'x', gitBranch: 'main' },
+    { type: 'y', version: '9.9.9' },
+    { type: 'z', entrypoint: 'sdk' },
+  ]);
+  assert.equal(env.git_branch, 'main');
+  assert.equal(env.claude_code_version, '9.9.9');
+  assert.equal(env.entrypoint, 'sdk');
+});
+
+test('absent everywhere stays null — never invented, and unparseable lines are skipped', () => {
+  const env = environmentFromLines([{ __unparseable: true }, { type: 'mode' }]);
+  assert.equal(env.claude_code_version, null);
+  assert.equal(env.git_branch, null);
+  assert.equal(env.entrypoint, null);
+  // platform/node come from the process, not the transcript, so they are always present
+  assert.equal(env.platform, process.platform);
+  assert.equal(env.node, process.version);
+});
+
+test('the real fixture session stamps a version — the 434/434 failure, replayed', () => {
+  // The falsifier that matters: a fixture built from a real transcript's opening
+  // lines. If environmentFromLines regresses to lines[0], this goes null.
+  const lines = [
+    { type: 'last-prompt' },
+    { type: 'mode' },
+    { type: 'permission-mode' },
+    { type: 'attachment', version: '2.1.221', gitBranch: 'alfred/minimal', entrypoint: 'cli' },
+    { type: 'user', version: '2.1.221', gitBranch: 'alfred/minimal', entrypoint: 'cli' },
+  ];
+  assert.notEqual(environmentFromLines(lines).claude_code_version, null);
+});
+
+// ---------------------------------------------------------------------------
+// 7. Workflow invocation detection.
+//
+// MEASURED: 230 Workflow tool_use calls across 87 sessions on this machine.
+// Detection matched only Skill tool_use + <command-name> tags, so in the 2
+// sessions where a Workflow was the ONLY trigger, no record was written at all
+// — 31,427,917 tokens and $22.53 vanished, not misattributed but absent. The
+// other 85 were saved by an unrelated skill in the same session, which is luck,
+// not coverage.
+//
+// A Workflow is named three mutually exclusive ways (Workflow's own contract:
+// scriptPath takes precedence over script, which takes precedence over name),
+// and the real call found on disk used `scriptPath` with no `name` at all — so
+// keying detection on `input.name` would have matched 1 of 230.
+// ---------------------------------------------------------------------------
+
+function wfLine(input, id = 'toolu_wf1') {
+  return {
+    type: 'assistant',
+    uuid: 'u-wf',
+    timestamp: '2026-08-04T10:00:00.000Z',
+    message: { role: 'assistant', content: [{ type: 'tool_use', id, name: 'Workflow', input }] },
+  };
+}
+
+test('a Workflow tool_use is an invocation — a session that only runs one is not invisible', () => {
+  const inv = detectInvocations([wfLine({ name: 'find-flaky-tests' })]);
+  assert.equal(inv.length, 1, 'the 2 measured sessions produced no record at all');
+  assert.equal(inv[0].kind, 'workflow');
+  assert.equal(inv[0].name, 'find-flaky-tests');
+  assert.equal(inv[0].tool_use_id, 'toolu_wf1', 'joins back to raw.tool_calls');
+});
+
+test('scriptPath and inline script are named too — `name` alone matched 1 of 230', () => {
+  // The real call on disk: {scriptPath, args}, no name. Keying on input.name
+  // would leave 229 of 230 workflows anonymous while looking implemented.
+  const byPath = detectInvocations([wfLine({ scriptPath: '/x/runs/2026-07-14-mc-905.js', args: {} })]);
+  assert.equal(byPath.length, 1);
+  assert.equal(byPath[0].name, '2026-07-14-mc-905.js', 'basename of scriptPath, not the absolute path');
+
+  const inline = detectInvocations([wfLine({ script: "export const meta = { name: 'review-changes', description: 'x' }\nphase('Review')" })]);
+  assert.equal(inline.length, 1);
+  assert.equal(inline[0].name, 'review-changes', "read from the script's own meta literal");
+});
+
+test('an unidentifiable Workflow still counts, with a null name — never dropped', () => {
+  // Detection exists to make spend visible. An unparseable name is a labeling
+  // problem; dropping the invocation is an accounting one.
+  const inv = detectInvocations([wfLine({ script: 'no meta block here' })]);
+  assert.equal(inv.length, 1);
+  assert.equal(inv[0].name, null);
+});
+
+test('Workflow detection does not disturb Skill or slash-command detection', () => {
+  const inv = detectInvocations([
+    { type: 'user', uuid: 'u1', message: { role: 'user', content: '<command-name>/model</command-name>' } },
+    { type: 'assistant', uuid: 'u2', message: { role: 'assistant', content: [{ type: 'tool_use', id: 't1', name: 'Skill', input: { skill: 'research-this' } }] } },
+    wfLine({ name: 'wf' }, 't2'),
+    // A non-Workflow tool must not be swept in by a loose name match.
+    { type: 'assistant', uuid: 'u3', message: { role: 'assistant', content: [{ type: 'tool_use', id: 't3', name: 'WorkflowHelper', input: {} }] } },
+  ]);
+  assert.deepEqual(inv.map((i) => i.kind), ['slash_command', 'skill_tool', 'workflow']);
+  assert.deepEqual(inv.map((i) => i.name), ['/model', 'research-this', 'wf']);
 });

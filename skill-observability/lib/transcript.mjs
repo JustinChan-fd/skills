@@ -63,6 +63,29 @@ function contentText(line) {
 const COMMAND_TAG = /<command-name>([^<]*)<\/command-name>/;
 const COMMAND_ARGS_TAG = /<command-args>([\s\S]*?)<\/command-args>/;
 
+// A Workflow orchestrates subagents, so its spend is the largest single kind a
+// record can carry — measured up to 31M tokens and $22.03 in one call. It is
+// named three mutually exclusive ways, checked in Workflow's own precedence
+// order (scriptPath > script > name), and the one real call on this disk used
+// scriptPath with NO name: keying on `input.name` would have matched 1 of 230.
+// An unidentifiable workflow still returns an invocation with a null name,
+// because a missing label is a cosmetic problem and a missing record is an
+// accounting one.
+const WORKFLOW_META_NAME = /name\s*:\s*['"`]([^'"`]+)['"`]/;
+
+function workflowName(input) {
+  if (typeof input?.scriptPath === 'string' && input.scriptPath !== '') {
+    return input.scriptPath.split('/').pop() || null;
+  }
+  if (typeof input?.script === 'string' && input.script !== '') {
+    // The script must open with `export const meta = {...}`, so the first
+    // name-like key in it is meta.name.
+    return WORKFLOW_META_NAME.exec(input.script)?.[1] ?? null;
+  }
+  if (typeof input?.name === 'string' && input.name !== '') return input.name;
+  return null;
+}
+
 export function detectInvocations(lines) {
   const invocations = [];
   for (let i = 0; i < lines.length; i += 1) {
@@ -83,11 +106,24 @@ export function detectInvocations(lines) {
     }
     if (line?.type === 'assistant') {
       for (const block of contentBlocks(line)) {
-        if (block?.type === 'tool_use' && block.name === 'Skill') {
+        if (block?.type !== 'tool_use') continue;
+        if (block.name === 'Skill') {
           invocations.push({
             kind: 'skill_tool',
             name: typeof block.input?.skill === 'string' ? block.input.skill : null,
             args: typeof block.input?.args === 'string' ? block.input.args : null,
+            line_index: i,
+            uuid: line.uuid ?? null,
+            timestamp: line.timestamp ?? null,
+            tool_use_id: block.id ?? null,
+          });
+        }
+        // Exact name match: `WorkflowHelper` and friends are not workflows.
+        if (block.name === 'Workflow') {
+          invocations.push({
+            kind: 'workflow',
+            name: workflowName(block.input),
+            args: block.input?.args === undefined ? null : JSON.stringify(block.input.args),
             line_index: i,
             uuid: line.uuid ?? null,
             timestamp: line.timestamp ?? null,
@@ -245,6 +281,39 @@ export function readSubagentDelta(sessionDir, cursors = {}) {
     });
   }
   return { agents, nextCursors };
+}
+
+// Environment stamp for a window of transcript lines.
+//
+// MEASURED: taking these fields off the first non-unparseable line lost all
+// three in 434 of 434 real sessions on this machine — 0.0% hit rate. Sessions
+// open with bookkeeping lines (`last-prompt`, `mode`, `permission-mode`) that
+// carry no version; the harness stamps version/gitBranch/entrypoint on
+// attachment/user/assistant lines (511 of 670 in the session that found this).
+//
+// That made `claude_code_version: null` universal, which quietly removed the
+// tool's only defense against the transcript format being officially internal
+// and version-dependent: a record with no version cannot be re-interpreted
+// against the release that produced it.
+//
+// Each field is sought INDEPENDENTLY rather than picking one representative
+// line, because "line N is representative of the session" is exactly the
+// assumption that failed here.
+export function environmentFromLines(lines, { platform = process.platform, node = process.version } = {}) {
+  const firstOf = (field) => {
+    for (const l of lines) {
+      if (!l || l.__unparseable) continue;
+      if (l[field] !== undefined && l[field] !== null && l[field] !== '') return l[field];
+    }
+    return null;
+  };
+  return {
+    claude_code_version: firstOf('version'),
+    git_branch: firstOf('gitBranch'),
+    entrypoint: firstOf('entrypoint'),
+    platform,
+    node,
+  };
 }
 
 // Session subdirectory that holds subagents/ for a given transcript path:
