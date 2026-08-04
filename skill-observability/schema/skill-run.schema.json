@@ -145,13 +145,31 @@
           "properties": {
             "by_model": { "type": "object", "description": "Per model: { usd, marginal_usd, context_carry_usd, rates } — rates carry the exact prices used, incl. variant (standard/fast/introductory)" },
             "total_usd": { "type": ["number", "null"], "description": "marginal_usd + context_carry_usd; null when any model in the window has no pricing entry" },
-            "marginal_usd": { "type": ["number", "null"], "description": "Cost of input + output + cache writes — spend the run itself caused. The skill-efficiency number; comparable across session depths (METRICS.md)" },
+            "marginal_usd": { "type": ["number", "null"], "description": "Cost of input + output + cache writes — spend the run itself caused. The skill-efficiency number, comparable across session depths ONLY from about session line 25 onward: a fresh session writes the prompt cache from scratch, so marginal/call measures ~45,619 at depth 5-9 and ~19,531 at 10-24 against ~6,757-11,647 past line 25. Check computed.attribution.marginal_comparable before comparing (METRICS.md)" },
             "context_carry_usd": { "type": ["number", "null"], "description": "Cost of cache reads — the session-depth tax of running mid-session" },
             "known_models_usd": { "type": "number" },
             "complete": { "type": "boolean" },
             "pricing_version": { "type": "string" },
             "cache_multipliers": { "type": "object" },
             "split_policy": { "type": "string" }
+          }
+        },
+        "attribution": {
+          "type": "object",
+          "description": "The window is the TURN; the run is the SKILL. The hook's window runs cursor->EOF (which is what guarantees no spend is counted twice), but a skill invoked partway through it did not cause the spend that preceded it — measured 49% contamination on one real record. This block splits the window at the invocation boundary. attributed + unattributed always reconcile to computed.tokens/cost: it is a partition, not a filter.",
+          "properties": {
+            "invocation_line": { "type": ["integer", "null"], "description": "WINDOW-relative line of the first invocation (detectInvocations runs on the sliced window). Not a session depth — add session_depth_lines" },
+            "session_depth_lines": { "type": ["integer", "null"], "description": "window.line_from: how deep in the session this window opened" },
+            "invocation_depth_lines": { "type": ["integer", "null"], "description": "ABSOLUTE session line of the invocation (session_depth_lines + invocation_line). The value session_start is computed from" },
+            "session_start": { "type": ["string", "null"], "enum": ["fresh", "warming", "steady", null], "description": "Human-readable reason a cost may be an outlier. fresh (<25): the session is writing the prompt cache from scratch, so marginal/call runs ~2-4x high AND carry runs low. warming (25-399): marginal has settled; cache read/call still climbing. steady (>=400): read/call has plateaued (within 5% across four buckets), so total_usd is comparable too. Null when no skill ran in the window (SKILL_OBS_LOG_ALL turn records). Boundaries measured over 298 sessions; 22.1% of 494 real invocations land in fresh" },
+            "fresh_session": { "type": ["boolean", "null"], "description": "session_start === 'fresh', as a boolean for a dashboard badge" },
+            "marginal_comparable": { "type": ["boolean", "null"], "description": "Whether marginal_usd may be compared to other runs without a caveat. False only for fresh, where the cache-write spike makes BOTH cost figures outliers, not just context carry" },
+            "attributed": { "type": "object", "description": "{ tokens, cost, api_calls } for spend at/after the invocation — the skill's own cost" },
+            "unattributed": { "type": "object", "description": "{ tokens, cost, api_calls } for the pre-invocation tail of the turn. Reported rather than discarded so the split always reconciles" },
+            "subagents_attributed": { "type": "integer" },
+            "subagents_unattributed": { "type": "integer" },
+            "unattributed_subagent_tokens": { "type": "integer" },
+            "policy": { "type": "string", "description": "The attribution rule in prose, so an old record explains itself" }
           }
         },
         "duration": {

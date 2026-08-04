@@ -321,6 +321,37 @@ export function partitionByInvocation(usageEntries, invocationLine, { gapCapMs }
 // measured call); defaulting those to unattributed would hide exactly the spend
 // this tool exists to surface. Over-crediting a skill that is visible beats
 // silently dropping the biggest number on the page.
+// ---- session-start classification ----
+//
+// `marginal_usd` is the depth-invariant metric, but only from about session
+// line 25 onward. Finer buckets over 298 sessions (per deduplicated call)
+// showed it SPIKING at session open, because a fresh session writes the whole
+// prompt cache from scratch rather than reading it:
+//
+//   depth   input  output  cache WRITE  marginal   cache READ
+//   5-9     7,053     782      37,783    45,619       20,908
+//   10-24   2,090     523      16,918    19,531       47,441
+//   25-49   2,417     540       3,801     6,757       67,378
+//   100-399 5,296     760       4,911    10,968      105,097
+//   400+    6,973     672       4,002    11,647      119,616
+//
+// An earlier pass over 100-line buckets reported marginal flat at EVERY depth;
+// the 0-99 bucket averaged the spike away. So there are three regimes, not two:
+//   fresh   (< 25)     both marginal and carry are unlike everything else
+//   warming (25-399)   marginal has settled; cache read/call still climbing
+//   steady  (>= 400)   carry/call plateaus (within 5% across four buckets)
+// The flag is not decoration: of 494 real Skill/Workflow invocations on this
+// disk, 22.1% land before line 25 (median 126, p75 791).
+export const FRESH_SESSION_MAX_LINE = 25;
+export const STEADY_SESSION_MIN_LINE = 400;
+
+export function classifySessionStart(invocationDepthLines) {
+  if (typeof invocationDepthLines !== 'number') return null;
+  if (invocationDepthLines < FRESH_SESSION_MAX_LINE) return 'fresh';
+  if (invocationDepthLines < STEADY_SESSION_MIN_LINE) return 'warming';
+  return 'steady';
+}
+
 export function subagentIsAttributed(agent, toolCalls, invocationLine) {
   const id = agent?.meta?.toolUseId;
   if (typeof id !== 'string' || id === '') return true;
@@ -372,6 +403,8 @@ export function buildRecord({
   // to `attributed` above; unattributed subagent spend is the complement.
   const unattributedSubagents = subagents.filter((a) => !subagentIsAttributed(a, toolCalls, invocationLine));
   const unattributedSubagentAgg = aggregate(unattributedSubagents.flatMap((a) => a.usage_entries), { gapCapMs });
+  const invocationDepthLines = invocationLine === null ? null : invocationLine + (window?.line_from ?? 0);
+  const sessionStart = classifySessionStart(invocationDepthLines);
 
   const toolCounts = {};
   for (const t of toolCalls) {
@@ -447,6 +480,19 @@ export function buildRecord({
       attribution: {
         invocation_line: split.invocation_line,
         session_depth_lines: window?.line_from ?? null,
+        // ABSOLUTE session line of the invocation. invocation_line is
+        // WINDOW-relative (detectInvocations runs on the sliced window), so a
+        // skill invoked at window line 3 of a window opening at 789 is at
+        // session line 792 — classifying on invocation_line alone would call
+        // every mid-session run "fresh".
+        invocation_depth_lines: invocationDepthLines,
+        session_start: sessionStart,
+        // The same fact as session_start, as a boolean, for a dashboard badge.
+        fresh_session: sessionStart === null ? null : sessionStart === 'fresh',
+        // Whether marginal_usd may be compared to other runs without a caveat.
+        // False only for `fresh`: there the cache-write spike moves marginal
+        // too, so BOTH cost figures are outliers, not just context carry.
+        marginal_comparable: sessionStart === null ? null : sessionStart !== 'fresh',
         attributed: { tokens: split.attributed.tokens, cost: split.attributed.cost, api_calls: split.attributed.api_calls },
         unattributed: { tokens: split.unattributed.tokens, cost: split.unattributed.cost, api_calls: split.unattributed.api_calls },
         subagents_attributed: attributedSubagents.length,

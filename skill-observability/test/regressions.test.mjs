@@ -713,3 +713,109 @@ test('a subagent spawned BEFORE the invocation is excluded from attributed spend
   assert.equal(at.unattributed_subagent_tokens, 9999);
   assert.equal(at.attributed.tokens.totals.input, 10, 'the early agent is not the skill\'s cost');
 });
+
+// ---- Section 9: session-start classification ----
+//
+// Why a flag and not just marginal_usd: marginal is only depth-invariant from
+// about session line 25 onward. Finer buckets over 298 sessions (per
+// deduplicated call) show it SPIKING at session open, because a fresh session
+// writes the whole prompt cache from scratch:
+//
+//   depth   input  output  cache WRITE  marginal   cache READ
+//   5-9     7,053     782      37,783    45,619       20,908
+//   10-24   2,090     523      16,918    19,531       47,441
+//   25-49   2,417     540       3,801     6,757       67,378
+//   100-399 5,296     760       4,911    10,968      105,097
+//   400+    6,973     672       4,002    11,647      119,616
+//
+// So `fresh` marks a region where BOTH numbers differ, not just carry — it is
+// the human-readable reason a cost is an outlier, and it is not decoration:
+// of 494 real Skill/Workflow invocations on this disk, 22.1% land before line
+// 25 (median 126, p75 791).
+//
+// The boundary must be measured in ABSOLUTE session lines. invocations[]
+// line_index is WINDOW-relative (detectInvocations runs on the sliced window),
+// so a run invoked at window line 3 of a window opening at 789 is at session
+// line 792 and is emphatically not fresh.
+
+test('depth is absolute: a window-line-3 invocation at session line 789 is not fresh', () => {
+  const record = buildRecord({
+    runId: 'r-mid',
+    hookPayload: { session_id: 's', hook_event_name: 'Stop' },
+    invocations: [{ kind: 'skill_tool', name: 'research-this', line_index: 3 }],
+    usageEntries: [uEntry(3, 'm-1', 100)],
+    toolCalls: [], dispatchResults: [], subagents: [], interruption: false,
+    window: { line_from: 789, line_to: 800, transcript_lines_total: 800 },
+    environment: {},
+  });
+  const at = record.computed.attribution;
+  assert.equal(at.invocation_depth_lines, 792, 'window offset + window-relative line');
+  assert.equal(at.session_start, 'steady');
+  assert.equal(at.fresh_session, false);
+});
+
+test('a genuinely fresh invocation is flagged fresh', () => {
+  const record = buildRecord({
+    runId: 'r-fresh',
+    hookPayload: { session_id: 's', hook_event_name: 'Stop' },
+    invocations: [{ kind: 'slash_command', name: '/research-this', line_index: 8 }],
+    usageEntries: [uEntry(8, 'm-1', 100)],
+    toolCalls: [], dispatchResults: [], subagents: [], interruption: false,
+    window: { line_from: 0, line_to: 40, transcript_lines_total: 40 },
+    environment: {},
+  });
+  const at = record.computed.attribution;
+  assert.equal(at.invocation_depth_lines, 8);
+  assert.equal(at.session_start, 'fresh');
+  assert.equal(at.fresh_session, true, 'the human-readable "why is this one expensive"');
+});
+
+test('the fresh boundary is measured, not eyeballed: 24 is fresh, 25 is warming', () => {
+  const at = (depth) => buildRecord({
+    runId: `r-${depth}`,
+    hookPayload: { session_id: 's', hook_event_name: 'Stop' },
+    invocations: [{ kind: 'skill_tool', name: 'x', line_index: depth }],
+    usageEntries: [uEntry(depth, 'm-1', 10)],
+    toolCalls: [], dispatchResults: [], subagents: [], interruption: false,
+    window: { line_from: 0, line_to: depth + 5, transcript_lines_total: depth + 5 },
+    environment: {},
+  }).computed.attribution;
+  assert.equal(at(24).session_start, 'fresh', 'marginal is still ~19.5K/call here');
+  assert.equal(at(25).session_start, 'warming', 'marginal has dropped to ~6.8K/call');
+  assert.equal(at(399).session_start, 'warming', 'carry is still climbing');
+  assert.equal(at(400).session_start, 'steady', 'carry/call plateaus past ~400');
+});
+
+test('with no invocation, session_start is null — never guessed as fresh', () => {
+  const at = buildRecord({
+    runId: 'r-none',
+    hookPayload: { session_id: 's', hook_event_name: 'Stop' },
+    invocations: [],
+    usageEntries: [uEntry(0, 'm-1', 10)],
+    toolCalls: [], dispatchResults: [], subagents: [], interruption: false,
+    window: { line_from: 0, line_to: 10, transcript_lines_total: 10 },
+    environment: {},
+  }).computed.attribution;
+  assert.equal(at.invocation_depth_lines, null);
+  assert.equal(at.session_start, null);
+  assert.equal(at.fresh_session, null, 'a turn record with no skill has no start to classify');
+});
+
+test('comparability advice travels WITH the flag, so a fresh run is not compared blind', () => {
+  const fresh = buildRecord({
+    runId: 'r-f', hookPayload: { session_id: 's', hook_event_name: 'Stop' },
+    invocations: [{ kind: 'skill_tool', name: 'x', line_index: 8 }],
+    usageEntries: [uEntry(8, 'm-1', 10)],
+    toolCalls: [], dispatchResults: [], subagents: [], interruption: false,
+    window: { line_from: 0, line_to: 20, transcript_lines_total: 20 }, environment: {},
+  }).computed.attribution;
+  assert.equal(fresh.marginal_comparable, false, 'cache-write spike makes marginal an outlier too');
+  const steady = buildRecord({
+    runId: 'r-s', hookPayload: { session_id: 's', hook_event_name: 'Stop' },
+    invocations: [{ kind: 'skill_tool', name: 'x', line_index: 8 }],
+    usageEntries: [uEntry(8, 'm-1', 10)],
+    toolCalls: [], dispatchResults: [], subagents: [], interruption: false,
+    window: { line_from: 500, line_to: 520, transcript_lines_total: 520 }, environment: {},
+  }).computed.attribution;
+  assert.equal(steady.marginal_comparable, true);
+});
