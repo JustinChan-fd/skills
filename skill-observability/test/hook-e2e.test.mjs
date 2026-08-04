@@ -190,3 +190,103 @@ test('the hook carries the last call timestamp forward, so cache_state survives 
   assert.equal(at.cache_state, 'warm');
   assert.equal(at.marginal_comparable, true);
 });
+
+test('the tail of a flushed-late turn names the previous RECORD, across an unlogged firing', () => {
+  // Root cause, measured on session 51e8fb3d 2026-08-04: this hook reads the
+  // transcript BEFORE the turn's own final assistant message is flushed to it
+  // (record mtime equalled the excluded line's timestamp to the second on 5 of
+  // 5 records). So each window ends one API call short and that call opens the
+  // NEXT window as pre-invocation tail — up to 57.6% of a record's marginal
+  // tokens belonged to the previous run.
+  //
+  // Cursor retreat was rejected: simulated over the real firings it re-enters a
+  // window and re-detects an already-recorded invocation, writing two records
+  // for one run. So the tail is reported where it lands and made joinable.
+  //
+  // The unlogged firing in the middle is the point: last_run_id must NOT be
+  // overwritten by a firing that wrote no record, or the tail would point at a
+  // record that does not exist. That is a surviving mutant otherwise.
+  const { sessionId, transcript, logDir } = setup();
+  const payload = { session_id: sessionId, transcript_path: transcript, cwd: '/home/user/x', hook_event_name: 'Stop', stop_hook_active: false };
+  const usage = { input_tokens: 100, output_tokens: 10, cache_read_input_tokens: 500, cache_creation_input_tokens: 0 };
+  const asst = (uuid, id, ts, content) => JSON.stringify({
+    type: 'assistant', uuid, sessionId, timestamp: ts, version: '1.0.0', gitBranch: 'main',
+    message: { role: 'assistant', id, model: 'claude-opus-5', usage, ...(content ? { content } : {}) },
+  });
+  const slash = (uuid, ts, name) => JSON.stringify({
+    type: 'user', uuid, sessionId, timestamp: ts, version: '1.0.0', gitBranch: 'main',
+    message: { role: 'user', content: `<command-name>${name}</command-name>` },
+  });
+
+  // Firing 1: run A. Its invoking line plus one answer call.
+  const a1 = slash('a1', '2026-08-04T14:00:00.000Z', '/research-this');
+  const a2 = asst('a2', 'm-a-work', '2026-08-04T14:00:05.000Z');
+  writeFileSync(transcript, `${a1}\n${a2}\n`);
+  runHook(payload, logDir);
+  const first = recordFiles(logDir);
+  assert.equal(first.length, 1, 'run A recorded');
+  const runIdA = JSON.parse(readFileSync(first[0], 'utf8')).run.run_id;
+
+  // Firing 2: a plain turn with NO skill and NO usage — writes no record, so it
+  // must leave last_run_id alone.
+  const filler = JSON.stringify({ type: 'system', uuid: 'f1', sessionId, timestamp: '2026-08-04T14:00:06.000Z' });
+  appendFileSync(transcript, `${filler}\n`);
+  runHook(payload, logDir);
+  assert.equal(recordFiles(logDir).length, 1, 'the unlogged firing wrote nothing');
+
+  // Firing 3: run A's tail flushes late and lands ahead of run B's invocation.
+  const aTail = asst('a3', 'm-a-tail', '2026-08-04T14:00:07.000Z');
+  const b1 = slash('b1', '2026-08-04T14:00:11.000Z', '/research-this');
+  appendFileSync(transcript, `${aTail}\n${b1}\n`);
+  runHook(payload, logDir);
+
+  const files = recordFiles(logDir).sort();
+  assert.equal(files.length, 2, 'run B recorded, and run A was not re-recorded');
+  const b = JSON.parse(readFileSync(files[1], 'utf8')).computed.attribution;
+  assert.ok(b.unattributed.api_calls > 0, "run A's tail landed in run B's window");
+  assert.equal(b.unattributed_belongs_to_run_id, runIdA,
+    'and it points at run A, not at the unlogged firing and not at run B');
+  // The same tail is what makes B's gap measurable at all on the slash path.
+  assert.equal(b.idle_ms_before_invocation, 4_000, '14:00:11 back to the 14:00:07 tail');
+  assert.equal(b.cache_state, 'warm');
+});
+
+test('two records written in the same second do not overwrite each other', () => {
+  // FOUND while building the flushed-late fixture above. The filename stamp is
+  // second-resolution, so two firings inside one second produced ONE file — the
+  // second clobbered the first — while index.jsonl appended both lines and
+  // claimed two records existed. Silent data loss plus an index that lies.
+  //
+  // Latent in the field only because the real runs were 12s apart. The run_id
+  // already carries the window (`<session>-<from>-<to>`), which is unique per
+  // record by construction, so the filename carries it too.
+  const { sessionId, transcript, logDir } = setup();
+  const payload = { session_id: sessionId, transcript_path: transcript, cwd: '/home/user/x', hook_event_name: 'Stop', stop_hook_active: false };
+  const usage = { input_tokens: 100, output_tokens: 10, cache_read_input_tokens: 500, cache_creation_input_tokens: 0 };
+  const slash = (uuid, ts) => JSON.stringify({
+    type: 'user', uuid, sessionId, timestamp: ts,
+    message: { role: 'user', content: '<command-name>/research-this</command-name>' },
+  });
+  const asst = (uuid, id, ts) => JSON.stringify({
+    type: 'assistant', uuid, sessionId, timestamp: ts,
+    message: { role: 'assistant', id, model: 'claude-opus-5', usage },
+  });
+
+  writeFileSync(transcript, `${slash('a1', '2026-08-04T14:00:00.000Z')}\n${asst('a2', 'm-a', '2026-08-04T14:00:05.000Z')}\n`);
+  runHook(payload, logDir);
+  appendFileSync(transcript, `${slash('b1', '2026-08-04T14:00:11.000Z')}\n${asst('b2', 'm-b', '2026-08-04T14:00:16.000Z')}\n`);
+  runHook(payload, logDir);
+
+  const files = recordFiles(logDir);
+  const indexLines = readFileSync(join(logDir, 'index.jsonl'), 'utf8').trim().split('\n');
+  assert.equal(indexLines.length, 2, 'two records were indexed');
+  assert.equal(files.length, 2, 'and two record files exist — the index does not lie');
+  // Every indexed file must be openable, which is the property that actually broke.
+  for (const line of indexLines) {
+    const rel = JSON.parse(line).file;
+    const found = files.find((f) => f.endsWith(rel.split('/').pop()));
+    assert.ok(found, `indexed record ${rel} is on disk`);
+  }
+  const runIds = files.map((f) => JSON.parse(readFileSync(f, 'utf8')).run.run_id);
+  assert.equal(new Set(runIds).size, 2, 'and they are distinct runs');
+});

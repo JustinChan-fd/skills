@@ -31,7 +31,7 @@ cat ~/.claude/skill-runs/index.jsonl            # one summary line per run
 
 That's the whole setup — new sessions on this machine (every terminal, every
 repo) are covered from now on. Verify it's live: run `/anything`, end the
-turn, and a `2026-…/…__<skill>__<session>.json` file appears.
+turn, and a `2026-…/…__<skill>__<session>-<from>-<to>.json` file appears.
 
 Configuration (env vars, set wherever you launch Claude Code):
 
@@ -176,9 +176,15 @@ sessions. Config via env: `SKILL_OBS_DIR` (default `~/.claude/skill-runs`),
 ~/.claude/skill-runs/
   index.jsonl                                   # 1 computed-only summary line per run — load this for dashboards
   2026-08-04/
-    20260804T101512Z__gh-issue-create__c43df68b.json   # full snapshot
+    20260804T101512Z__gh-issue-create__c43df68b-29-97.json   # full snapshot
   .state/                                       # per-session cursors + errors.log
 ```
+
+The `-29-97` suffix is the transcript window (`line_from`-`line_to`) and is what
+makes the name unique — the timestamp is second-resolution, and two firings
+inside one second did collide, silently overwriting the first record while
+`index.jsonl` kept both lines. The window pair is the same one carried in
+`run_id` and `run.window`.
 
 ## Record shape — raw vs computed
 

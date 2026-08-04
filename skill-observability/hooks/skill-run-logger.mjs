@@ -124,6 +124,11 @@ function main() {
     }
   }
 
+  // Set only after the record file is on disk. A firing that intended to log but
+  // failed must not hand its runId forward: the next window's tail would point
+  // at a record no reader can open.
+  let wroteRecord = false;
+
   if (shouldLog && windowLines.length > 0) {
     const usageEntries = extractUsageEntries(windowLines, { source: 'session' });
     const record = buildRecord({
@@ -143,6 +148,11 @@ function main() {
       // as the first act of a turn — without this it reports cache_state
       // `unknown` and its cost is never comparable.
       previousCallAt: state.last_call_at ?? null,
+      // run_id of the last record written for this session, so this window's
+      // pre-invocation tail names its real owner. See the field's comment in
+      // record.mjs: the transcript flush races this hook, so a turn's final API
+      // call routinely lands at the head of the NEXT window.
+      previousRunId: state.last_run_id ?? null,
       // Scanned over the whole window, not read off line 0 — see
       // environmentFromLines: line 0 carried none of these in 434/434 sessions.
       environment: environmentFromLines(windowLines),
@@ -154,7 +164,13 @@ function main() {
       mkdirSync(dir, { recursive: true });
       const stamp = record.logged_at.replace(/[-:]/g, '').replace(/\..+/, 'Z');
       const label = record.run.skills.length ? record.run.skills.map(safeName).join('+') : 'turn';
-      const file = join(dir, `${stamp}__${label}__${String(sessionId).slice(0, 8)}.json`);
+      // The window suffix is what makes the name unique. The stamp is
+      // second-resolution, and two firings inside one second DID collide: the
+      // second record overwrote the first while index.jsonl appended both lines,
+      // so the index claimed a record that was no longer on disk. `from-to` is
+      // unique per record by construction (cursors process a window once), and
+      // is the same pair already carried in run_id and run.window.
+      const file = join(dir, `${stamp}__${label}__${String(sessionId).slice(0, 8)}-${from}-${lines.length}.json`);
       atomicWriteJson(file, record);
 
       // One computed-only summary line per record: cheap to load for
@@ -183,6 +199,7 @@ function main() {
         schema_version: record.schema_version,
       };
       appendFileSync(join(LOG_DIR, 'index.jsonl'), JSON.stringify(summary) + '\n');
+      wroteRecord = true;
     } catch (err) {
       logError(`record write failed: ${err.message}`);
     }
@@ -204,6 +221,10 @@ function main() {
       subagent_cursors: nextCursors,
       agent_spawns: spawns,
       last_call_at: lastCallAt,
+      // Only advanced when a record was actually WRITTEN: an unlogged firing has
+      // no run_id to hand forward, and overwriting this with null there would
+      // orphan the tail of the last real run.
+      last_run_id: wroteRecord ? runId : (state.last_run_id ?? null),
       updated_at: new Date().toISOString(),
     });
   } catch (err) {

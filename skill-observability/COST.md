@@ -252,6 +252,47 @@ Worth naming because this was found by replaying real records, not by a test. Th
 unit tests were green and the logic read correctly; only the actual transcript
 showed a 0.0s gap where an hour of wall-clock had passed.
 
+## 7b. The second trap: the hook races the transcript flush
+
+Found the same way, on 2026-08-04, and it had **three** symptoms from one cause.
+
+The `Stop` hook reads the transcript before the turn's own final assistant
+message has been flushed to it. Measured: on 5 of 5 records in session
+`51e8fb3d`, the record's mtime equalled the excluded line's timestamp to the
+second. So every window ends one API call short, and that call opens the *next*
+window.
+
+1. **`cache_state` reported `unknown` for plainly warm runs.** The gap was
+   anchored on the first usage row at-or-after the invocation line. A `Skill`
+   tool_use is *emitted by* an API call, so such a row exists; a **slash command
+   is a plain user line carrying no usage of its own**. Combined with the flush
+   race, the next window's rows all sit *before* the invocation, `at` is
+   undefined, and the function returned `null` at its first guard — before the
+   straddler filter and before the `previousCallAt` fallback that exists to
+   prevent exactly this. Two arms 12s apart: the second reported `unknown` where
+   the truth was 3,828 ms. Fixed by anchoring on the invocation's own timestamp
+   when it emitted no call. Note this made the *slash* path — the one used
+   daily — the broken one, while the tested `skill_tool` path was fine.
+2. **Up to 57.6% of a record's marginal tokens belonged to the previous run**,
+   landing in its `unattributed` bucket (measured shares across the five
+   records: 3.3%, 44.5%, 8.3%, 57.6%, 30.2%). Retreating the cursor was
+   *rejected*: simulated over the real firings it re-enters a window and
+   re-detects an invocation an earlier firing already recorded, writing two
+   records for one run — and the earlier record is already on disk anyway. So
+   the tail is reported where it lands and made joinable via
+   `unattributed_belongs_to_run_id`, the same contract as
+   `subagent_runs[].spawned_by_run_id`.
+3. **Two records written in the same second silently overwrote each other.** The
+   filename stamp is second-resolution, so one file survived while
+   `index.jsonl` appended both lines and claimed a record that was no longer on
+   disk. Latent in the field only because the real runs were 12s apart; found
+   while building the fixture for symptom 2. Filenames now carry the window
+   (`…__<session>-<from>-<to>.json`), which is unique by construction.
+
+The pattern to carry forward: 93 green tests covered `cache_state` thoroughly
+and all 93 exercised the `skill_tool` shape. A test suite is only as broad as
+the *shapes* it instantiates, and the untested shape was the common one.
+
 ## 8. Fields on the record
 
 Under `computed.attribution`:
@@ -263,11 +304,14 @@ Under `computed.attribution`:
 | `marginal_comparable` | true only when `warm`. `unknown` is not a licence to compare |
 | `invocation_depth_lines` | absolute session line. Provenance, not a predictor |
 | `attributed` / `unattributed` | the run's own spend vs the turn's pre-invocation tail |
+| `unattributed_belongs_to_run_id` | which run that tail was actually for, or null when there is no tail |
 
 `unknown` means the gap couldn't be measured — a window that opened on the
 invocation with no carried timestamp. Reported honestly rather than guessed,
 because guessing `warm` is precisely what silently declares a resumed run
-comparable. The hook carries `last_call_at` across firings to keep this rare.
+comparable. The hook carries `last_call_at` across firings to keep this rare,
+and `last_run_id` — advanced only when a record was actually written, so a
+firing that logged nothing cannot orphan the previous run's tail.
 
 ## 9. Reading the dashboard
 

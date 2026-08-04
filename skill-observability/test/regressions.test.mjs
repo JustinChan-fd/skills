@@ -990,3 +990,179 @@ test('a session-opening window whose only prior row is the straddler is cold', (
   assert.equal(at.idle_ms_before_invocation, null, 'no real predecessor exists');
   assert.equal(at.cache_state, 'cold', 'a session opening writes its cache');
 });
+
+// ---- Section 11: the hook races the transcript flush ----
+//
+// FOUND BY REAL-DATA REPLAY on session 51e8fb3d, 2026-08-04, on the SLASH
+// path. Two /research-this arms 12s apart in one session; the second reported
+// cache_state `unknown` with a null gap when the truth was 3,828ms — warm.
+//
+// The cause is NOT in idleBeforeInvocation. The Stop hook reads the transcript
+// before the turn's own final assistant message has been flushed to it: record
+// mtime equals the excluded line's timestamp to the second on 5 of 5 records.
+// So every window ends one API call short, and that call opens the NEXT window
+// — ahead of the next invocation, which on the slash path is a plain user line
+// carrying no usage of its own.
+//
+// Two consequences, asserted separately because one boolean hiding two
+// propositions is how the last defect survived:
+//   (a) the trailing call is misfiled into the next record as `unattributed`
+//       (measured 44.5% and 57.6% of two records' marginal tokens), and
+//   (b) with no usage row at-or-after the invocation line, idleBeforeInvocation
+//       returns null at its FIRST guard — before the straddler filter and
+//       before the previousCallAt fallback that exists to prevent exactly this.
+//
+// (b) is what the fix addresses: anchor the gap on the invocation's own
+// timestamp when the invocation is not itself an API call.
+
+test('a slash invocation with no usage row after it still measures its idle gap', () => {
+  // Real shape of record 20260804T193531Z (window 27-35): the previous turn's
+  // tail landed at window lines 0-1, the /research-this user line at line 5,
+  // and this window's own assistant call was not yet flushed. Truth from the
+  // transcript: 19:35:23.108 - 19:35:19.280 = 3,828ms, warm.
+  const at = buildRecord({
+    runId: 'r-slash-flush',
+    hookPayload: { session_id: 's', hook_event_name: 'Stop' },
+    invocations: [{
+      kind: 'slash_command',
+      name: '/research-this',
+      line_index: 5,
+      timestamp: '2026-08-04T19:35:23.108Z',
+    }],
+    usageEntries: [
+      uEntry(0, 'm-prev', 100, { timestamp: '2026-08-04T19:35:19.272Z' }),
+      uEntry(1, 'm-prev', 100, { timestamp: '2026-08-04T19:35:19.280Z' }),
+    ],
+    toolCalls: [], dispatchResults: [], subagents: [], interruption: false,
+    window: { line_from: 27, line_to: 35, transcript_lines_total: 35 },
+    environment: {},
+  }).computed.attribution;
+  assert.equal(at.idle_ms_before_invocation, 3_828, 'measured from the invocation itself');
+  assert.equal(at.cache_state, 'warm', '12 seconds after the previous arm is warm, not unknown');
+  assert.equal(at.marginal_comparable, true);
+});
+
+test('anchoring on the invocation timestamp still reports COLD when the gap is real', () => {
+  // The mutant this kills: "just use the invocation timestamp" is only correct
+  // if it can still return cold. Real record 20260804T194006Z, window 69-80 —
+  // same shape, but 19:39:59.948 - 19:37:11.934 = 168,014ms. Under the 5-min
+  // TTL that is still warm, so the assertion below uses a gap past the TTL to
+  // prove the anchor does not hardwire `warm`.
+  const at = buildRecord({
+    runId: 'r-slash-cold',
+    hookPayload: { session_id: 's', hook_event_name: 'Stop' },
+    invocations: [{
+      kind: 'slash_command',
+      name: '/research-this',
+      line_index: 5,
+      timestamp: '2026-08-04T19:45:00.000Z',
+    }],
+    usageEntries: [uEntry(0, 'm-prev', 100, { timestamp: '2026-08-04T19:37:11.934Z' })],
+    toolCalls: [], dispatchResults: [], subagents: [], interruption: false,
+    window: { line_from: 69, line_to: 80, transcript_lines_total: 80 },
+    environment: {},
+  }).computed.attribution;
+  assert.equal(at.idle_ms_before_invocation, 468_066);
+  assert.equal(at.cache_state, 'cold', 'nearly 8 idle minutes is cold');
+  assert.equal(at.marginal_comparable, false);
+});
+
+test('an invocation timestamp does not override a real in-window predecessor', () => {
+  // The skill_tool path is unaffected and must stay so: when a usage row DOES
+  // sit at-or-after the invocation line, that row is the invoking call and the
+  // straddler exclusion still governs. Same fixture as the straddler anchor.
+  const at = buildRecord({
+    runId: 'r-slash-noregress',
+    hookPayload: { session_id: 's', hook_event_name: 'Stop' },
+    invocations: [{ kind: 'skill_tool', name: 'x', line_index: 35, timestamp: '2026-08-04T18:03:35.170Z' }],
+    usageEntries: [
+      uEntry(20, 'm-real-prev', 100, { timestamp: '2026-08-04T17:00:00.000Z' }),
+      uEntry(33, 'm-invoke', 100, { timestamp: '2026-08-04T18:03:35.170Z' }),
+      uEntry(34, 'm-invoke', 100, { timestamp: '2026-08-04T18:03:35.173Z' }),
+      uEntry(35, 'm-invoke', 100, { timestamp: '2026-08-04T18:03:35.174Z' }),
+    ],
+    toolCalls: [], dispatchResults: [], subagents: [], interruption: false,
+    window: { line_from: 789, line_to: 931, transcript_lines_total: 931 },
+    environment: {},
+  }).computed.attribution;
+  assert.equal(at.idle_ms_before_invocation, 3_815_174, 'still measured to line 35, not the invocation ts');
+  assert.equal(at.cache_state, 'cold');
+});
+
+test('with two invocations the gap anchors on the EARLIEST one, not the first listed', () => {
+  // Surviving mutant: `invocations[0].timestamp`. Real record 20260804T174401Z
+  // holds two invocations (lines 11 and 90) and detectInvocations returns them
+  // in line order, so [0] and the earliest coincide — which is exactly why the
+  // mutant survived. attribution keys off min(line_index), so the timestamp has
+  // to come off THAT invocation or a window reports a gap measured from a
+  // different skill's clock. Listed out of order here on purpose.
+  const at = buildRecord({
+    runId: 'r-two-inv',
+    hookPayload: { session_id: 's', hook_event_name: 'Stop' },
+    invocations: [
+      { kind: 'slash_command', name: '/second', line_index: 9, timestamp: '2026-08-04T19:50:00.000Z' },
+      { kind: 'slash_command', name: '/first', line_index: 5, timestamp: '2026-08-04T19:35:23.108Z' },
+    ],
+    usageEntries: [uEntry(0, 'm-prev', 100, { timestamp: '2026-08-04T19:35:19.280Z' })],
+    toolCalls: [], dispatchResults: [], subagents: [], interruption: false,
+    window: { line_from: 27, line_to: 35, transcript_lines_total: 35 },
+    environment: {},
+  }).computed.attribution;
+  assert.equal(at.idle_ms_before_invocation, 3_828, 'anchored on line 5, not on the array head');
+  assert.equal(at.cache_state, 'warm', "the later invocation's 14-minute clock must not make this cold");
+});
+
+test("the flushed-late tail names the run it belongs to, so misfiled spend is joinable", () => {
+  // SAME root cause as the two tests above, other symptom. The Stop hook reads
+  // the transcript before the turn's final assistant message is flushed, so
+  // every window ends one API call short and that call opens the NEXT window,
+  // landing in `unattributed`. Measured shares of a record's marginal tokens on
+  // session 51e8fb3d: 3.3%, 44.5%, 8.3%, 57.6%, 30.2% — up to 57.6% of a
+  // record's spend is the PREVIOUS run's answer.
+  //
+  // Not fixable by retreating the cursor: simulated over the real firings, a
+  // cursor at "last accounted line + 1" re-enters window 29-69 and re-detects
+  // the invocation at absolute line 32 that the previous firing already
+  // recorded — two records for one skill run, which is worse than misfiling.
+  // The previous record is also already on disk by then.
+  //
+  // So the spend is reported where it lands and made JOINABLE, exactly as
+  // subagent_runs[].spawned_by_run_id does for a subagent seen across firings.
+  const at = buildRecord({
+    runId: 'r-tail-b',
+    hookPayload: { session_id: 's', hook_event_name: 'Stop' },
+    invocations: [{
+      kind: 'slash_command', name: '/research-this', line_index: 5,
+      timestamp: '2026-08-04T19:35:23.108Z',
+    }],
+    usageEntries: [
+      uEntry(0, 'm-prev', 100, { timestamp: '2026-08-04T19:35:19.272Z' }),
+      uEntry(1, 'm-prev', 100, { timestamp: '2026-08-04T19:35:19.280Z' }),
+    ],
+    toolCalls: [], dispatchResults: [], subagents: [], interruption: false,
+    window: { line_from: 27, line_to: 35, transcript_lines_total: 35 },
+    previousRunId: 'r-tail-a',
+    environment: {},
+  }).computed.attribution;
+  assert.equal(at.unattributed_belongs_to_run_id, 'r-tail-a',
+    'the pre-invocation tail is the previous run\'s, not this run\'s');
+  assert.ok(at.unattributed.api_calls > 0, 'and there really is spend to join');
+});
+
+test('a record with no unattributed spend claims no owner for it', () => {
+  // The pointer must not assert a relationship that does not exist: a window
+  // whose every call sits at/after the invocation has no tail to hand back, and
+  // naming a previous run there would invent a link a dashboard would sum.
+  const at = buildRecord({
+    runId: 'r-clean',
+    hookPayload: { session_id: 's', hook_event_name: 'Stop' },
+    invocations: [{ kind: 'slash_command', name: '/x', line_index: 0, timestamp: '2026-08-04T19:00:00.000Z' }],
+    usageEntries: [uEntry(1, 'm-work', 100, { timestamp: '2026-08-04T19:00:05.000Z' })],
+    toolCalls: [], dispatchResults: [], subagents: [], interruption: false,
+    window: { line_from: 40, line_to: 50, transcript_lines_total: 50 },
+    previousRunId: 'r-earlier',
+    environment: {},
+  }).computed.attribution;
+  assert.equal(at.unattributed.api_calls, 0, 'nothing before the invocation');
+  assert.equal(at.unattributed_belongs_to_run_id, null, 'so no owner is claimed');
+});

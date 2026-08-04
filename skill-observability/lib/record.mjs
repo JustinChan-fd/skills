@@ -369,14 +369,36 @@ export function classifyCacheState(idleMsBeforeInvocation, { sessionIsNew } = {}
 
 // Milliseconds between the last API call BEFORE the invocation and the
 // invoking call itself — the interval the cache had to survive.
-export function idleBeforeInvocation(usageEntries, invocationLine, previousCallAt) {
+//
+// `invocationAt` is the invocation's own transcript timestamp, used as the
+// anchor when no usage row sits at-or-after the invocation line. That is the
+// NORMAL shape on the slash path, for two compounding reasons:
+//   - a slash invocation is a plain user line and carries no usage of its own,
+//     unlike a Skill tool_use, which is emitted BY an API call; and
+//   - the Stop hook reads the transcript before the turn's final assistant
+//     message is flushed, so the window ends one call short and that call
+//     opens the next window, ahead of the next invocation.
+// Without the anchor the function returned null at the `!at` guard — before the
+// straddler filter and before the previousCallAt fallback that exists to
+// prevent exactly this — so every slash run after the first reported `unknown`.
+// MEASURED on session 51e8fb3d: 3,828ms of real idle reported as unmeasurable.
+export function idleBeforeInvocation(usageEntries, invocationLine, previousCallAt, invocationAt = null) {
   const stamped = (usageEntries ?? [])
     .filter((e) => (e.source === undefined || e.source === 'session') && typeof e.line_index === 'number' && e.timestamp)
     .map((e, i) => ({ line: e.line_index, ms: Date.parse(e.timestamp), key: dedupKeyOf(e, i) }))
     .filter((e) => Number.isFinite(e.ms));
   if (invocationLine === null || invocationLine === undefined) return null;
-  const at = stamped.filter((e) => e.line >= invocationLine).sort((a, b) => a.ms - b.ms)[0];
-  if (!at) return null;
+  // The invoking call, when the invocation IS an API call. Preferred over the
+  // invocation's own timestamp so the straddler exclusion below keeps governing
+  // the skill_tool path unchanged.
+  let at = stamped.filter((e) => e.line >= invocationLine).sort((a, b) => a.ms - b.ms)[0];
+  if (!at) {
+    const invMs = invocationAt ? Date.parse(invocationAt) : NaN;
+    if (!Number.isFinite(invMs)) return null;
+    // No dedup key to exclude: the invocation emitted no usage, so no row can
+    // be its own straddler and every stamped row is a genuine predecessor.
+    at = { line: invocationLine, ms: invMs, key: null };
+  }
   // The invoking call STRADDLES the boundary: it is the call that emitted the
   // Skill tool_use, and one message.id spans several transcript lines a few ms
   // apart. On both real records the row immediately "before" the invocation was
@@ -418,6 +440,13 @@ export function buildRecord({
   // firings in hook state. Lets a window that opens on the invocation still
   // measure its idle gap instead of reporting cache_state `unknown`.
   previousCallAt = null,
+  // run_id of the record the PREVIOUS firing wrote, carried in hook state. The
+  // Stop hook reads the transcript before the turn's own last assistant message
+  // is flushed to it, so every window ends one API call short and that call
+  // opens the next window as pre-invocation tail (measured up to 57.6% of a
+  // record's marginal tokens). It is reported where it lands, and this names
+  // whose it was — the same joinability contract as spawned_by_run_id.
+  previousRunId = null,
   environment,
   now = new Date(),
   gapCapMs,
@@ -450,7 +479,14 @@ export function buildRecord({
   const unattributedSubagents = subagents.filter((a) => !subagentIsAttributed(a, toolCalls, invocationLine));
   const unattributedSubagentAgg = aggregate(unattributedSubagents.flatMap((a) => a.usage_entries), { gapCapMs });
   const invocationDepthLines = invocationLine === null ? null : invocationLine + (window?.line_from ?? 0);
-  const idleMs = idleBeforeInvocation(usageEntries, invocationLine, previousCallAt);
+  // Timestamp of the EARLIEST invocation, matching invocationLine above — the
+  // anchor for the idle gap when the invocation emitted no API call of its own
+  // (the slash path). Read off the same invocation, not the first in the array,
+  // so a window holding two invocations cannot pair a line with another's clock.
+  const invocationAt = invocationLine === null
+    ? null
+    : ((invocations ?? []).find((i) => i.line_index === invocationLine)?.timestamp ?? null);
+  const idleMs = idleBeforeInvocation(usageEntries, invocationLine, previousCallAt, invocationAt);
   const cacheState = invocationLine === null
     ? null
     : classifyCacheState(idleMs, { sessionIsNew: (window?.line_from ?? 0) === 0 });
@@ -547,6 +583,11 @@ export function buildRecord({
         marginal_comparable: cacheState === null ? null : cacheState === 'warm',
         attributed: { tokens: split.attributed.tokens, cost: split.attributed.cost, api_calls: split.attributed.api_calls },
         unattributed: { tokens: split.unattributed.tokens, cost: split.unattributed.cost, api_calls: split.unattributed.api_calls },
+        // Which run the pre-invocation tail actually belongs to, or null when
+        // there is no tail (naming an owner then would invent a link a
+        // dashboard would double-count) or no previous record to name.
+        unattributed_belongs_to_run_id:
+          split.unattributed.api_calls > 0 ? (previousRunId ?? null) : null,
         subagents_attributed: attributedSubagents.length,
         subagents_unattributed: unattributedSubagents.length,
         unattributed_subagent_tokens: unattributedSubagentAgg.tokens.grand_total,
