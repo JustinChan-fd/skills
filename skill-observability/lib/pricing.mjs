@@ -35,6 +35,13 @@ export const CACHE_READ_MULT = RATE_CONFIG.cache_multipliers.cache_read;
 
 const MODELS = RATE_CONFIG.models;
 
+// Extra prefixes that resolve to a model entry, for naming conventions that
+// don't follow claude-{name}-{major}. The 3.x family inverts word order
+// (claude-3-5-haiku vs claude-haiku-4-5), so Haiku 3.5's real id would price to
+// null without this. Data, so the next surprise is a config edit.
+const PREFIX_ALIASES = Object.entries(RATE_CONFIG.prefix_aliases ?? {})
+  .filter(([k]) => !k.startsWith('_'));
+
 // Pull the five token prices off a model entry, or off its fast/intro override
 // when one applies, falling back to input x multiplier for any cache column the
 // vendor table didn't state explicitly.
@@ -59,29 +66,41 @@ function columnsOf(base, override) {
 }
 
 /**
- * Strip the platform decorations Bedrock and Vertex put around an id so the
- * same model prices identically wherever it was served:
+ * Reduce any platform's spelling of a model id to the Claude API form, so the
+ * same model prices identically wherever it was served. The config carries only
+ * Claude API prefixes (see the `models` array); every other naming convention
+ * is normalized to one of those here rather than duplicated as a second entry.
  *
- *   anthropic.claude-opus-4-6-v1        -> claude-opus-4-6
- *   anthropic.claude-haiku-4-5-...-v1:0 -> claude-haiku-4-5-...
- *   claude-opus-4-8[1m]                 -> claude-opus-4-8
+ *   anthropic.claude-opus-4-6-v1           -> claude-opus-4-6      (Bedrock)
+ *   us.anthropic.claude-opus-5[1m]         -> claude-opus-5        (Bedrock regional)
+ *   global.anthropic.claude-sonnet-5[1m]   -> claude-sonnet-5      (Bedrock global)
+ *   anthropic.claude-haiku-4-5-...-v1:0    -> claude-haiku-4-5-... (Bedrock, dated)
+ *   claude-opus-4-5@20251101               -> claude-opus-4-5-20251101 (Vertex)
+ *   claude-opus-4-8[1m]                    -> claude-opus-4-8      (1M context)
  *
- * The `[1m]` suffix marks the 1M-context variant, which the vendor prices at
- * standard rates ("a 900k request is billed at the same per-token rate as a 9k
- * request"), so it is decoration for pricing purposes — but it would otherwise
- * still prefix-match, whereas the `anthropic.` prefix would NOT and would
- * silently produce cost null.
+ * Order matters and the region strip must be REPEATABLE: a regional Bedrock id
+ * carries TWO dotted prefixes (`us.` then `anthropic.`), so a single
+ * alternation eats only `us.` and leaves `anthropic.claude-opus-5`, which
+ * prefix-matches nothing and prices to null. Hence the `+` on the group.
  *
- * Scope, honestly: on this machine `anthropic.*` ids appear only in workflow
- * metadata and toolUseResult payloads (145 + 59 occurrences) and NEVER as
- * message.model on a usage-carrying line, so no record was mispriced. This
- * guards a shape we are one gateway config change away from, not a live bug.
+ * `[1m]` marks the 1M-context variant, which the vendor bills at standard rates
+ * ("a 900k request is billed at the same per-token rate as a 9k request"), so
+ * for pricing purposes it is pure decoration. Vertex separates the snapshot
+ * date with `@` where the Claude API uses `-`, so that is rewritten rather than
+ * stripped — the date distinguishes real snapshots.
+ *
+ * Scope, honestly: on this machine no decorated id has ever reached the pricer.
+ * `anthropic.*` appears only in workflow metadata and toolUseResult payloads
+ * (145 + 59 occurrences), and every `us.anthropic.*` hit is prose inside a
+ * transcript, never a `model` field. This guards a gateway reconfiguration —
+ * except the region-prefix case, which WAS a live bug in the regex above.
  */
 export function normalizeModelId(modelId) {
   return String(modelId)
-    .replace(/^(anthropic|us|eu|apac|global)\./, '')
+    .replace(/^((anthropic|us|eu|apac|global)\.)+/, '')
     .replace(/\[1m\]$/, '')
-    .replace(/-v\d+(:\d+)?$/, '');
+    .replace(/-v\d+(:\d+)?$/, '')
+    .replace(/@(\d{8})$/, '-$1');
 }
 
 /**
@@ -89,6 +108,10 @@ export function normalizeModelId(modelId) {
  * date suffix (claude-opus-4-5-20251101) — and note that the config carries
  * both `claude-opus-4` and `claude-opus-4-5`, so longest-prefix is what keeps
  * the pointed entry winning over the retired generic one.
+ *
+ * Aliases from config.prefix_aliases compete in the SAME longest-prefix
+ * contest, by their own length rather than the target's, so an alias can only
+ * win where it is the most specific match.
  *
  * `fast` overrides apply when usage.speed === "fast"; `intro` applies when the
  * call's timestamp falls on or before the introductory window's end. Fast wins
@@ -98,8 +121,21 @@ export function ratesFor(modelId, { speed = null, at = null } = {}) {
   if (typeof modelId !== 'string') return null;
   const id = normalizeModelId(modelId);
   let best = null;
+  let bestLen = 0;
   for (const m of MODELS) {
-    if (id.startsWith(m.prefix) && (!best || m.prefix.length > best.prefix.length)) best = m;
+    if (id.startsWith(m.prefix) && m.prefix.length > bestLen) {
+      best = m;
+      bestLen = m.prefix.length;
+    }
+  }
+  for (const [alias, target] of PREFIX_ALIASES) {
+    if (id.startsWith(alias) && alias.length > bestLen) {
+      const m = MODELS.find((x) => x.prefix === target);
+      if (m) {
+        best = m;
+        bestLen = alias.length;
+      }
+    }
   }
   if (!best) return null;
   let override = null;

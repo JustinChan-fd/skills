@@ -36,13 +36,30 @@ loudly, but keeping the vendor's own numbers means a future change that breaks
 the relationship prices correctly instead of silently wrong.
 
 Verified against the published table on 2026-08-04: every model we carry matches
-on all five columns. Four vendor modifiers are deliberately **not** implemented,
+on all five columns.
+
+Each model also carries an `ids` block naming it on **all three platforms** —
+Claude API, Bedrock, and Vertex — because we reach Claude through the Keystone
+Bedrock gateway and a Bedrock id is not the Claude API id. Matching happens on
+the Claude API form only; `lib/pricing.mjs`'s `normalizeModelId` rewrites the
+others into it, and a test asserts every spelling the config claims actually
+prices to that same entry. The forms differ more than you'd expect: Bedrock
+prepends `anthropic.`, adds `-v1:0` on pre-4.6 models, and **regional inference
+profiles prepend a second scope** (`us.anthropic.claude-opus-5`); Vertex
+separates the snapshot date with `@`; and the 3.x family inverts word order
+(`claude-3-5-haiku`, not `claude-haiku-3-5`), which is why there is a
+`prefix_aliases` table. An id form we fail to normalize prices to **null**, which
+is the whole reason to carry them as data.
+
+Four vendor modifiers are deliberately **not** implemented,
 each with its reason recorded in the config's `not_implemented` block. The one
-that could actually bite: **data residency.** Claude 4.6+ with `inference_geo:
-"us"` bills 1.1x on every category, and Bedrock regional endpoints carry a
-similar 10% premium — but `inference_geo` is a request field and never appears in
-the transcript, so we cannot tell which endpoint served a call. If our gateway
-pins a region, every dollar figure here is 10% low. Uniformly low, so run-to-run
+that could actually bite: **geography, twice over.** First-party, Claude 4.6+
+with `inference_geo: "us"` bills 1.1x on every category — and `inference_geo` is
+a request field that never appears in the transcript. Separately, **Bedrock is
+invoiced by AWS off its own rate card**, and its regional / multi-region
+endpoints carry a 10% premium over global; the transcript doesn't say which
+endpoint served a call either. Both point the same way: if our gateway pins a
+region, every dollar figure here is ~10% low. Uniformly low, so run-to-run
 comparisons stay valid; absolute dollars do not. Unresolved.
 
 One non-price caveat that distorts token comparisons: **Claude 4.7+ use a newer

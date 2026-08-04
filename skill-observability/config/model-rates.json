@@ -12,10 +12,19 @@
     "exactly. Storing them verbatim means a future vendor change that breaks that",
     "relationship gets priced correctly instead of silently wrong. A test asserts",
     "the invariant still holds, so a transcription typo fails loudly (see",
-    "test/pricing-config.test.mjs)."
+    "test/pricing-config.test.mjs).",
+    "",
+    "MODEL IDS: every model carries an `ids` block naming it on all three",
+    "platforms, because we reach Claude through the Keystone Bedrock gateway and",
+    "a Bedrock id is NOT the Claude API id. Only `ids.anthropic` is used for",
+    "matching (`prefix` is derived from it); `ids.bedrock` and `ids.vertex` are",
+    "carried so lib/pricing.mjs's normalizeModelId can be TESTED against the real",
+    "strings each platform emits. A form we fail to normalize prices to null, and",
+    "null is what these ids are here to prevent. Source for the id spellings:",
+    "https://platform.claude.com/docs/en/about-claude/models/model-ids-and-versions"
   ],
 
-  "rates_version": "2026-08-04.1",
+  "rates_version": "2026-08-04.2",
   "source_url": "https://platform.claude.com/docs/en/about-claude/pricing",
   "fetched_at": "2026-08-04",
   "currency": "USD",
@@ -28,23 +37,67 @@
     "cache_read": 0.1
   },
 
+  "id_conventions": {
+    "_comment": [
+      "How each platform spells the SAME model. lib/pricing.mjs matches on the",
+      "Claude API form only; normalizeModelId() rewrites the others into it.",
+      "Documented here so a reader can see WHY the normalizer does what it does,",
+      "and so the per-model `ids` blocks below have a legend."
+    ],
+
+    "anthropic": {
+      "label": "Claude API (first-party) — the canonical form we match on",
+      "format_4_6_and_later": "claude-{name}-{major}[-{minor}]  e.g. claude-opus-5, claude-sonnet-4-6",
+      "format_before_4_6": "claude-{name}-{major}-{minor}-{YYYYMMDD}  e.g. claude-sonnet-4-5-20250929",
+      "aliases": "Pre-4.6 models also accept a dateless alias (claude-sonnet-4-5) that points at the newest dated snapshot. Both forms prefix-match the same entry, so both price correctly.",
+      "note": "Claude Platform on AWS uses these ids too, NOT Bedrock-style ones."
+    },
+
+    "bedrock": {
+      "label": "Amazon Bedrock — what the Keystone gateway is most likely to emit",
+      "format_4_6_and_later": "anthropic.claude-{name}-{major}[-{minor}]",
+      "format_before_4_6": "anthropic.claude-{name}-{major}-{minor}-{YYYYMMDD}-v1:0",
+      "v1_suffix": "Claude Opus 4.6 (anthropic.claude-opus-4-6-v1) is the LAST id to carry -v1. Dropped from Sonnet 4.6 onward.",
+      "region_prefixes": "Regional and cross-region inference profiles prepend a region scope: us. / eu. / apac. / global. — giving TWO dotted prefixes (us.anthropic.claude-opus-5). The normalizer must strip repeatedly; stripping once leaves 'anthropic.' and prices to null. This was a real bug, fixed 2026-08-04.",
+      "pricing_note": "Regional and multi-region endpoints carry a 10% premium over global, for Sonnet 4.5 / Haiku 4.5 / Opus 4.5 and later. Not applied — see not_implemented.data_residency_1_1x. Bedrock is invoiced by AWS, so its rate card is independent of the ones in this file."
+    },
+
+    "vertex": {
+      "label": "Google Cloud Vertex AI",
+      "format_4_6_and_later": "matches the Claude API exactly (claude-opus-5)",
+      "format_before_4_6": "claude-{name}-{major}-{minor}@{YYYYMMDD} — an @ where the Claude API uses a dash",
+      "note": "The normalizer rewrites @YYYYMMDD to -YYYYMMDD rather than stripping it: the date distinguishes real snapshots and dropping it would match a shorter prefix."
+    },
+
+    "not_a_model_id": {
+      "_comment": "Values seen in the `model` position on this machine that must price to NULL, never to a guess. Friendly aliases are echoes of slash-command input; <synthetic> is a harness placeholder with every token field 0; the non-Claude ids are other Bedrock-hosted vendors reachable through the same gateway.",
+      "friendly_aliases": ["opus", "sonnet", "haiku", "sonnet 4.6"],
+      "harness_placeholders": ["<synthetic>"],
+      "other_vendors_on_bedrock": ["qwen.qwen3-coder-30b-a3b-v1:0", "deepseek.r1-v1:0"]
+    }
+  },
+
   "models": [
     {
       "prefix": "claude-fable-5",
       "label": "Claude Fable 5",
+      "ids": { "anthropic": "claude-fable-5", "bedrock": "anthropic.claude-fable-5", "vertex": "claude-fable-5" },
       "input": 10, "output": 50,
       "cache_write_5m": 12.50, "cache_write_1h": 20, "cache_read": 1
     },
     {
       "prefix": "claude-mythos-5",
       "label": "Claude Mythos 5",
-      "note": "limited availability",
+      "note": "limited availability (Project Glasswing, invitation only)",
+      "ids": { "anthropic": "claude-mythos-5", "bedrock": "anthropic.claude-mythos-5", "vertex": "claude-mythos-5" },
       "input": 10, "output": 50,
       "cache_write_5m": 12.50, "cache_write_1h": 20, "cache_read": 1
     },
     {
       "prefix": "claude-opus-5",
       "label": "Claude Opus 5",
+      "note": "CONFIRMED on the Keystone/Bedrock model list, 1M context, 128k max output",
+      "ids": { "anthropic": "claude-opus-5", "bedrock": "anthropic.claude-opus-5", "vertex": "claude-opus-5" },
       "input": 5, "output": 25,
       "cache_write_5m": 6.25, "cache_write_1h": 10, "cache_read": 0.50,
       "fast": { "input": 10, "output": 50 }
@@ -52,6 +105,8 @@
     {
       "prefix": "claude-opus-4-8",
       "label": "Claude Opus 4.8",
+      "note": "CONFIRMED on the Keystone/Bedrock model list",
+      "ids": { "anthropic": "claude-opus-4-8", "bedrock": "anthropic.claude-opus-4-8", "vertex": "claude-opus-4-8" },
       "input": 5, "output": 25,
       "cache_write_5m": 6.25, "cache_write_1h": 10, "cache_read": 0.50,
       "fast": { "input": 10, "output": 50 }
@@ -59,41 +114,48 @@
     {
       "prefix": "claude-opus-4-7",
       "label": "Claude Opus 4.7",
-      "note": "fast mode NOT available — speed:'fast' returns an error",
+      "note": "CONFIRMED on the Keystone/Bedrock model list. Fast mode NOT available — speed:'fast' returns an error. First generation on the new tokenizer (see cross_model_caveat).",
+      "ids": { "anthropic": "claude-opus-4-7", "bedrock": "anthropic.claude-opus-4-7", "vertex": "claude-opus-4-7" },
       "input": 5, "output": 25,
       "cache_write_5m": 6.25, "cache_write_1h": 10, "cache_read": 0.50
     },
     {
       "prefix": "claude-opus-4-6",
       "label": "Claude Opus 4.6",
-      "note": "speed:'fast' runs at standard speed and bills at standard rates",
+      "note": "CONFIRMED on the Keystone/Bedrock model list. speed:'fast' runs at standard speed and bills standard. Its Bedrock id is the LAST one carrying -v1.",
+      "ids": { "anthropic": "claude-opus-4-6", "bedrock": "anthropic.claude-opus-4-6-v1", "vertex": "claude-opus-4-6" },
       "input": 5, "output": 25,
       "cache_write_5m": 6.25, "cache_write_1h": 10, "cache_read": 0.50
     },
     {
       "prefix": "claude-opus-4-5",
       "label": "Claude Opus 4.5",
+      "note": "CONFIRMED on the Keystone/Bedrock model list (dated + versioned form)",
+      "ids": { "anthropic": "claude-opus-4-5-20251101", "bedrock": "anthropic.claude-opus-4-5-20251101-v1:0", "vertex": "claude-opus-4-5@20251101" },
       "input": 5, "output": 25,
       "cache_write_5m": 6.25, "cache_write_1h": 10, "cache_read": 0.50
     },
     {
       "prefix": "claude-opus-4-1",
       "label": "Claude Opus 4.1",
-      "note": "deprecated",
+      "note": "deprecated; retires 2026-08-05 — i.e. TOMORROW as of this fetch",
+      "ids": { "anthropic": "claude-opus-4-1-20250805", "bedrock": "anthropic.claude-opus-4-1-20250805-v1:0", "vertex": "claude-opus-4-1@20250805" },
       "input": 15, "output": 75,
       "cache_write_5m": 18.75, "cache_write_1h": 30, "cache_read": 1.50
     },
     {
       "prefix": "claude-opus-4",
       "label": "Claude Opus 4",
-      "note": "retired except on Google Cloud. Prefix is shorter than claude-opus-4-N, so longest-prefix match keeps the pointed entries winning.",
+      "note": "retired except on Google Cloud. Prefix is shorter than claude-opus-4-N, so longest-prefix match is what keeps the pointed entries winning — shortest-match-wins would price Opus 4.5 at 3x.",
+      "ids": { "anthropic": "claude-opus-4-20250514", "bedrock": "anthropic.claude-opus-4-20250514-v1:0", "vertex": "claude-opus-4@20250514" },
       "input": 15, "output": 75,
       "cache_write_5m": 18.75, "cache_write_1h": 30, "cache_read": 1.50
     },
     {
       "prefix": "claude-sonnet-5",
       "label": "Claude Sonnet 5",
-      "note": "Sticker is $3/$15; introductory $2/$10 through 2026-08-31. The intro block is the ACTIVE price until then, so a run today prices at $2/$10.",
+      "note": "CONFIRMED on the Keystone/Bedrock model list. Sticker is $3/$15; introductory $2/$10 through 2026-08-31. The intro block is the ACTIVE price until then, so a run today prices at $2/$10.",
+      "ids": { "anthropic": "claude-sonnet-5", "bedrock": "anthropic.claude-sonnet-5", "vertex": "claude-sonnet-5" },
       "input": 3, "output": 15,
       "cache_write_5m": 3.75, "cache_write_1h": 6, "cache_read": 0.30,
       "intro": {
@@ -105,36 +167,58 @@
     {
       "prefix": "claude-sonnet-4-6",
       "label": "Claude Sonnet 4.6",
+      "note": "CONFIRMED on the Keystone/Bedrock model list. Last generation on the OLD tokenizer.",
+      "ids": { "anthropic": "claude-sonnet-4-6", "bedrock": "anthropic.claude-sonnet-4-6", "vertex": "claude-sonnet-4-6" },
       "input": 3, "output": 15,
       "cache_write_5m": 3.75, "cache_write_1h": 6, "cache_read": 0.30
     },
     {
       "prefix": "claude-sonnet-4-5",
       "label": "Claude Sonnet 4.5",
+      "note": "CONFIRMED on the Keystone/Bedrock model list (dated + versioned form)",
+      "ids": { "anthropic": "claude-sonnet-4-5-20250929", "bedrock": "anthropic.claude-sonnet-4-5-20250929-v1:0", "vertex": "claude-sonnet-4-5@20250929" },
       "input": 3, "output": 15,
       "cache_write_5m": 3.75, "cache_write_1h": 6, "cache_read": 0.30
     },
     {
       "prefix": "claude-sonnet-4",
       "label": "Claude Sonnet 4",
-      "note": "retired except on Bedrock and Google Cloud — REACHABLE for us (Keystone Bedrock gateway)",
+      "note": "retired except on Bedrock and Google Cloud — POTENTIALLY REACHABLE for us via the Keystone Bedrock gateway, though absent from the enterprise model list we were shown",
+      "ids": { "anthropic": "claude-sonnet-4-20250514", "bedrock": "anthropic.claude-sonnet-4-20250514-v1:0", "vertex": "claude-sonnet-4@20250514" },
       "input": 3, "output": 15,
       "cache_write_5m": 3.75, "cache_write_1h": 6, "cache_read": 0.30
     },
     {
       "prefix": "claude-haiku-4-5",
       "label": "Claude Haiku 4.5",
+      "note": "CONFIRMED on the Keystone/Bedrock model list (dated + versioned form). The most-used model on this machine after Sonnet 4.6.",
+      "ids": { "anthropic": "claude-haiku-4-5-20251001", "bedrock": "anthropic.claude-haiku-4-5-20251001-v1:0", "vertex": "claude-haiku-4-5@20251001" },
       "input": 1, "output": 5,
       "cache_write_5m": 1.25, "cache_write_1h": 2, "cache_read": 0.10
     },
     {
       "prefix": "claude-haiku-3-5",
       "label": "Claude Haiku 3.5",
-      "note": "retired except on Bedrock and Google Cloud — REACHABLE for us (Keystone Bedrock gateway)",
+      "note": "retired except on Bedrock and Google Cloud — POTENTIALLY REACHABLE for us via the Keystone Bedrock gateway, though absent from the enterprise model list we were shown. NOTE the 3.x id puts the family name AFTER the number on Bedrock (anthropic.claude-3-5-haiku-...), unlike every 4.x id, so its prefix does NOT follow the claude-{name}-{major} shape.",
+      "ids": { "anthropic": "claude-3-5-haiku-20241022", "bedrock": "anthropic.claude-3-5-haiku-20241022-v1:0", "vertex": "claude-3-5-haiku@20241022" },
       "input": 0.80, "output": 4,
       "cache_write_5m": 1, "cache_write_1h": 1.60, "cache_read": 0.08
     }
   ],
+
+  "prefix_aliases": {
+    "_comment": [
+      "Extra prefixes that must resolve to a model above. Kept as data so a naming",
+      "convention we did not anticipate is a config edit, not a code change.",
+      "Matched by the same longest-prefix rule as `models`, AFTER normalization.",
+      "",
+      "The 3.x family inverts word order (claude-3-5-haiku vs claude-haiku-4-5),",
+      "so Haiku 3.5's real id does not prefix-match its own `prefix` field. The",
+      "alias is what actually makes it price. Its `prefix` is retained because",
+      "records already stamp model_prefix and changing it would break re-pricing."
+    ],
+    "claude-3-5-haiku": "claude-haiku-3-5"
+  },
 
   "not_implemented": {
     "_comment": "Vendor pricing modifiers this instrument does NOT apply, each with why. Recorded so a future reader knows they were considered rather than missed.",

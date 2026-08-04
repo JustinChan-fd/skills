@@ -167,6 +167,111 @@ test('Bedrock/Vertex platform decorations are stripped before matching', () => {
   assert.equal(r('claude-opus-4-8[1m]').input_per_mtok, 5);
 });
 
+test('a REGIONAL Bedrock id carries two dotted prefixes and must still price', () => {
+  // Regression. The strip was a single alternation, so `us.anthropic.claude-…`
+  // lost only `us.` and was left as `anthropic.claude-opus-5` — which
+  // prefix-matches nothing and priced to NULL. Cross-region inference profiles
+  // are the normal way an enterprise Bedrock account addresses these models, so
+  // this is the id form we are most likely to actually meet.
+  for (const [id, want] of [
+    ['us.anthropic.claude-opus-5[1m]', 5],
+    ['eu.anthropic.claude-opus-4-8[1m]', 5],
+    ['apac.anthropic.claude-sonnet-4-6[1m]', 3],
+    ['global.anthropic.claude-opus-5[1m]', 5],
+    ['us.anthropic.claude-haiku-4-5-20251001-v1:0', 1],
+    ['us.anthropic.claude-sonnet-4-5-20250929-v1:0', 3],
+  ]) {
+    const got = r(id);
+    assert.ok(got, `${id} must price, not return null`);
+    assert.equal(got.input_per_mtok, want, id);
+  }
+  assert.equal(normalizeModelId('us.anthropic.claude-opus-5[1m]'), 'claude-opus-5');
+});
+
+test('Vertex separates the snapshot date with @ and must resolve to the dash form', () => {
+  // Dropping the date instead of rewriting it would match a SHORTER prefix:
+  // claude-opus-4-5@20251101 -> claude-opus-4-5 is fine, but the same mistake on
+  // claude-opus-4@20250514 must still land on claude-opus-4 at $15, not on a
+  // 4-N entry at $5.
+  assert.equal(normalizeModelId('claude-opus-4-5@20251101'), 'claude-opus-4-5-20251101');
+  assert.equal(r('claude-opus-4-5@20251101').input_per_mtok, 5);
+  assert.equal(r('claude-sonnet-4-5@20250929').input_per_mtok, 3);
+  assert.equal(r('claude-haiku-4-5@20251001').input_per_mtok, 1);
+  assert.equal(r('claude-opus-4@20250514').model_prefix, 'claude-opus-4');
+  assert.equal(r('claude-opus-4@20250514').input_per_mtok, 15);
+});
+
+test('every id spelling the config claims for every model actually prices', () => {
+  // The `ids` blocks are the reason this file carries both naming families. A
+  // spelling listed there and NOT priceable is the exact failure this guards:
+  // it would silently produce cost null on a real gateway. Each id must also
+  // land on its OWN entry — resolving to the wrong model is worse than null,
+  // because a wrong dollar figure is invisible and a null is not.
+  for (const m of RATE_CONFIG.models) {
+    assert.ok(m.ids, `${m.prefix} must declare its platform ids`);
+    for (const platform of ['anthropic', 'bedrock', 'vertex']) {
+      const id = m.ids[platform];
+      assert.equal(typeof id, 'string', `${m.prefix}.ids.${platform}`);
+      const got = r(id);
+      assert.ok(got, `${platform} id "${id}" must price`);
+      assert.equal(got.model_prefix, m.prefix, `${platform} id "${id}" resolved to the wrong model`);
+      // Expect the ACTIVE price, which for Sonnet 5 today is the intro rate —
+      // asserting the sticker here would fail for the right reason and teach
+      // the wrong lesson.
+      const wantInput = got.variant === 'introductory' ? m.intro.input : m.input;
+      assert.equal(got.input_per_mtok, wantInput, `${platform} id "${id}" priced wrong`);
+    }
+    // And the same ids under a Bedrock region scope and a 1M-context marker.
+    for (const scope of ['us.', 'eu.', 'apac.', 'global.']) {
+      const got = r(`${scope}${m.ids.bedrock}[1m]`);
+      assert.ok(got, `${scope}${m.ids.bedrock}[1m] must price`);
+      assert.equal(got.model_prefix, m.prefix, `${scope}${m.ids.bedrock}[1m] resolved wrong`);
+    }
+  }
+});
+
+test('Haiku 3.5 inverts the word order and prices only via its alias', () => {
+  // 3.x ids are claude-3-5-haiku-*, NOT claude-haiku-3-5-*, so the real id does
+  // not prefix-match its own config entry. The alias is load-bearing. Pinning it
+  // because the inversion is invisible until a 3.x model shows up and prices null.
+  assert.equal(r('claude-3-5-haiku-20241022').model_prefix, 'claude-haiku-3-5');
+  assert.equal(r('claude-3-5-haiku-20241022').input_per_mtok, 0.8);
+  assert.equal(r('anthropic.claude-3-5-haiku-20241022-v1:0').input_per_mtok, 0.8);
+  assert.equal(r('us.anthropic.claude-3-5-haiku-20241022-v1:0').input_per_mtok, 0.8);
+  // The alias must not swallow a different 3.x model that we do NOT price.
+  assert.equal(r('claude-3-5-sonnet-20241022'), null);
+  assert.equal(r('claude-3-opus-20240229'), null);
+});
+
+test('an alias only wins where it is the most specific match', () => {
+  // Aliases compete on their OWN length, so adding one can never quietly
+  // outrank a longer real prefix.
+  for (const [alias, target] of Object.entries(RATE_CONFIG.prefix_aliases)) {
+    if (alias.startsWith('_')) continue;
+    assert.ok(
+      RATE_CONFIG.models.some((m) => m.prefix === target),
+      `alias ${alias} points at unknown model ${target}`,
+    );
+    assert.ok(
+      !RATE_CONFIG.models.some((m) => m.prefix.startsWith(alias) && m.prefix !== target),
+      `alias ${alias} is ambiguous with a real prefix`,
+    );
+  }
+});
+
+test('non-Claude models on the same gateway still price to null', () => {
+  // The Keystone Bedrock gateway fronts other vendors. Their ids are dotted
+  // like Bedrock's Claude ids, so a sloppier normalizer that stripped any
+  // leading "word." would turn qwen./deepseek. into a bare id and then have to
+  // decide what it was. They must stay null.
+  for (const id of RATE_CONFIG.id_conventions.not_a_model_id.other_vendors_on_bedrock) {
+    assert.equal(r(id), null, `${id} must be null`);
+  }
+  for (const id of RATE_CONFIG.id_conventions.not_a_model_id.friendly_aliases) {
+    assert.equal(r(id), null, `${id} must be null`);
+  }
+});
+
 test('the 1M-context variant bills at standard rates, not a long-context premium', () => {
   // Vendor: Claude 4.6+ include the full 1M window at standard pricing.
   assert.deepEqual(r('claude-opus-4-8[1m]'), r('claude-opus-4-8'));

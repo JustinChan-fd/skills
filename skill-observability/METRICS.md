@@ -148,11 +148,24 @@ judge — but now the cost side is a number instead of a feeling.
    rates change, edit `config/model-rates.json` (vendor table, transcribed
    verbatim), bump its `rates_version`, and old records remain re-priceable from
    their `raw` token counts. `lib/pricing.mjs` holds no numbers.
-11. **Absolute dollars may be ~10% low, uniformly.** Data-residency /
-    regional-endpoint pricing carries a 1.1x multiplier that is not detectable
-    from the transcript (`inference_geo` is a request field). If the gateway pins
-    a region, every figure here understates by 10% — but uniformly, so
-    comparisons hold and only absolute spend is affected. See COST.md §1.
+   The config also carries each model's id on **all three platforms**
+   (`ids.anthropic` / `ids.bedrock` / `ids.vertex`) with an `id_conventions`
+   block explaining the differences, because we reach Claude through the
+   Keystone Bedrock gateway and a Bedrock id is not the Claude API id. Only the
+   Claude API form is matched; the rest are normalized into it. Two id shapes
+   were priced **null** before 2026-08-04: regional Bedrock inference profiles
+   (`us.anthropic.claude-opus-5`, two dotted prefixes where the strip regex
+   handled one) and Haiku 3.5 (whose real id inverts word order —
+   `claude-3-5-haiku` — and now resolves via `prefix_aliases`).
+11. **Absolute dollars may be ~10% low, uniformly.** Two independent 1.1x
+    modifiers, neither detectable from the transcript. First-party: Claude 4.6+
+    with `inference_geo: "us"` bills 1.1x, and `inference_geo` is a request
+    field that never appears in the transcript. Bedrock: AWS invoices from its
+    own rate card, and its regional / multi-region endpoints carry a 10% premium
+    over global — and the transcript does not say which endpoint served a call.
+    If the gateway pins a region, every figure here understates by ~10% — but
+    uniformly, so comparisons hold and only absolute spend is affected. See
+    COST.md §1.
 12. **Token counts are not comparable across the 4.7 tokenizer boundary.**
     Claude 4.7+ produce ~30% more tokens for the same text than Sonnet 4.6 and
     earlier. Compare dollars across that line, tokens only within one
