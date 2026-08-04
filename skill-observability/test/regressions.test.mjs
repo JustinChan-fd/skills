@@ -308,3 +308,92 @@ test('an unknown model WITH tokens still nulls the total — the guard survives'
   assert.equal(agg.cost.by_model['claude-future-9'].usd, null);
   assert.ok(agg.notes.some((n) => n.code === 'unknown_model_pricing'), 'and it must say why');
 });
+
+// ---------------------------------------------------------------------------
+// 5. Nested discovery against a REAL session tree.
+//
+// Section 2 above tests the recursion with a fixture I hand-wrote — which means
+// it can only prove the code does what I already believed. This section runs the
+// same code over transcripts copied from an actual workflow session on this
+// machine (catalog-ui-management, 2026-07), so the shape is the harness's, not
+// mine: 11 flat agents, 13 under subagents/workflows/wf_a52a4127-2d7/, and one
+// journal.jsonl beside them.
+//
+// The fixture keeps ONLY usage-bearing scalars — type, uuid, timestamp,
+// isSidechain, message.{id,model,usage} — and the two meta fields. No content
+// blocks, no tool inputs, no prose, no paths. Verified to reproduce the live
+// tree's figures exactly before being committed.
+//
+// MEASURED on both the live tree and this fixture:
+//   flat only : 11 files, 484 rows, 21,567,029 tokens, $13.882271, 268 calls
+//   nested    : 13 files, 151 rows,  3,228,321 tokens,  $1.566188,  71 calls
+//   all       : 24 files, 635 rows, 24,795,350 tokens, $15.448458, 339 calls
+//   journal   :  1 file,    0 rows,          0 tokens
+// A flat readdirSync sees 87.0% of the tokens in this one session and loses
+// $1.57 with no error raised.
+// ---------------------------------------------------------------------------
+
+const REAL_TREE = new URL('./fixtures/nested-real/', import.meta.url).pathname;
+
+test('a real workflow session yields all 24 agents — 11 flat AND 13 nested', () => {
+  const { agents } = readSubagentDelta(REAL_TREE, {});
+  assert.equal(agents.length, 24, 'the harness put 13 of these under workflows/; a flat readdir finds 11');
+  const nested = agents.filter((a) => a.file.includes('workflows/'));
+  assert.equal(nested.length, 13, 'every nested agent must be found');
+  assert.ok(
+    nested.every((a) => a.file.startsWith('workflows/wf_')),
+    'nested cursor keys must be paths relative to subagents/, not bare basenames',
+  );
+});
+
+test('the real tree reconciles to its MEASURED token and cost totals', () => {
+  const { agents } = readSubagentDelta(REAL_TREE, {});
+  const agg = aggregate(agents.flatMap((a) => a.usage_entries));
+  // Exact figures, not "> 0": a 13% undercount is precisely what an exact
+  // anchor catches and a truthiness check waves through.
+  assert.equal(agg.tokens.grand_total, 24_795_350, 'flat-only would report 21,567,029');
+  assert.equal(agg.cost.total_usd, 15.448458, 'flat-only would report $13.882271 — $1.57 lost');
+  assert.equal(agg.api_calls, 339, 'flat-only would report 268');
+  assert.equal(agg.cost.complete, true, 'a real session must price completely');
+  assert.deepEqual(agg.notes, [], 'and degrade in no way at all');
+});
+
+test('the real tree carries a journal.jsonl and it contributes nothing', () => {
+  const { agents } = readSubagentDelta(REAL_TREE, {});
+  assert.ok(
+    !agents.some((a) => a.file.includes('journal')),
+    'journal.jsonl sits in the same dir as 13 real agents; taking every *.jsonl swallows it',
+  );
+  // The falsifier for the filter: if journal were admitted it would add a
+  // 25th zero-token agent, so the count above is what proves the exclusion.
+  assert.equal(agents.length, 24, 'not 25');
+});
+
+// Sidecar resolution is keyed off f.path, so a nested agent's meta.json is read
+// from workflows/<wf_id>/ rather than from sessionDir/subagents/. Asserting on
+// agentType (not toolUseId) because the real data says workflow subagents carry
+// NO toolUseId — they are spawned by the workflow runtime, not by an Agent
+// tool_use block, so there is no tool call to join back to. Flat agents in this
+// same tree DO carry one; that asymmetry is the shape, not a gap.
+test('real nested agents keep their meta sidecars from the workflows/ subdir', () => {
+  const { agents } = readSubagentDelta(REAL_TREE, {});
+  const nested = agents.filter((a) => a.file.includes('workflows/'));
+  assert.equal(nested.length, 13);
+  const resolved = nested.filter((a) => a.meta && a.meta.agentType === 'workflow-subagent');
+  assert.equal(resolved.length, 13, 'sidecars must resolve next to the transcript, not next to sessionDir');
+  assert.ok(nested.every((a) => a.meta.spawnDepth === 1));
+  // The join key genuinely absent for workflow agents — recorded so a future
+  // change that starts populating it is a visible, deliberate change.
+  assert.ok(nested.every((a) => a.meta.toolUseId === undefined));
+  // Contrast: flat Agent-tool spawns in the same session DO have the join key.
+  const flat = agents.filter((a) => !a.file.includes('/'));
+  assert.equal(flat.length, 11);
+  assert.ok(flat.every((a) => typeof a.meta?.toolUseId === 'string'));
+});
+
+test('re-firing over the real tree adds no spend — cursors hold at scale', () => {
+  const first = readSubagentDelta(REAL_TREE, {});
+  const second = readSubagentDelta(REAL_TREE, first.nextCursors);
+  assert.equal(second.agents.flatMap((a) => a.usage_entries).length, 0, '24 agents, second pass, zero new rows');
+  assert.equal(Object.keys(first.nextCursors).length, 24, 'one cursor per agent, no collisions across dirs');
+});
