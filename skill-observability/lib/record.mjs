@@ -321,35 +321,77 @@ export function partitionByInvocation(usageEntries, invocationLine, { gapCapMs }
 // measured call); defaulting those to unattributed would hide exactly the spend
 // this tool exists to surface. Over-crediting a skill that is visible beats
 // silently dropping the biggest number on the page.
-// ---- session-start classification ----
+// ---- cache state: why two runs of one skill can differ 8x ----
 //
-// `marginal_usd` is the depth-invariant metric, but only from about session
-// line 25 onward. Finer buckets over 298 sessions (per deduplicated call)
-// showed it SPIKING at session open, because a fresh session writes the whole
-// prompt cache from scratch rather than reading it:
+// The prompt cache has a 5-minute TTL. Every API call either READS a live cache
+// entry (0.1x the input rate) or WRITES a fresh one (1.25x). Reading is 12.5x
+// cheaper than writing the same tokens, so whether the cache was alive at
+// invocation time dominates the cost of a run — more than the model, more than
+// how much work the skill did.
 //
-//   depth   input  output  cache WRITE  marginal   cache READ
-//   5-9     7,053     782      37,783    45,619       20,908
-//   10-24   2,090     523      16,918    19,531       47,441
-//   25-49   2,417     540       3,801     6,757       67,378
-//   100-399 5,296     760       4,911    10,968      105,097
-//   400+    6,973     672       4,002    11,647      119,616
+// This started as a LINE-DEPTH classification (`fresh`/`warming`/`steady`),
+// which was measuring a proxy. Crossing depth against the idle gap before each
+// call — 36,794 deduplicated calls over 435 transcripts, avg marginal tokens:
 //
-// An earlier pass over 100-line buckets reported marginal flat at EVERY depth;
-// the 0-99 bucket averaged the spike away. So there are three regimes, not two:
-//   fresh   (< 25)     both marginal and carry are unlike everything else
-//   warming (25-399)   marginal has settled; cache read/call still climbing
-//   steady  (>= 400)   carry/call plateaus (within 5% across four buckets)
-// The flag is not decoration: of 494 real Skill/Workflow invocations on this
-// disk, 22.1% land before line 25 (median 126, p75 791).
-export const FRESH_SESSION_MAX_LINE = 25;
-export const STEADY_SESSION_MIN_LINE = 400;
+//                      gap < 5 min    gap >= 5 min
+//     line < 25              9,713          18,355
+//     line 25-399            7,759          67,948    <- 8.8x
+//     line >= 400            9,951          82,264    <- 8.3x
+//
+// Marginal is ~8-10K/call at EVERY depth once the cache is warm. Depth only
+// correlated because a session's opening calls are the ones most likely to
+// follow a long human pause. A fine sweep of the gap axis puts the cliff
+// exactly at the documented TTL (avg marginal): 0-15s 7,670 | 240-270s 20,226
+// | 270-300s 22,651 | 300-330s 31,380 | 330-420s 63,636 | 600-1800s 89,030.
+// Gradual decay up to 300s, cliff after it.
+//
+// The case the depth rule got actively wrong: a RESUMED session keeps its high
+// line index, so it was labeled `steady` and declared comparable while paying
+// 96,680 marginal tokens/call (gap > 1h, n=67) — 8x a warm call.
+//
+// Composition is a symptom, not a classifier. Against ground truth (gap >= TTL
+// or first call), the best composition rule `read === 0` recalls only 51.8% of
+// cold calls at 86.0% precision; looser variants trade precision away without
+// reaching useful recall. So classify on the mechanism (elapsed time), which is
+// directly measurable, not on its effects.
+export const CACHE_TTL_MS = 300_000;
 
-export function classifySessionStart(invocationDepthLines) {
-  if (typeof invocationDepthLines !== 'number') return null;
-  if (invocationDepthLines < FRESH_SESSION_MAX_LINE) return 'fresh';
-  if (invocationDepthLines < STEADY_SESSION_MIN_LINE) return 'warming';
-  return 'steady';
+// `cold` when nothing usable was cached: either the TTL had expired or this is
+// the session's first call. `unknown` when the gap cannot be measured from this
+// window — reported honestly rather than guessed, because guessing `warm` is
+// what silently declares a resumed run comparable.
+export function classifyCacheState(idleMsBeforeInvocation, { sessionIsNew } = {}) {
+  if (idleMsBeforeInvocation === null || idleMsBeforeInvocation === undefined) {
+    return sessionIsNew ? 'cold' : 'unknown';
+  }
+  return idleMsBeforeInvocation >= CACHE_TTL_MS ? 'cold' : 'warm';
+}
+
+// Milliseconds between the last API call BEFORE the invocation and the
+// invoking call itself — the interval the cache had to survive.
+export function idleBeforeInvocation(usageEntries, invocationLine, previousCallAt) {
+  const stamped = (usageEntries ?? [])
+    .filter((e) => (e.source === undefined || e.source === 'session') && typeof e.line_index === 'number' && e.timestamp)
+    .map((e, i) => ({ line: e.line_index, ms: Date.parse(e.timestamp), key: dedupKeyOf(e, i) }))
+    .filter((e) => Number.isFinite(e.ms));
+  if (invocationLine === null || invocationLine === undefined) return null;
+  const at = stamped.filter((e) => e.line >= invocationLine).sort((a, b) => a.ms - b.ms)[0];
+  if (!at) return null;
+  // The invoking call STRADDLES the boundary: it is the call that emitted the
+  // Skill tool_use, and one message.id spans several transcript lines a few ms
+  // apart. On both real records the row immediately "before" the invocation was
+  // the invocation's own call — measuring against it gave a ~3ms gap and made
+  // cache_state report `warm` unconditionally. Exclude the invoking call's whole
+  // dedup group, exactly as partitionByInvocation does.
+  const before = stamped
+    .filter((e) => e.line < invocationLine && e.key !== at.key)
+    .sort((a, b) => b.ms - a.ms)[0];
+  // No in-window predecessor: fall back to the cursor-carried timestamp of the
+  // last call the PREVIOUS window saw, so a window opening at the invocation is
+  // still classifiable instead of permanently `unknown`.
+  const prevMs = before ? before.ms : (previousCallAt ? Date.parse(previousCallAt) : NaN);
+  if (!Number.isFinite(prevMs)) return null;
+  return at.ms - prevMs;
 }
 
 export function subagentIsAttributed(agent, toolCalls, invocationLine) {
@@ -372,6 +414,10 @@ export function buildRecord({
   subagentSpawns = {},
   interruption,
   window,
+  // Timestamp of the last API call the PREVIOUS window saw, carried across
+  // firings in hook state. Lets a window that opens on the invocation still
+  // measure its idle gap instead of reporting cache_state `unknown`.
+  previousCallAt = null,
   environment,
   now = new Date(),
   gapCapMs,
@@ -404,7 +450,10 @@ export function buildRecord({
   const unattributedSubagents = subagents.filter((a) => !subagentIsAttributed(a, toolCalls, invocationLine));
   const unattributedSubagentAgg = aggregate(unattributedSubagents.flatMap((a) => a.usage_entries), { gapCapMs });
   const invocationDepthLines = invocationLine === null ? null : invocationLine + (window?.line_from ?? 0);
-  const sessionStart = classifySessionStart(invocationDepthLines);
+  const idleMs = idleBeforeInvocation(usageEntries, invocationLine, previousCallAt);
+  const cacheState = invocationLine === null
+    ? null
+    : classifyCacheState(idleMs, { sessionIsNew: (window?.line_from ?? 0) === 0 });
 
   const toolCounts = {};
   for (const t of toolCalls) {
@@ -486,13 +535,16 @@ export function buildRecord({
         // session line 792 — classifying on invocation_line alone would call
         // every mid-session run "fresh".
         invocation_depth_lines: invocationDepthLines,
-        session_start: sessionStart,
-        // The same fact as session_start, as a boolean, for a dashboard badge.
-        fresh_session: sessionStart === null ? null : sessionStart === 'fresh',
+        // Idle interval the prompt cache had to survive before the invocation.
+        // This — not line depth — is what predicts a run's cost: marginal is
+        // ~8-10K tokens/call at every depth when warm and 68-82K when cold.
+        idle_ms_before_invocation: idleMs,
+        cache_state: cacheState,
         // Whether marginal_usd may be compared to other runs without a caveat.
-        // False only for `fresh`: there the cache-write spike moves marginal
-        // too, so BOTH cost figures are outliers, not just context carry.
-        marginal_comparable: sessionStart === null ? null : sessionStart !== 'fresh',
+        // Only a warm run may: a cold one pays 12.5x to write the cache a warm
+        // one merely reads, which moves marginal itself, not just carry.
+        // `unknown` is not a licence to compare.
+        marginal_comparable: cacheState === null ? null : cacheState === 'warm',
         attributed: { tokens: split.attributed.tokens, cost: split.attributed.cost, api_calls: split.attributed.api_calls },
         unattributed: { tokens: split.unattributed.tokens, cost: split.unattributed.cost, api_calls: split.unattributed.api_calls },
         subagents_attributed: attributedSubagents.length,

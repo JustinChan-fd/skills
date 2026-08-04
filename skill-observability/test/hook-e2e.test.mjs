@@ -153,3 +153,40 @@ test('e2e: malformed stdin and missing transcript never produce a non-zero exit'
   // both are best-effort: reaching here without throwing IS the assertion
   assert.ok(true);
 });
+
+test('the hook carries the last call timestamp forward, so cache_state survives a window boundary', () => {
+  // A window that opens ON the invocation has no in-window predecessor. Without
+  // a carried timestamp its cache_state is permanently `unknown` — and that is
+  // the common shape for a skill invoked as the first act of a turn.
+  const { sessionId, transcript, logDir } = setup();
+  const payload = { session_id: sessionId, transcript_path: transcript, cwd: '/home/user/x', hook_event_name: 'Stop', stop_hook_active: false };
+  const t0 = '2026-08-04T14:00:00.000Z';
+  const t1 = '2026-08-04T14:00:12.000Z';
+  const usage = { input_tokens: 100, output_tokens: 10, cache_read_input_tokens: 500, cache_creation_input_tokens: 0 };
+  const prev = JSON.stringify({
+    type: 'assistant', uuid: 'p1', sessionId, timestamp: t0, version: '1.0.0', gitBranch: 'main',
+    message: { role: 'assistant', id: 'm-prev', model: 'claude-opus-5', usage },
+  });
+  const skill = JSON.stringify({
+    type: 'assistant', uuid: 's1', sessionId, timestamp: t1, version: '1.0.0', gitBranch: 'main',
+    message: { role: 'assistant', id: 'm-skill', model: 'claude-opus-5', usage,
+      content: [{ type: 'tool_use', id: 'tu-1', name: 'Skill', input: { skill: 'research-this' } }] },
+  });
+
+  // Firing 1 consumes the plain turn (no skill => no record, but the cursor and
+  // the carried timestamp advance). Firing 2's window opens at the skill line.
+  writeFileSync(transcript, `${prev}\n`);
+  runHook(payload, logDir);
+  writeFileSync(transcript, `${prev}\n${skill}\n`);
+  runHook(payload, logDir);
+
+  const files = recordFiles(logDir);
+  assert.equal(files.length, 1, 'only the skill firing wrote a record');
+  const record = JSON.parse(readFileSync(files[0], 'utf8'));
+  assert.deepEqual(record.run.skills, ['research-this']);
+  const at = record.computed.attribution;
+  assert.equal(at.invocation_line, 0, 'the window opened on the invocation itself');
+  assert.equal(at.idle_ms_before_invocation, 12_000, 'measured against the carried timestamp');
+  assert.equal(at.cache_state, 'warm');
+  assert.equal(at.marginal_comparable, true);
+});

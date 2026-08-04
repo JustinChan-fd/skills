@@ -213,10 +213,18 @@ as the per-attempt source of truth) — never both, which would double-count.
 
 ## Understanding the numbers
 
+**Read `COST.md` first if the cost numbers don't make sense.** It derives the
+whole cost model from 36,794 measured API calls: the four token counters, the
+one fact that makes caching confusing (reading a cached token costs 1/12.5 of
+writing it), and why the same skill can cost 8× more purely because you paused
+for six minutes. It also answers "existing vs new vs resumed session" directly,
+and records a wrong conclusion it replaced.
+
 **Read `METRICS.md`** — a field-by-field glossary of every metric, the KPI
-recipes they support, and the honest limits (the two confounds: session depth
-and model pricing; the marginal-vs-carry cost split that controls for the
-first; the `models` field that controls for the second).
+recipes they support, and the honest limits (three confounds: prompt-cache
+state, session depth, and model pricing; the marginal-vs-carry split and
+`marginal_comparable` control for the first two, the `models` field for the
+third).
 
 **Read `KPIs.md`** — the analytics catalog for the future dashboard: the
 runs / records / subagent_runs data model with its join keys (`run_id`,

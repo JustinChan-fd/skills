@@ -714,32 +714,19 @@ test('a subagent spawned BEFORE the invocation is excluded from attributed spend
   assert.equal(at.attributed.tokens.totals.input, 10, 'the early agent is not the skill\'s cost');
 });
 
-// ---- Section 9: session-start classification ----
+// ---- Section 9: line depth is NOT the axis (retained as a disproof) ----
 //
-// Why a flag and not just marginal_usd: marginal is only depth-invariant from
-// about session line 25 onward. Finer buckets over 298 sessions (per
-// deduplicated call) show it SPIKING at session open, because a fresh session
-// writes the whole prompt cache from scratch:
-//
-//   depth   input  output  cache WRITE  marginal   cache READ
-//   5-9     7,053     782      37,783    45,619       20,908
-//   10-24   2,090     523      16,918    19,531       47,441
-//   25-49   2,417     540       3,801     6,757       67,378
-//   100-399 5,296     760       4,911    10,968      105,097
-//   400+    6,973     672       4,002    11,647      119,616
-//
-// So `fresh` marks a region where BOTH numbers differ, not just carry — it is
-// the human-readable reason a cost is an outlier, and it is not decoration:
-// of 494 real Skill/Workflow invocations on this disk, 22.1% land before line
-// 25 (median 126, p75 791).
-//
-// The boundary must be measured in ABSOLUTE session lines. invocations[]
-// line_index is WINDOW-relative (detectInvocations runs on the sliced window),
-// so a run invoked at window line 3 of a window opening at 789 is at session
-// line 792 and is emphatically not fresh.
+// This section originally classified runs `fresh`/`warming`/`steady` by session
+// line depth, on the strength of marginal tokens/call rising 24,178 (line < 25)
+// -> 9,938 (25-399) -> 11,646 (>= 400). Section 10 shows that was a proxy for
+// idle time and the rule is gone. What remains is the assertion that depth must
+// be computed ABSOLUTELY when it is reported at all, because it is still a
+// recorded field and the window-relative trap is still live:
+// invocations[].line_index counts lines in the SLICED window, so a run at
+// window line 3 of a window opening at 789 sits at session line 792.
 
-test('depth is absolute: a window-line-3 invocation at session line 789 is not fresh', () => {
-  const record = buildRecord({
+test('depth is absolute: a window-line-3 invocation at session line 789 is deep', () => {
+  const at = buildRecord({
     runId: 'r-mid',
     hookPayload: { session_id: 's', hook_event_name: 'Stop' },
     invocations: [{ kind: 'skill_tool', name: 'research-this', line_index: 3 }],
@@ -747,46 +734,32 @@ test('depth is absolute: a window-line-3 invocation at session line 789 is not f
     toolCalls: [], dispatchResults: [], subagents: [], interruption: false,
     window: { line_from: 789, line_to: 800, transcript_lines_total: 800 },
     environment: {},
-  });
-  const at = record.computed.attribution;
+  }).computed.attribution;
   assert.equal(at.invocation_depth_lines, 792, 'window offset + window-relative line');
-  assert.equal(at.session_start, 'steady');
-  assert.equal(at.fresh_session, false);
+  assert.equal(at.session_depth_lines, 789);
 });
 
-test('a genuinely fresh invocation is flagged fresh', () => {
-  const record = buildRecord({
-    runId: 'r-fresh',
+test('depth is recorded but never used to judge comparability', () => {
+  // Same 20-second gap at three depths: all warm, all comparable. This is the
+  // measurement that retired the depth tiers (7,759 marginal at line 25-399 vs
+  // 9,951 at >= 400 when warm — no meaningful difference).
+  const mk = (lineFrom) => buildRecord({
+    runId: `r-d${lineFrom}`,
     hookPayload: { session_id: 's', hook_event_name: 'Stop' },
-    invocations: [{ kind: 'slash_command', name: '/research-this', line_index: 8 }],
-    usageEntries: [uEntry(8, 'm-1', 100)],
+    invocations: [{ kind: 'skill_tool', name: 'x', line_index: 4 }],
+    usageEntries: [
+      uEntry(1, 'm-a', 100, { timestamp: '2026-08-04T14:00:00.000Z' }),
+      uEntry(4, 'm-b', 100, { timestamp: '2026-08-04T14:00:20.000Z' }),
+    ],
     toolCalls: [], dispatchResults: [], subagents: [], interruption: false,
-    window: { line_from: 0, line_to: 40, transcript_lines_total: 40 },
-    environment: {},
-  });
-  const at = record.computed.attribution;
-  assert.equal(at.invocation_depth_lines, 8);
-  assert.equal(at.session_start, 'fresh');
-  assert.equal(at.fresh_session, true, 'the human-readable "why is this one expensive"');
-});
-
-test('the fresh boundary is measured, not eyeballed: 24 is fresh, 25 is warming', () => {
-  const at = (depth) => buildRecord({
-    runId: `r-${depth}`,
-    hookPayload: { session_id: 's', hook_event_name: 'Stop' },
-    invocations: [{ kind: 'skill_tool', name: 'x', line_index: depth }],
-    usageEntries: [uEntry(depth, 'm-1', 10)],
-    toolCalls: [], dispatchResults: [], subagents: [], interruption: false,
-    window: { line_from: 0, line_to: depth + 5, transcript_lines_total: depth + 5 },
+    window: { line_from: lineFrom, line_to: lineFrom + 40, transcript_lines_total: lineFrom + 40 },
     environment: {},
   }).computed.attribution;
-  assert.equal(at(24).session_start, 'fresh', 'marginal is still ~19.5K/call here');
-  assert.equal(at(25).session_start, 'warming', 'marginal has dropped to ~6.8K/call');
-  assert.equal(at(399).session_start, 'warming', 'carry is still climbing');
-  assert.equal(at(400).session_start, 'steady', 'carry/call plateaus past ~400');
+  const verdicts = [0, 24, 25, 399, 400, 5000].map((d) => mk(d).marginal_comparable);
+  assert.deepEqual(verdicts, [true, true, true, true, true, true], 'no depth boundary survives');
 });
 
-test('with no invocation, session_start is null — never guessed as fresh', () => {
+test('with no invocation there is nothing to classify — never guessed', () => {
   const at = buildRecord({
     runId: 'r-none',
     hookPayload: { session_id: 's', hook_event_name: 'Stop' },
@@ -797,25 +770,221 @@ test('with no invocation, session_start is null — never guessed as fresh', () 
     environment: {},
   }).computed.attribution;
   assert.equal(at.invocation_depth_lines, null);
-  assert.equal(at.session_start, null);
-  assert.equal(at.fresh_session, null, 'a turn record with no skill has no start to classify');
+  assert.equal(at.cache_state, null);
+  assert.equal(at.marginal_comparable, null, 'a turn record with no skill has nothing to compare');
+});
+// ---- Section 10: cache state is about IDLE TIME, not line depth ----
+//
+// Section 9 classified by line depth. That was measuring a proxy. Crossing
+// depth against the gap since the previous API call (36,794 deduplicated calls,
+// 435 transcripts) shows depth carries almost no signal once gap is known:
+//
+//                    gap < 5 min    gap >= 5 min
+//   line < 25              9,713          18,355
+//   line 25-399            7,759          67,948   <-- 8.8x
+//   line >= 400            9,951          82,264   <-- 8.3x
+//
+// Marginal is ~8-10K/call at EVERY depth when the cache is warm. The cause is
+// the prompt cache's 5-minute TTL, and a fine sweep of the gap axis puts the
+// cliff exactly there: 300-330s marginal 31,380 -> 330-420s 63,636 (0-15s is
+// 7,670). Line depth only correlated because a session's first calls are the
+// ones most likely to follow a long human pause.
+//
+// This matters because a RESUMED session keeps its high line index. Under the
+// depth rule it was labeled `steady` and declared comparable while paying
+// 96,680 marginal/call — 8x a warm call. Composition (write vs read) is a
+// symptom, not a classifier: the best such rule, `read === 0`, recalls only
+// 51.8% of cold calls at 86.0% precision.
+
+test('a RESUMED session is cold even though its line index is deep', () => {
+  const at = buildRecord({
+    runId: 'r-resumed',
+    hookPayload: { session_id: 's', hook_event_name: 'Stop' },
+    invocations: [{ kind: 'skill_tool', name: 'research-this', line_index: 4 }],
+    usageEntries: [
+      uEntry(1, 'm-before', 100, { timestamp: '2026-08-04T09:00:00.000Z' }),
+      uEntry(4, 'm-skill', 100, { timestamp: '2026-08-04T14:00:00.000Z' }), // 5h later
+    ],
+    toolCalls: [], dispatchResults: [], subagents: [], interruption: false,
+    window: { line_from: 900, line_to: 950, transcript_lines_total: 950 },
+    environment: {},
+  }).computed.attribution;
+  assert.equal(at.invocation_depth_lines, 904, 'deep by line — the old rule said steady');
+  assert.equal(at.cache_state, 'cold', 'but the 5-min TTL expired hours ago');
+  assert.equal(at.idle_ms_before_invocation, 5 * 3600 * 1000);
+  assert.equal(at.marginal_comparable, false);
 });
 
-test('comparability advice travels WITH the flag, so a fresh run is not compared blind', () => {
-  const fresh = buildRecord({
-    runId: 'r-f', hookPayload: { session_id: 's', hook_event_name: 'Stop' },
-    invocations: [{ kind: 'skill_tool', name: 'x', line_index: 8 }],
-    usageEntries: [uEntry(8, 'm-1', 10)],
+test('a warm mid-session run is comparable, at any depth', () => {
+  const mk = (lineFrom) => buildRecord({
+    runId: `r-${lineFrom}`,
+    hookPayload: { session_id: 's', hook_event_name: 'Stop' },
+    invocations: [{ kind: 'skill_tool', name: 'x', line_index: 4 }],
+    usageEntries: [
+      uEntry(1, 'm-before', 100, { timestamp: '2026-08-04T14:00:00.000Z' }),
+      uEntry(4, 'm-skill', 100, { timestamp: '2026-08-04T14:00:20.000Z' }), // 20s
+    ],
     toolCalls: [], dispatchResults: [], subagents: [], interruption: false,
-    window: { line_from: 0, line_to: 20, transcript_lines_total: 20 }, environment: {},
+    window: { line_from: lineFrom, line_to: lineFrom + 50, transcript_lines_total: lineFrom + 50 },
+    environment: {},
   }).computed.attribution;
-  assert.equal(fresh.marginal_comparable, false, 'cache-write spike makes marginal an outlier too');
-  const steady = buildRecord({
-    runId: 'r-s', hookPayload: { session_id: 's', hook_event_name: 'Stop' },
-    invocations: [{ kind: 'skill_tool', name: 'x', line_index: 8 }],
-    usageEntries: [uEntry(8, 'm-1', 10)],
+  for (const depth of [0, 30, 900]) {
+    assert.equal(mk(depth).cache_state, 'warm', `depth ${depth} is irrelevant when the gap is 20s`);
+    assert.equal(mk(depth).marginal_comparable, true);
+  }
+});
+
+test('the TTL boundary is 5 minutes, measured: 299s warm, 301s cold', () => {
+  const at = (gapSec) => buildRecord({
+    runId: `r-${gapSec}`,
+    hookPayload: { session_id: 's', hook_event_name: 'Stop' },
+    invocations: [{ kind: 'skill_tool', name: 'x', line_index: 4 }],
+    usageEntries: [
+      uEntry(1, 'm-before', 100, { timestamp: '2026-08-04T14:00:00.000Z' }),
+      uEntry(4, 'm-skill', 100, { timestamp: new Date(Date.parse('2026-08-04T14:00:00.000Z') + gapSec * 1000).toISOString() }),
+    ],
     toolCalls: [], dispatchResults: [], subagents: [], interruption: false,
-    window: { line_from: 500, line_to: 520, transcript_lines_total: 520 }, environment: {},
+    window: { line_from: 500, line_to: 550, transcript_lines_total: 550 },
+    environment: {},
   }).computed.attribution;
-  assert.equal(steady.marginal_comparable, true);
+  assert.equal(at(299).cache_state, 'warm');
+  assert.equal(at(301).cache_state, 'cold');
+});
+
+test('a genuinely first-call-of-session run is cold, not unknown', () => {
+  const at = buildRecord({
+    runId: 'r-first',
+    hookPayload: { session_id: 's', hook_event_name: 'Stop' },
+    invocations: [{ kind: 'slash_command', name: '/research-this', line_index: 8 }],
+    usageEntries: [uEntry(11, 'm-skill', 100, { timestamp: '2026-08-04T14:00:00.000Z' })],
+    toolCalls: [], dispatchResults: [], subagents: [], interruption: false,
+    window: { line_from: 0, line_to: 40, transcript_lines_total: 40 },
+    environment: {},
+  }).computed.attribution;
+  assert.equal(at.idle_ms_before_invocation, null, 'no prior call to measure against');
+  assert.equal(at.cache_state, 'cold', 'nothing was cached yet — this run writes it');
+});
+
+test('a window opening AT the invocation says unknown, not a guessed warm', () => {
+  // The hook slices cursor->EOF. If the cursor lands on the invocation there is
+  // no in-window predecessor, and the session is NOT new (line_from > 0), so the
+  // gap is genuinely unmeasurable from this window. Guessing `warm` here would
+  // silently declare a resumed run comparable.
+  const at = buildRecord({
+    runId: 'r-edge',
+    hookPayload: { session_id: 's', hook_event_name: 'Stop' },
+    invocations: [{ kind: 'skill_tool', name: 'x', line_index: 0 }],
+    usageEntries: [uEntry(0, 'm-skill', 100, { timestamp: '2026-08-04T14:00:00.000Z' })],
+    toolCalls: [], dispatchResults: [], subagents: [], interruption: false,
+    window: { line_from: 600, line_to: 650, transcript_lines_total: 650 },
+    environment: {},
+  }).computed.attribution;
+  assert.equal(at.cache_state, 'unknown');
+  assert.equal(at.marginal_comparable, false, 'unknown is not a licence to compare');
+});
+
+test('previousCallAt closes the unknown gap when the hook supplies it', () => {
+  const at = buildRecord({
+    runId: 'r-edge2',
+    hookPayload: { session_id: 's', hook_event_name: 'Stop' },
+    invocations: [{ kind: 'skill_tool', name: 'x', line_index: 0 }],
+    usageEntries: [uEntry(0, 'm-skill', 100, { timestamp: '2026-08-04T14:00:10.000Z' })],
+    toolCalls: [], dispatchResults: [], subagents: [], interruption: false,
+    window: { line_from: 600, line_to: 650, transcript_lines_total: 650 },
+    previousCallAt: '2026-08-04T14:00:00.000Z',
+    environment: {},
+  }).computed.attribution;
+  assert.equal(at.idle_ms_before_invocation, 10_000);
+  assert.equal(at.cache_state, 'warm');
+});
+
+test('a gap of EXACTLY the TTL is cold — the cache is dead at 300s, not after it', () => {
+  // Surviving mutant: `>` instead of `>=`. One call in the corpus can sit on the
+  // boundary, and rounding it warm marks a cold run comparable.
+  const at = (gapMs) => buildRecord({
+    runId: `r-${gapMs}`,
+    hookPayload: { session_id: 's', hook_event_name: 'Stop' },
+    invocations: [{ kind: 'skill_tool', name: 'x', line_index: 4 }],
+    usageEntries: [
+      uEntry(1, 'm-a', 100, { timestamp: '2026-08-04T14:00:00.000Z' }),
+      uEntry(4, 'm-b', 100, { timestamp: new Date(Date.parse('2026-08-04T14:00:00.000Z') + gapMs).toISOString() }),
+    ],
+    toolCalls: [], dispatchResults: [], subagents: [], interruption: false,
+    window: { line_from: 500, line_to: 550, transcript_lines_total: 550 },
+    environment: {},
+  }).computed.attribution;
+  assert.equal(at(299_999).cache_state, 'warm');
+  assert.equal(at(300_000).cache_state, 'cold', 'exactly at the TTL the entry is gone');
+});
+
+test('the gap is measured from the LATEST prior call, not the first one in the window', () => {
+  // Surviving mutant: sorting the predecessors ascending. With only two calls the
+  // two orderings agree, so this needs three — a long-idle window whose most
+  // recent call is seconds before the invocation is WARM, and measuring from the
+  // window's opening call instead would call it cold.
+  const at = buildRecord({
+    runId: 'r-three',
+    hookPayload: { session_id: 's', hook_event_name: 'Stop' },
+    invocations: [{ kind: 'skill_tool', name: 'x', line_index: 9 }],
+    usageEntries: [
+      uEntry(1, 'm-old', 100, { timestamp: '2026-08-04T14:00:00.000Z' }), // 1h before
+      uEntry(5, 'm-recent', 100, { timestamp: '2026-08-04T15:00:00.000Z' }),
+      uEntry(9, 'm-skill', 100, { timestamp: '2026-08-04T15:00:08.000Z' }), // 8s after
+    ],
+    toolCalls: [], dispatchResults: [], subagents: [], interruption: false,
+    window: { line_from: 700, line_to: 750, transcript_lines_total: 750 },
+    environment: {},
+  }).computed.attribution;
+  assert.equal(at.idle_ms_before_invocation, 8_000, 'the cache only had to survive 8s');
+  assert.equal(at.cache_state, 'warm');
+});
+
+test('the invoking call is not its own predecessor — the straddler must not zero the gap', () => {
+  // FOUND BY REAL-DATA REPLAY, not by a test. On both real records the usage row
+  // immediately "before" the invocation shares the invocation's message_id: it is
+  // the same API call, the one that emitted the Skill tool_use, reported across
+  // several transcript lines (3ms apart). Measuring the idle gap against it yields
+  // ~0ms, so cache_state would report `warm` for every mid-session skill run and
+  // the field would carry no information at all.
+  //
+  // This is the same dedup-key-straddles-the-boundary trap as partitionByInvocation.
+  const at = buildRecord({
+    runId: 'r-straddle',
+    hookPayload: { session_id: 's', hook_event_name: 'Stop' },
+    invocations: [{ kind: 'skill_tool', name: 'x', line_index: 35 }],
+    usageEntries: [
+      uEntry(20, 'm-real-prev', 100, { timestamp: '2026-08-04T17:00:00.000Z' }),
+      // the invoking call, spanning the boundary under ONE message id
+      uEntry(33, 'm-invoke', 100, { timestamp: '2026-08-04T18:03:35.170Z' }),
+      uEntry(34, 'm-invoke', 100, { timestamp: '2026-08-04T18:03:35.173Z' }),
+      uEntry(35, 'm-invoke', 100, { timestamp: '2026-08-04T18:03:35.174Z' }),
+    ],
+    toolCalls: [], dispatchResults: [], subagents: [], interruption: false,
+    window: { line_from: 789, line_to: 931, transcript_lines_total: 931 },
+    environment: {},
+  }).computed.attribution;
+  // Measured to the invoking row at/after the boundary (line 35, ...174), so
+  // 17:00:00 -> 18:03:35.174 = 3,815,174 ms — NOT the 3ms back to line 33.
+  assert.equal(at.idle_ms_before_invocation, 3_815_174);
+  assert.equal(at.cache_state, 'cold', 'an hour of idle is cold however the lines fall');
+});
+
+test('a session-opening window whose only prior row is the straddler is cold', () => {
+  // Real record e4c76f92-0-540: one usage row before the invocation, sharing the
+  // invocation's id. After excluding it there is no predecessor at all, and
+  // line_from is 0, so the session is genuinely new — cold, not warm-by-accident.
+  const at = buildRecord({
+    runId: 'r-open',
+    hookPayload: { session_id: 's', hook_event_name: 'Stop' },
+    invocations: [{ kind: 'skill_tool', name: 'x', line_index: 11 }],
+    usageEntries: [
+      uEntry(10, 'm-invoke', 100, { timestamp: '2026-08-04T16:57:38.044Z' }),
+      uEntry(11, 'm-invoke', 100, { timestamp: '2026-08-04T16:57:38.047Z' }),
+    ],
+    toolCalls: [], dispatchResults: [], subagents: [], interruption: false,
+    window: { line_from: 0, line_to: 540, transcript_lines_total: 540 },
+    environment: {},
+  }).computed.attribution;
+  assert.equal(at.idle_ms_before_invocation, null, 'no real predecessor exists');
+  assert.equal(at.cache_state, 'cold', 'a session opening writes its cache');
 });

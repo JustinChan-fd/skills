@@ -51,7 +51,7 @@ run_total(run_id) =
 
 | KPI | Formula (grain) | Informs |
 | --- | --- | --- |
-| **Skill efficiency** | `median(cost_marginal_usd)` per `skills[0]` × model (run) | The headline per-skill number. Trend across skill edits; a drop at equal quality = the edit paid off. |
+| **Skill efficiency** | `median(cost_marginal_usd)` per `skills[0]` × model, **filtered to `attribution.marginal_comparable`** (run) | The headline per-skill number. Trend across skill edits; a drop at equal quality = the edit paid off. The filter is not optional: a cold-cache run puts a full context re-write inside marginal and measures ~8× a warm one, so unfiltered medians track cache luck (COST.md). |
 | **True spend** | `Σ cost_total_usd` per day / skill / model | The bill. Budget alerts hang off this. |
 | **Full run cost** | `run_total(run_id)` above (run) | What a skill *really* costs including late-arriving subagent spend — the honest version of true spend for delegating skills. |
 | **Carry share** | `cost_context_carry_usd / cost_total_usd` (run; aggregate = medians, not means) | >80% ⇒ cost is where-you-ran, not what-ran. High median per skill ⇒ that skill is habitually invoked deep in sessions — a usage-pattern insight, not a skill defect. |
@@ -95,8 +95,10 @@ run_total(run_id) =
 
 | KPI | Formula (grain) | Informs |
 | --- | --- | --- |
+| **Cold-cache rate** | `count(attribution.cache_state = 'cold') / count(*)` per skill (week) | How often a skill is invoked into a dead prompt cache — measured 3.7% of all calls, but skewed hard toward session-opening skills. This is the single largest driver of cost variance between two runs of the same skill. |
+| **Cold-cache premium** | `median(cost_marginal_usd) WHERE cold ÷ median WHERE warm`, per skill | The price of the pause. Measured ~8× on marginal tokens/call corpus-wide; per skill it tells you what a "come back after lunch" invocation actually costs. |
 | **Session depth at invocation** | `median(boundary_total)` per skill (run) | Where in sessions each skill gets used. Pairs with carry share. |
-| **Depth sensitivity** | regression/plot of `cost_marginal_usd` vs `boundary_total` per skill | THE deep-session question: flat line = skill is depth-immune (carry tax only); rising marginal = skill genuinely degrades in deep sessions — a real optimization target. |
+| **Depth sensitivity** | regression/plot of `cost_marginal_usd` vs `boundary_total` per skill, **warm runs only** | THE deep-session question: flat line = skill is depth-immune (carry tax only); rising marginal = skill genuinely degrades in deep sessions — a real optimization target. Mixing cold runs in manufactures a false depth effect, because cold runs cluster at session start: measured warm marginal is 9,713 / 7,759 / 9,951 tokens per call at depths <25 / 25–399 / ≥400, i.e. flat, while each row's cold column is ~8× its warm one (COST.md §4). |
 | **Cache hit ratio** | `cache_read / (input + cache_read)` (run, full records) | Should sit near 1.0 in ongoing sessions. A drop = a cache invalidator appeared (changed system prompt, tool set churn) — silently multiplies cost ~10× on the affected prefix. |
 | **Context growth per run** | `boundary_total − lag(boundary_total) OVER session` (session timeline) | Which skills bloat the session for everything that follows them — a cost externality no per-run number shows. |
 
@@ -125,12 +127,23 @@ run_total(run_id) =
 Load `index.jsonl` → one page, four tiles + two charts:
 
 1. **Spend this week** (`Σ cost_total_usd`) with per-skill breakdown
-2. **Top skill by median marginal cost** (efficiency leaderboard, per model)
+2. **Top skill by median marginal cost** (efficiency leaderboard, per model,
+   warm runs only — see below)
 3. **Failure + abandonment rate** per skill
 4. **Unattributed subagent spend** (data-quality tile)
 5. Chart: `cost_marginal_usd` vs `boundary_total` scatter, colored by skill
-   (depth sensitivity)
-6. Chart: per-skill median marginal cost over time (efficiency trend)
+   (depth sensitivity), warm runs only
+6. Chart: per-skill median marginal cost over time (efficiency trend), cold
+   points **skipped, not dropped** — they are real spend but not valid
+   datapoints for "is this skill getting cheaper?"
+
+Every marginal-cost tile needs `attribution.cache_state` and
+`attribution.marginal_comparable` on the index line, and a ❄ badge on cold rows
+reading *"cold cache — includes one-time context setup."* The badge does more
+work than the metric: nobody needs to learn what marginal means, they need to
+know why one row costs 8× another. Do **not** put `cost_context_carry_usd` on
+the page as a third column — it invites "which is the real number?"; keep it in
+row detail.
 
 Everything above needs only `index.jsonl` except the depth scatter's marginal
 detail, cache hit ratio, TTL mix, and the subagent rollups — those read the

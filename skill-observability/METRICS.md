@@ -5,8 +5,16 @@ surprises you, or before building a KPI on one. Written plain: each metric
 says what it is, where it comes from, and what decision it supports.
 
 The one mental model to keep: **a record measures a *run in a session*, not a
-skill in isolation.** Two confounds follow from that — session depth and
-model — and most of the derived metrics below exist to control for them.
+skill in isolation.** Three confounds follow from that — prompt-cache state,
+session depth, and model — and most of the derived metrics below exist to
+control for them.
+
+Cache state is the big one and the least obvious: reading a cached token costs
+1/12.5 of writing it, so the same skill costs ~8x more when the 5-minute cache
+TTL has expired. **COST.md** derives this from 36,794 measured calls and is the
+place to start if the marginal/carry split doesn't yet make sense. Session depth
+turned out to be a *proxy* for cache state, not an independent confound — see
+COST.md §4 for the measurement that retired it.
 
 ---
 
@@ -20,7 +28,7 @@ model — and most of the derived metrics below exist to control for them.
 | `tokens_grand_total` | Sum of all four directions (input + output + cache reads + cache writes), session + subagents | Volume of API traffic. NOT "what the run consumed of the context window" — see `boundary_total`. |
 | `boundary_total` | Four-way sum of the **last** API call only | The context footprint at run end (~"how deep in the session was this?"). **Confound #1's measuring stick.** Also the number that reconciles with an external dispatcher's observation (alfred's `tokens_observed`). |
 | `cost_total_usd` | `cost_marginal_usd + cost_context_carry_usd` | What you actually paid for this run. The budgeting number. |
-| `cost_marginal_usd` | Cost of input + output + cache **writes** — spend the run itself caused | **The skill-efficiency number.** Comparable across runs of the same skill on the same model regardless of session depth. Watch this per skill over time. |
+| `cost_marginal_usd` | Cost of input + output + cache **writes** — spend the run itself caused | **The skill-efficiency number.** Comparable across runs of the same skill on the same model **when `attribution.cache_state` is `warm`** — a cold cache puts a full context re-write inside marginal, measured 8x. Filter on `attribution.marginal_comparable`. See COST.md. |
 | `cost_context_carry_usd` | Cost of cache **reads** — re-reading context that mostly existed before the run | The session-depth tax. High carry is a property of *where* you ran the skill, not of the skill. |
 | `cost_complete` | `false` if any model had no pricing entry | When false, `cost_total_usd` is null and `cost_known_models_usd` holds the partial sum. Filter these out of cost KPIs. |
 | `wall_ms` | Last timestamp − first timestamp in the window | Latency as you experienced it. |
@@ -80,6 +88,12 @@ Plot `cost_context_carry_usd` (or carry share, `carry / total`) against
 `boundary_total` is genuinely degrading in deep sessions (e.g. re-reading
 ever-more context into its own work) — that's a real optimization target, and
 this plot is how you distinguish it from the ordinary carry tax.
+
+**Filter to `marginal_comparable` first.** Mixing cold runs into this plot
+manufactures a depth effect that isn't there: cold runs skew toward session
+start, so their one-time cache-write cost reads as "marginal climbs at low
+depth." That is exactly the artifact that produced an earlier wrong conclusion
+here (COST.md §4).
 
 **Latency.**
 `median(active_ms)` per skill; `wall_ms − active_ms` for human-wait time.

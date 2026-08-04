@@ -137,6 +137,12 @@ function main() {
       subagentSpawns: spawns,
       interruption: detectInterruption(windowLines),
       window: { line_from: from, line_to: lines.length, transcript_lines_total: lines.length },
+      // Timestamp of the last API call the PREVIOUS window saw. A window that
+      // opens ON the invocation has no in-window predecessor to measure the
+      // cache-TTL gap against, and that is the common shape for a skill invoked
+      // as the first act of a turn — without this it reports cache_state
+      // `unknown` and its cost is never comparable.
+      previousCallAt: state.last_call_at ?? null,
       // Scanned over the whole window, not read off line 0 — see
       // environmentFromLines: line 0 carried none of these in 434/434 sessions.
       environment: environmentFromLines(windowLines),
@@ -182,11 +188,22 @@ function main() {
     }
   }
 
+  // Advanced on EVERY firing, logged or not: an unlogged turn still consumed
+  // wall-clock time the prompt cache had to survive, so skipping it here would
+  // overstate the next run's idle gap and call a warm run cold.
+  const windowCallStamps = extractUsageEntries(windowLines, { source: 'session' })
+    .map((e) => (e.timestamp ? Date.parse(e.timestamp) : NaN))
+    .filter(Number.isFinite);
+  const lastCallAt = windowCallStamps.length
+    ? new Date(Math.max(...windowCallStamps)).toISOString()
+    : (state.last_call_at ?? null);
+
   try {
     writeState(sessionId, {
       session_cursor: lines.length,
       subagent_cursors: nextCursors,
       agent_spawns: spawns,
+      last_call_at: lastCallAt,
       updated_at: new Date().toISOString(),
     });
   } catch (err) {
