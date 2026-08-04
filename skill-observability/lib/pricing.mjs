@@ -5,61 +5,113 @@
 // can be re-priced when rates change. Unknown models produce cost `null` with
 // a structured note — never a guessed number.
 //
-// Rates are USD per million tokens. Cache multipliers (vs base input rate):
-// 5-minute cache write 1.25x, 1-hour cache write 2x, cache read 0.1x.
-// Source: Anthropic pricing docs (platform.claude.com/docs/en/pricing),
-// captured 2026-08-04.
+// Rates are USD per million tokens and live in config/model-rates.json —
+// transcribed verbatim from the vendor table so that a price change is a data
+// edit, not a code edit. This module is arithmetic over that file and holds no
+// numbers of its own. Source and fetch date are recorded in the config.
+//
+// The config stores all four columns per model EXPLICITLY (input, output, and
+// the three cache columns) rather than deriving cache prices from
+// input x multiplier. Today every vendor row satisfies 1.25x / 2x / 0.1x
+// exactly, and a test asserts that so a transcription typo fails loudly — but
+// storing the vendor's own numbers means a future change that breaks the
+// relationship prices correctly instead of silently wrong.
 
-export const PRICING_VERSION = '2026-08-04.1';
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+import { dirname, join } from 'node:path';
 
-const CACHE_WRITE_5M_MULT = 1.25;
-const CACHE_WRITE_1H_MULT = 2.0;
-const CACHE_READ_MULT = 0.1;
+const CONFIG_PATH = join(dirname(fileURLToPath(import.meta.url)), '..', 'config', 'model-rates.json');
+export const RATE_CONFIG = JSON.parse(readFileSync(CONFIG_PATH, 'utf8'));
 
-// Longest-prefix match against the transcript's model id (which may carry a
-// date suffix, e.g. claude-opus-4-5-20251101). `fast` overrides apply when
-// usage.speed === "fast".
-const MODELS = [
-  { prefix: 'claude-fable-5', input: 10, output: 50 },
-  { prefix: 'claude-mythos-5', input: 10, output: 50 },
-  { prefix: 'claude-opus-5', input: 5, output: 25, fast: { input: 10, output: 50 } },
-  { prefix: 'claude-opus-4-8', input: 5, output: 25 },
-  { prefix: 'claude-opus-4-7', input: 5, output: 25 },
-  { prefix: 'claude-opus-4-6', input: 5, output: 25 },
-  { prefix: 'claude-opus-4-5', input: 5, output: 25 },
-  { prefix: 'claude-opus-4-1', input: 15, output: 75 },
-  // Sonnet 5 sticker is $3/$15 with introductory $2/$10 through 2026-08-31.
-  { prefix: 'claude-sonnet-5', input: 3, output: 15, intro: { input: 2, output: 10, through: '2026-08-31T23:59:59Z' } },
-  { prefix: 'claude-sonnet-4-6', input: 3, output: 15 },
-  { prefix: 'claude-sonnet-4-5', input: 3, output: 15 },
-  { prefix: 'claude-haiku-4-5', input: 1, output: 5 },
-];
+// Version stamped onto every record so a historical log can be re-priced. It
+// tracks the CONFIG's version: bump rates_version there when rates change and
+// old records remain re-priceable from their raw token counts.
+export const PRICING_VERSION = RATE_CONFIG.rates_version;
 
+export const CACHE_WRITE_5M_MULT = RATE_CONFIG.cache_multipliers.cache_write_5m;
+export const CACHE_WRITE_1H_MULT = RATE_CONFIG.cache_multipliers.cache_write_1h;
+export const CACHE_READ_MULT = RATE_CONFIG.cache_multipliers.cache_read;
+
+const MODELS = RATE_CONFIG.models;
+
+// Pull the five token prices off a model entry, or off its fast/intro override
+// when one applies, falling back to input x multiplier for any cache column the
+// vendor table didn't state explicitly.
+//
+// The override is read INSTEAD of the base, never merged over it. Merging is the
+// trap: a fast-mode entry states only input/output, so `{...base, ...fast}`
+// would inherit the base's cache columns and bill cache at the standard rate
+// while billing input at the fast rate — $6.25 where the vendor charges $12.50.
+// An unstated cache column has to be re-derived from the OVERRIDE's input,
+// because the vendor stacks caching multipliers on top of fast pricing.
+function columnsOf(base, override) {
+  const src = override ?? base;
+  const input = src.input ?? base.input;
+  const pick = (key, mult) => (typeof src[key] === 'number' ? src[key] : input * mult);
+  return {
+    input_per_mtok: input,
+    output_per_mtok: src.output ?? base.output,
+    cache_write_5m_per_mtok: pick('cache_write_5m', CACHE_WRITE_5M_MULT),
+    cache_write_1h_per_mtok: pick('cache_write_1h', CACHE_WRITE_1H_MULT),
+    cache_read_per_mtok: pick('cache_read', CACHE_READ_MULT),
+  };
+}
+
+/**
+ * Strip the platform decorations Bedrock and Vertex put around an id so the
+ * same model prices identically wherever it was served:
+ *
+ *   anthropic.claude-opus-4-6-v1        -> claude-opus-4-6
+ *   anthropic.claude-haiku-4-5-...-v1:0 -> claude-haiku-4-5-...
+ *   claude-opus-4-8[1m]                 -> claude-opus-4-8
+ *
+ * The `[1m]` suffix marks the 1M-context variant, which the vendor prices at
+ * standard rates ("a 900k request is billed at the same per-token rate as a 9k
+ * request"), so it is decoration for pricing purposes — but it would otherwise
+ * still prefix-match, whereas the `anthropic.` prefix would NOT and would
+ * silently produce cost null.
+ *
+ * Scope, honestly: on this machine `anthropic.*` ids appear only in workflow
+ * metadata and toolUseResult payloads (145 + 59 occurrences) and NEVER as
+ * message.model on a usage-carrying line, so no record was mispriced. This
+ * guards a shape we are one gateway config change away from, not a live bug.
+ */
+export function normalizeModelId(modelId) {
+  return String(modelId)
+    .replace(/^(anthropic|us|eu|apac|global)\./, '')
+    .replace(/\[1m\]$/, '')
+    .replace(/-v\d+(:\d+)?$/, '');
+}
+
+/**
+ * Longest-prefix match against the transcript's model id, which may carry a
+ * date suffix (claude-opus-4-5-20251101) — and note that the config carries
+ * both `claude-opus-4` and `claude-opus-4-5`, so longest-prefix is what keeps
+ * the pointed entry winning over the retired generic one.
+ *
+ * `fast` overrides apply when usage.speed === "fast"; `intro` applies when the
+ * call's timestamp falls on or before the introductory window's end. Fast wins
+ * over intro because no current model carries both.
+ */
 export function ratesFor(modelId, { speed = null, at = null } = {}) {
   if (typeof modelId !== 'string') return null;
+  const id = normalizeModelId(modelId);
   let best = null;
   for (const m of MODELS) {
-    if (modelId.startsWith(m.prefix) && (!best || m.prefix.length > best.prefix.length)) best = m;
+    if (id.startsWith(m.prefix) && (!best || m.prefix.length > best.prefix.length)) best = m;
   }
   if (!best) return null;
-  let { input, output } = best;
+  let override = null;
   let variant = 'standard';
   if (speed === 'fast' && best.fast) {
-    ({ input, output } = best.fast);
+    override = best.fast;
     variant = 'fast';
   } else if (best.intro && at && Date.parse(at) <= Date.parse(best.intro.through)) {
-    ({ input, output } = best.intro);
+    override = best.intro;
     variant = 'introductory';
   }
-  return {
-    model_prefix: best.prefix,
-    variant,
-    input_per_mtok: input,
-    output_per_mtok: output,
-    cache_write_5m_per_mtok: input * CACHE_WRITE_5M_MULT,
-    cache_write_1h_per_mtok: input * CACHE_WRITE_1H_MULT,
-    cache_read_per_mtok: input * CACHE_READ_MULT,
-  };
+  return { model_prefix: best.prefix, variant, ...columnsOf(best, override) };
 }
 
 const n = (v) => (typeof v === 'number' && Number.isFinite(v) ? v : 0);

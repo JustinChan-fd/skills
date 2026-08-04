@@ -1,0 +1,159 @@
+{
+  "_comment": [
+    "VENDOR PRICING TABLE, TRANSCRIBED VERBATIM. This file is data, not logic —",
+    "when rates change, edit the numbers here and bump rates_version. Nothing",
+    "else needs to change. lib/pricing.mjs reads this and does arithmetic only.",
+    "",
+    "Source: https://platform.claude.com/docs/en/about-claude/pricing",
+    "Fetched: 2026-08-04. All figures USD per million tokens (MTok).",
+    "",
+    "The four cache columns are stored EXPLICITLY rather than derived from",
+    "input x multiplier, even though today every row satisfies 1.25x / 2x / 0.1x",
+    "exactly. Storing them verbatim means a future vendor change that breaks that",
+    "relationship gets priced correctly instead of silently wrong. A test asserts",
+    "the invariant still holds, so a transcription typo fails loudly (see",
+    "test/pricing-config.test.mjs)."
+  ],
+
+  "rates_version": "2026-08-04.1",
+  "source_url": "https://platform.claude.com/docs/en/about-claude/pricing",
+  "fetched_at": "2026-08-04",
+  "currency": "USD",
+  "unit": "per_million_tokens",
+
+  "cache_multipliers": {
+    "_comment": "Vendor-stated multipliers vs base input price. Retained for the invariant check and for pricing a model whose explicit cache columns are absent.",
+    "cache_write_5m": 1.25,
+    "cache_write_1h": 2.0,
+    "cache_read": 0.1
+  },
+
+  "models": [
+    {
+      "prefix": "claude-fable-5",
+      "label": "Claude Fable 5",
+      "input": 10, "output": 50,
+      "cache_write_5m": 12.50, "cache_write_1h": 20, "cache_read": 1
+    },
+    {
+      "prefix": "claude-mythos-5",
+      "label": "Claude Mythos 5",
+      "note": "limited availability",
+      "input": 10, "output": 50,
+      "cache_write_5m": 12.50, "cache_write_1h": 20, "cache_read": 1
+    },
+    {
+      "prefix": "claude-opus-5",
+      "label": "Claude Opus 5",
+      "input": 5, "output": 25,
+      "cache_write_5m": 6.25, "cache_write_1h": 10, "cache_read": 0.50,
+      "fast": { "input": 10, "output": 50 }
+    },
+    {
+      "prefix": "claude-opus-4-8",
+      "label": "Claude Opus 4.8",
+      "input": 5, "output": 25,
+      "cache_write_5m": 6.25, "cache_write_1h": 10, "cache_read": 0.50,
+      "fast": { "input": 10, "output": 50 }
+    },
+    {
+      "prefix": "claude-opus-4-7",
+      "label": "Claude Opus 4.7",
+      "note": "fast mode NOT available — speed:'fast' returns an error",
+      "input": 5, "output": 25,
+      "cache_write_5m": 6.25, "cache_write_1h": 10, "cache_read": 0.50
+    },
+    {
+      "prefix": "claude-opus-4-6",
+      "label": "Claude Opus 4.6",
+      "note": "speed:'fast' runs at standard speed and bills at standard rates",
+      "input": 5, "output": 25,
+      "cache_write_5m": 6.25, "cache_write_1h": 10, "cache_read": 0.50
+    },
+    {
+      "prefix": "claude-opus-4-5",
+      "label": "Claude Opus 4.5",
+      "input": 5, "output": 25,
+      "cache_write_5m": 6.25, "cache_write_1h": 10, "cache_read": 0.50
+    },
+    {
+      "prefix": "claude-opus-4-1",
+      "label": "Claude Opus 4.1",
+      "note": "deprecated",
+      "input": 15, "output": 75,
+      "cache_write_5m": 18.75, "cache_write_1h": 30, "cache_read": 1.50
+    },
+    {
+      "prefix": "claude-opus-4",
+      "label": "Claude Opus 4",
+      "note": "retired except on Google Cloud. Prefix is shorter than claude-opus-4-N, so longest-prefix match keeps the pointed entries winning.",
+      "input": 15, "output": 75,
+      "cache_write_5m": 18.75, "cache_write_1h": 30, "cache_read": 1.50
+    },
+    {
+      "prefix": "claude-sonnet-5",
+      "label": "Claude Sonnet 5",
+      "note": "Sticker is $3/$15; introductory $2/$10 through 2026-08-31. The intro block is the ACTIVE price until then, so a run today prices at $2/$10.",
+      "input": 3, "output": 15,
+      "cache_write_5m": 3.75, "cache_write_1h": 6, "cache_read": 0.30,
+      "intro": {
+        "input": 2, "output": 10,
+        "cache_write_5m": 2.50, "cache_write_1h": 4, "cache_read": 0.20,
+        "through": "2026-08-31T23:59:59Z"
+      }
+    },
+    {
+      "prefix": "claude-sonnet-4-6",
+      "label": "Claude Sonnet 4.6",
+      "input": 3, "output": 15,
+      "cache_write_5m": 3.75, "cache_write_1h": 6, "cache_read": 0.30
+    },
+    {
+      "prefix": "claude-sonnet-4-5",
+      "label": "Claude Sonnet 4.5",
+      "input": 3, "output": 15,
+      "cache_write_5m": 3.75, "cache_write_1h": 6, "cache_read": 0.30
+    },
+    {
+      "prefix": "claude-sonnet-4",
+      "label": "Claude Sonnet 4",
+      "note": "retired except on Bedrock and Google Cloud — REACHABLE for us (Keystone Bedrock gateway)",
+      "input": 3, "output": 15,
+      "cache_write_5m": 3.75, "cache_write_1h": 6, "cache_read": 0.30
+    },
+    {
+      "prefix": "claude-haiku-4-5",
+      "label": "Claude Haiku 4.5",
+      "input": 1, "output": 5,
+      "cache_write_5m": 1.25, "cache_write_1h": 2, "cache_read": 0.10
+    },
+    {
+      "prefix": "claude-haiku-3-5",
+      "label": "Claude Haiku 3.5",
+      "note": "retired except on Bedrock and Google Cloud — REACHABLE for us (Keystone Bedrock gateway)",
+      "input": 0.80, "output": 4,
+      "cache_write_5m": 1, "cache_write_1h": 1.60, "cache_read": 0.08
+    }
+  ],
+
+  "not_implemented": {
+    "_comment": "Vendor pricing modifiers this instrument does NOT apply, each with why. Recorded so a future reader knows they were considered rather than missed.",
+
+    "batch_api_50pct_discount": "Batch halves input and output. Claude Code makes interactive Messages API calls, never batch, so the discount can never apply here.",
+
+    "data_residency_1_1x": "Claude 4.6+ with inference_geo:'us' bills 1.1x on ALL token categories. Bedrock regional (vs global) endpoints carry a similar 10% premium. NOT DETECTABLE: inference_geo is a request field and does not appear in the transcript usage object, so we cannot tell which endpoint served a call. If our Keystone Bedrock gateway pins a region, EVERY figure this instrument produces is 10% low — uniformly, so comparisons between runs stay valid while absolute dollars do not. Unresolved; see COST.md.",
+
+    "web_search_10_per_1000": "Server-side web search bills $10/1,000 searches on top of tokens. Measured: server_tool_use is {web_search_requests:0, web_fetch_requests:0} on all 162,839 occurrences across every transcript on this machine, so the term is exactly zero here. Web fetch is free by vendor terms regardless. If a future skill enables server-side search, this becomes real and the raw usage object already carries the counter needed to price it.",
+
+    "code_execution_0_05_per_hour": "$0.05/container-hour past 1,550 free hours/month, and free when used alongside web search or fetch. Billed on wall-clock, not tokens, and not reported per call in the transcript. Out of scope for a token instrument.",
+
+    "managed_agents_session_runtime": "$0.08 per session-hour for Claude Managed Agents. Claude Code is not Managed Agents.",
+
+    "long_context_premium": "None to implement — vendor states Claude 4.6+ include the full 1M context at standard rates, so there is no >200K tier to model."
+  },
+
+  "cross_model_caveat": {
+    "_comment": "Not a price, but it distorts any comparison made in TOKENS instead of dollars.",
+    "tokenizer_change": "Claude 4.7+ and Mythos Preview use a newer tokenizer producing approximately 30% MORE tokens for the same text (exact figure varies by content). Sonnet 4.6 and earlier use the previous one. So a token-volume comparison across that boundary is inflated ~30% for the newer model even at identical work, and 'cheaper in tokens' can mean 'more expensive in dollars'. Compare dollars across that line, or tokens only within one tokenizer generation."
+  }
+}

@@ -26,6 +26,31 @@ cost = input×R_in + output×R_out + cache_write×(R_in×1.25) + cache_read×(R_
 
 That's the whole model. No hidden terms. `lib/pricing.mjs` is those four lines.
 
+**The rates themselves live in `config/model-rates.json`**, transcribed verbatim
+from the vendor table. When prices change, edit that file and bump
+`rates_version` — no code changes. It stores all five prices per model
+explicitly (input, output, and the three cache columns) rather than deriving
+cache prices from `input × multiplier`; today every vendor row satisfies
+1.25x / 2x / 0.1x exactly and a test asserts that, so a transcription typo fails
+loudly, but keeping the vendor's own numbers means a future change that breaks
+the relationship prices correctly instead of silently wrong.
+
+Verified against the published table on 2026-08-04: every model we carry matches
+on all five columns. Four vendor modifiers are deliberately **not** implemented,
+each with its reason recorded in the config's `not_implemented` block. The one
+that could actually bite: **data residency.** Claude 4.6+ with `inference_geo:
+"us"` bills 1.1x on every category, and Bedrock regional endpoints carry a
+similar 10% premium — but `inference_geo` is a request field and never appears in
+the transcript, so we cannot tell which endpoint served a call. If our gateway
+pins a region, every dollar figure here is 10% low. Uniformly low, so run-to-run
+comparisons stay valid; absolute dollars do not. Unresolved.
+
+One non-price caveat that distorts token comparisons: **Claude 4.7+ use a newer
+tokenizer producing ~30% more tokens for the same text.** Sonnet 4.6 and earlier
+use the previous one. So "cheaper in tokens" can mean "more expensive in
+dollars" across that line. Compare dollars across it, tokens only within one
+tokenizer generation.
+
 **The one fact that makes cache confusing, stated plainly: reading a cached token
 costs 1/12.5 of writing it.** 0.1x vs 1.25x. So the same conversation content can
 bill at wildly different prices depending on whether the cache was alive when the

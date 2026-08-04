@@ -145,8 +145,18 @@ judge — but now the cost side is a number instead of a feeling.
    500K-token context read 7 times contributes 3.5M. For "how big was the
    context", read `boundary_total`.
 8. **Pricing is a snapshot.** Every record carries `pricing_version`; when
-   rates change, update `lib/pricing.mjs`, bump the version, and old records
-   remain re-priceable from their `raw` token counts.
+   rates change, edit `config/model-rates.json` (vendor table, transcribed
+   verbatim), bump its `rates_version`, and old records remain re-priceable from
+   their `raw` token counts. `lib/pricing.mjs` holds no numbers.
+11. **Absolute dollars may be ~10% low, uniformly.** Data-residency /
+    regional-endpoint pricing carries a 1.1x multiplier that is not detectable
+    from the transcript (`inference_geo` is a request field). If the gateway pins
+    a region, every figure here understates by 10% — but uniformly, so
+    comparisons hold and only absolute spend is affected. See COST.md §1.
+12. **Token counts are not comparable across the 4.7 tokenizer boundary.**
+    Claude 4.7+ produce ~30% more tokens for the same text than Sonnet 4.6 and
+    earlier. Compare dollars across that line, tokens only within one
+    generation.
 9. **Costs for unknown models are null, never guessed.** `cost_complete:
    false` marks them; the token counts are still exact.
 10. **Clock caveat.** Timestamps come from the transcript (harness clock).
