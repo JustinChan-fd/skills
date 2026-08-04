@@ -1,0 +1,206 @@
+#!/usr/bin/env node
+// Skill-run observability hook — the deterministic entry point.
+//
+// Wire this ONE script to Stop, StopFailure, and SessionEnd (see install.mjs /
+// README). On every firing it:
+//   1. reads the hook payload from stdin (session_id, transcript_path, cwd, …)
+//   2. slices the session transcript from this session's cursor to EOF
+//   3. detects skill runs in that window (Skill tool_use blocks and
+//      <command-name> slash-command tags)
+//   4. if any: snapshots raw usage (session + subagent deltas) and writes one
+//      JSON record with `raw` and `computed` strictly separated
+//   5. advances the cursor either way, so nothing is ever double-counted
+//
+// Contract with the session that invokes it: NEVER block, NEVER throw, always
+// exit 0. A hook that exits 2 would inject its stderr back into the model's
+// turn; an observability tap must be invisible. Failures are appended to
+// <log-dir>/.state/errors.log instead.
+//
+// Environment:
+//   SKILL_OBS_DIR      log folder (default ~/.claude/skill-runs)
+//   SKILL_OBS_LOG_ALL  "1" => snapshot every turn, not only skill turns
+import { mkdirSync, readFileSync, writeFileSync, renameSync, appendFileSync, existsSync } from 'node:fs';
+import { join } from 'node:path';
+import { homedir } from 'node:os';
+import {
+  readTranscriptLines,
+  detectInvocations,
+  extractUsageEntries,
+  extractToolCalls,
+  extractDispatchResults,
+  detectInterruption,
+  readSubagentDelta,
+  sessionDirForTranscript,
+} from '../lib/transcript.mjs';
+import { buildRecord } from '../lib/record.mjs';
+
+const LOG_DIR = process.env.SKILL_OBS_DIR || join(homedir(), '.claude', 'skill-runs');
+const STATE_DIR = join(LOG_DIR, '.state');
+
+function atomicWriteJson(path, value) {
+  const tmp = `${path}.tmp`;
+  writeFileSync(tmp, JSON.stringify(value, null, 2) + '\n');
+  renameSync(tmp, path);
+}
+
+function logError(detail) {
+  try {
+    mkdirSync(STATE_DIR, { recursive: true });
+    appendFileSync(join(STATE_DIR, 'errors.log'), `${new Date().toISOString()} ${detail}\n`);
+  } catch {
+    /* even error logging is best-effort */
+  }
+}
+
+function readState(sessionId) {
+  try {
+    return JSON.parse(readFileSync(join(STATE_DIR, `${sessionId}.json`), 'utf8'));
+  } catch {
+    return { session_cursor: 0, subagent_cursors: {} };
+  }
+}
+
+function writeState(sessionId, state) {
+  mkdirSync(STATE_DIR, { recursive: true });
+  atomicWriteJson(join(STATE_DIR, `${sessionId}.json`), state);
+}
+
+function safeName(s) {
+  return String(s).replace(/[^a-zA-Z0-9._-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 60) || 'unnamed';
+}
+
+function main() {
+  let payload = {};
+  try {
+    const raw = readFileSync(0, 'utf8');
+    payload = raw.trim() ? JSON.parse(raw) : {};
+  } catch (err) {
+    logError(`stdin parse failed: ${err.message}`);
+    return;
+  }
+
+  const sessionId = payload.session_id;
+  const transcriptPath = payload.transcript_path;
+  if (!sessionId || !transcriptPath || !existsSync(transcriptPath)) {
+    logError(`missing session_id/transcript_path (event=${payload.hook_event_name ?? 'unknown'})`);
+    return;
+  }
+
+  const state = readState(sessionId);
+  const { ok, lines, error } = readTranscriptLines(transcriptPath);
+  if (!ok) {
+    logError(`transcript read failed: ${error.detail}`);
+    return;
+  }
+
+  const from = Number.isInteger(state.session_cursor) ? Math.min(state.session_cursor, lines.length) : 0;
+  const windowLines = lines.slice(from);
+  const invocations = detectInvocations(windowLines);
+
+  // Subagent deltas are read (and their cursors advanced) on EVERY firing, so
+  // tokens spent in non-skill turns never leak into a later skill record.
+  const sessionDir = sessionDirForTranscript(transcriptPath);
+  const { agents, nextCursors } = sessionDir
+    ? readSubagentDelta(sessionDir, state.subagent_cursors ?? {})
+    : { agents: [], nextCursors: state.subagent_cursors ?? {} };
+
+  const shouldLog = invocations.length > 0 || process.env.SKILL_OBS_LOG_ALL === '1';
+
+  // Deterministic run id: session prefix + the window it covers. Unique per
+  // record (cursors guarantee a window is processed once) and reconstructable
+  // from run.window if a record's id is ever in doubt.
+  const runId = `${String(sessionId).slice(0, 8)}-${from}-${lines.length}`;
+
+  // Persistent spawn map: the first firing that SEES a subagent file owns it.
+  // If that firing writes a record, the agent is attributed to its run_id
+  // forever — later firings that pick up more of the agent's spend join back
+  // to the spawning run. First seen during an unlogged firing => null
+  // (spawned outside any logged run; still tracked so it never mis-joins).
+  const spawns = { ...(state.agent_spawns ?? {}) };
+  for (const a of agents) {
+    if (!(a.file in spawns)) {
+      spawns[a.file] = shouldLog && windowLines.length > 0 ? runId : null;
+    }
+  }
+
+  if (shouldLog && windowLines.length > 0) {
+    const usageEntries = extractUsageEntries(windowLines, { source: 'session' });
+    const first = windowLines.find((l) => l && !l.__unparseable) ?? {};
+    const record = buildRecord({
+      runId,
+      hookPayload: payload,
+      invocations,
+      usageEntries,
+      toolCalls: extractToolCalls(windowLines),
+      dispatchResults: extractDispatchResults(windowLines),
+      subagents: agents,
+      subagentSpawns: spawns,
+      interruption: detectInterruption(windowLines),
+      window: { line_from: from, line_to: lines.length, transcript_lines_total: lines.length },
+      environment: {
+        claude_code_version: first.version ?? null,
+        git_branch: first.gitBranch ?? null,
+        entrypoint: first.entrypoint ?? null,
+        platform: process.platform,
+        node: process.version,
+      },
+    });
+
+    try {
+      const day = record.logged_at.slice(0, 10);
+      const dir = join(LOG_DIR, day);
+      mkdirSync(dir, { recursive: true });
+      const stamp = record.logged_at.replace(/[-:]/g, '').replace(/\..+/, 'Z');
+      const label = record.run.skills.length ? record.run.skills.map(safeName).join('+') : 'turn';
+      const file = join(dir, `${stamp}__${label}__${String(sessionId).slice(0, 8)}.json`);
+      atomicWriteJson(file, record);
+
+      // One computed-only summary line per record: cheap to load for
+      // dashboards/KPIs without touching the full snapshots.
+      const summary = {
+        file: file.slice(LOG_DIR.length + 1),
+        run_id: record.run.run_id,
+        logged_at: record.logged_at,
+        session_id: record.run.session_id,
+        trigger_event: record.run.trigger_event,
+        skills: record.run.skills,
+        models: Object.keys(record.computed.tokens.by_model),
+        tokens_grand_total: record.computed.tokens.grand_total,
+        boundary_total: record.computed.tokens.boundary_total,
+        cost_total_usd: record.computed.cost.total_usd,
+        cost_marginal_usd: record.computed.cost.marginal_usd,
+        cost_context_carry_usd: record.computed.cost.context_carry_usd,
+        cost_known_models_usd: record.computed.cost.known_models_usd,
+        cost_complete: record.computed.cost.complete,
+        wall_ms: record.computed.duration.wall_ms,
+        active_ms: record.computed.duration.active_ms,
+        api_calls: record.computed.counts.api_calls,
+        subagents: record.computed.counts.subagents,
+        interrupted: record.computed.outcome.interrupted_tool_seen,
+        error_type: record.computed.outcome.error_type,
+        schema_version: record.schema_version,
+      };
+      appendFileSync(join(LOG_DIR, 'index.jsonl'), JSON.stringify(summary) + '\n');
+    } catch (err) {
+      logError(`record write failed: ${err.message}`);
+    }
+  }
+
+  try {
+    writeState(sessionId, {
+      session_cursor: lines.length,
+      subagent_cursors: nextCursors,
+      agent_spawns: spawns,
+      updated_at: new Date().toISOString(),
+    });
+  } catch (err) {
+    logError(`state write failed: ${err.message}`);
+  }
+}
+
+try {
+  main();
+} catch (err) {
+  logError(`unexpected: ${err.stack ?? err.message}`);
+}
+process.exit(0);
