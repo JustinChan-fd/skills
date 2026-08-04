@@ -117,6 +117,11 @@ export function extractUsageEntries(lines, { source } = {}) {
       line_index: i,
       model: typeof line?.message?.model === 'string' ? line.message.model : null,
       stop_reason: line?.message?.stop_reason ?? null,
+      // The API's message id. Multiple transcript lines can report usage for a
+      // SINGLE call under one message.id (measured: 6,222 of 11,805 rows on this
+      // machine), so this is the dedupe key that keeps totals honest. Carried
+      // here rather than derived later so record.mjs never has to re-read lines.
+      message_id: typeof line?.message?.id === 'string' ? line.message.id : null,
       usage,
     };
     for (const f of LINE_ID_FIELDS) {
@@ -170,18 +175,45 @@ export function detectInterruption(lines) {
 // filename -> line count already processed by a previous firing, so only the
 // delta is attributed to this run.
 
+// Walks subagents/ RECURSIVELY. A flat readdir was measured to miss 89.5% of
+// agent transcripts on this machine — 5,176 files under
+// subagents/workflows/<wf_id>/ against 605 sitting flat, silently, no error.
+//
+// THE TRAP, and why the filter is on the filename prefix rather than the
+// extension: recursing and taking every *.jsonl also swallows journal.jsonl
+// (196 on this disk), which is workflow resume bookkeeping carrying ZERO usage
+// fields. Each would land as a phantom zero-token agent, so an overcount would
+// silently replace the undercount and the headline bug would look fixed.
+// `agent-` is the real convention; `.jsonl` is a coincidence journal.jsonl
+// shares.
+//
+// `name` is the path RELATIVE to subagents/, so it stays unique within a
+// session and remains a stable cursor key. (Measured: 0 basename collisions
+// within any single session; the 6 that exist are across sessions, and cursors
+// are per-session — but a relative path is correct regardless of that count.)
 export function listSubagentFiles(sessionDir) {
-  const dir = join(sessionDir, 'subagents');
-  let names;
-  try {
-    names = readdirSync(dir);
-  } catch {
-    return [];
-  }
-  return names
-    .filter((n) => n.startsWith('agent-') && n.endsWith('.jsonl'))
-    .map((n) => ({ name: n, path: join(dir, n) }))
-    .sort((a, b) => (a.name < b.name ? -1 : 1));
+  const root = join(sessionDir, 'subagents');
+  const out = [];
+
+  const walk = (dir, prefix) => {
+    let entries;
+    try {
+      entries = readdirSync(dir, { withFileTypes: true });
+    } catch {
+      return; // missing/unreadable dir is not an error — there may be no subagents
+    }
+    for (const e of entries) {
+      const rel = prefix ? `${prefix}/${e.name}` : e.name;
+      if (e.isDirectory()) {
+        walk(join(dir, e.name), rel);
+      } else if (e.name.startsWith('agent-') && e.name.endsWith('.jsonl')) {
+        out.push({ name: rel, path: join(dir, e.name) });
+      }
+    }
+  };
+
+  walk(root, '');
+  return out.sort((a, b) => (a.name < b.name ? -1 : 1));
 }
 
 export function readSubagentDelta(sessionDir, cursors = {}) {
@@ -197,7 +229,10 @@ export function readSubagentDelta(sessionDir, cursors = {}) {
     if (usage.length === 0 && from > 0) continue; // nothing new from this agent
     let meta = null;
     try {
-      meta = JSON.parse(readFileSync(join(sessionDir, 'subagents', f.name.replace(/\.jsonl$/, '.meta.json')), 'utf8'));
+      // Resolve the sidecar next to the transcript itself. Deriving it from
+      // f.path (not from sessionDir + f.name) keeps nested agents working:
+      // their sidecar lives in the same workflows/<wf_id>/ dir they do.
+      meta = JSON.parse(readFileSync(f.path.replace(/\.jsonl$/, '.meta.json'), 'utf8'));
     } catch {
       /* meta is optional */
     }

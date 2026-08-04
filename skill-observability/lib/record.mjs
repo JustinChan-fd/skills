@@ -84,16 +84,77 @@ export function aggregate(usageEntries, { gapCapMs = DEFAULT_GAP_CAP_MS } = {}) 
   const byModel = {};
   const notes = [];
   const stamps = [];
-  let speedSeen = null;
+  // Speed is tracked PER (model, speed) bucket, never once per window. A single
+  // session-global value applied the fast multiplier to every model: 1M fast +
+  // 1M standard Opus 5 input reported $20.00 where $15.00 is correct.
+  const speedByModel = {};
 
+  // Dedupe by message.id. Several transcript lines can carry usage for ONE API
+  // call under a single message.id — measured 6,222 of 11,805 rows on this
+  // machine, a 2.097x overcount when summed naively (project_cost_accounting).
+  //
+  // Two properties the naive fixes get wrong:
+  //   - duplicates are NOT identical (2,946 of them carried nonzero tokens), so
+  //     first-wins/last-wins both lose real spend. Keep the MAX per direction:
+  //     a zeroed or smaller duplicate is a truncated record of the same call,
+  //     never a second free one.
+  //   - a MISSING id must not become a shared key, or a 2x overcount is traded
+  //     for a silent undercount. Id-less rows are each their own call.
+  const dedup = new Map(); // key -> { model, speed, bucket }
+  let anon = 0;
   for (const entry of usageEntries) {
     const model = entry.model ?? 'unknown';
-    byModel[model] ??= emptyBucket();
-    byModel[model].api_calls += 1;
-    for (const u of usagesToCount(entry.usage)) addUsage(byModel[model], u);
-    if (typeof entry.usage?.speed === 'string') speedSeen = entry.usage.speed;
+    const speed = typeof entry.usage?.speed === 'string' ? entry.usage.speed : null;
+    // Model is part of the key: the same message.id under two model ids is not
+    // one call, and collapsing across models would corrupt per-model pricing.
+    const key = entry.message_id ? `id:${model} ${entry.message_id}` : `anon:${anon += 1}`;
+
+    const one = emptyBucket();
+    for (const u of usagesToCount(entry.usage)) addUsage(one, u);
+
+    const prev = dedup.get(key);
+    if (!prev) {
+      dedup.set(key, { model, speed, bucket: one });
+    } else {
+      // Same call seen again: keep the larger figure in each direction.
+      for (const k of Object.keys(one)) {
+        if (k === 'api_calls') continue;
+        prev.bucket[k] = Math.max(prev.bucket[k], one[k]);
+      }
+      // A fast marker anywhere in the group applies to the whole call.
+      if (speed && !prev.speed) prev.speed = speed;
+    }
+
+    // Timestamps are per LINE, not per deduplicated call: duration should
+    // reflect the wall-clock span the session actually occupied.
     const ms = entry.timestamp ? Date.parse(entry.timestamp) : NaN;
     if (Number.isFinite(ms)) stamps.push(ms);
+  }
+
+  // Fold the deduplicated calls into per-model buckets. api_calls counts REAL
+  // calls, so cost-per-call stays honest.
+  //
+  // Tokens roll up per MODEL (the reported shape), but cost is computed per
+  // (model, speed) because the rate differs: summing tokens first and then
+  // picking one rate is exactly the bug this replaces. bySpeed keeps the
+  // sub-buckets pricing needs without changing by_model.
+  const bySpeed = {}; // `${model} ${speed ?? ''}` -> { model, speed, bucket }
+  for (const { model, speed, bucket } of dedup.values()) {
+    byModel[model] ??= emptyBucket();
+    for (const k of Object.keys(bucket)) {
+      if (k === 'api_calls') continue;
+      byModel[model][k] += bucket[k];
+    }
+    byModel[model].api_calls += 1;
+
+    const sig = `${model} ${speed ?? ''}`;
+    bySpeed[sig] ??= { model, speed, bucket: emptyBucket() };
+    for (const k of Object.keys(bucket)) {
+      if (k === 'api_calls') continue;
+      bySpeed[sig].bucket[k] += bucket[k];
+    }
+    bySpeed[sig].bucket.api_calls += 1;
+    if (speed) speedByModel[model] = speed;
   }
 
   stamps.sort((a, b) => a - b);
@@ -116,19 +177,36 @@ export function aggregate(usageEntries, { gapCapMs = DEFAULT_GAP_CAP_MS } = {}) 
   let carryTotal = 0;
   let costComplete = true;
   const firstStamp = stamps.length ? new Date(stamps[0]).toISOString() : null;
-  for (const [model, b] of Object.entries(byModel)) {
-    const rates = ratesFor(model, { speed: speedSeen, at: firstStamp });
-    const split = costOfBucket(b, rates);
+  const usd6 = (v) => Math.round(v * 1e6) / 1e6;
+
+  // Price each (model, speed) bucket at ITS OWN rate, then sum into the model.
+  for (const { model, speed, bucket } of Object.values(bySpeed)) {
+    const rates = ratesFor(model, { speed, at: firstStamp });
+    const split = costOfBucket(bucket, rates);
     if (split === null) {
+      // Keep the null verdict sticky: a model priced in one speed bucket and
+      // unknown in another is still incomplete overall.
       costByModel[model] = { usd: null, marginal_usd: null, context_carry_usd: null, rates: null };
       costComplete = false;
       notes.push({ code: 'unknown_model_pricing', detail: `no pricing entry for model id "${model}"; its cost is null and excluded from cost_usd_total` });
-    } else {
-      costByModel[model] = { ...split, rates };
-      costTotal += split.usd;
-      marginalTotal += split.marginal_usd;
-      carryTotal += split.context_carry_usd;
+      continue;
     }
+    if (costByModel[model] === undefined) {
+      costByModel[model] = { ...split, rates };
+    } else if (costByModel[model].rates !== null) {
+      // Second speed bucket for this model: accumulate, and record that more
+      // than one rate applied so a reader is not misled by a single `variant`.
+      const acc = costByModel[model];
+      acc.usd = usd6(acc.usd + split.usd);
+      acc.marginal_usd = usd6(acc.marginal_usd + split.marginal_usd);
+      acc.context_carry_usd = usd6(acc.context_carry_usd + split.context_carry_usd);
+      acc.rates_by_speed ??= [acc.rates];
+      acc.rates_by_speed.push(rates);
+      acc.mixed_speed = true;
+    }
+    costTotal += split.usd;
+    marginalTotal += split.marginal_usd;
+    carryTotal += split.context_carry_usd;
   }
   if (totals.cache_creation_unattributed > 0) {
     notes.push({ code: 'cache_ttl_split_missing', detail: `${totals.cache_creation_unattributed} cache-write tokens carried no 5m/1h split; priced at the 5m rate` });
