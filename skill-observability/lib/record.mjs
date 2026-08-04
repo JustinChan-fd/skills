@@ -183,6 +183,16 @@ export function aggregate(usageEntries, { gapCapMs = DEFAULT_GAP_CAP_MS } = {}) 
   for (const { model, speed, bucket } of Object.values(bySpeed)) {
     const rates = ratesFor(model, { speed, at: firstStamp });
     const split = costOfBucket(bucket, rates);
+    // An unpriced bucket carrying ZERO tokens is free by arithmetic, not by
+    // guess — so it must not drag the whole window's cost to null. Measured:
+    // `<synthetic>` (a harness placeholder, stop_reason "stop_sequence", every
+    // token field 0) appears in 73 rows across this machine's 434 sessions and
+    // nulled the cost of 4,471,414,795 real tokens. The unknown-model refusal
+    // below still fires for anything with tokens on it.
+    if (split === null && bucketTotal(bucket) === 0) {
+      costByModel[model] ??= { usd: 0, marginal_usd: 0, context_carry_usd: 0, rates: null };
+      continue;
+    }
     if (split === null) {
       // Keep the null verdict sticky: a model priced in one speed bucket and
       // unknown in another is still incomplete overall.

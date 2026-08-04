@@ -256,3 +256,55 @@ test('ratesFor still honours an explicit per-call speed override', () => {
   assert.equal(ratesFor('claude-sonnet-5', { at: '2026-08-04T00:00:00Z' }).variant, 'introductory');
   assert.equal(ratesFor('claude-sonnet-5', { at: '2026-09-30T00:00:00Z' }).variant, 'standard');
 });
+
+// ---------------------------------------------------------------------------
+// 4. A zero-token bucket must not nullify real cost.
+//
+// MEASURED across all 434 session transcripts: 72,636 usage rows carry 8 distinct
+// model ids. Seven are priced. The eighth is `<synthetic>` — 73 rows, stop_reason
+// "stop_sequence", and every token field ZERO. It is a harness-generated
+// placeholder, not an API call.
+//
+// Because it matched no pricing prefix, `cost.complete` went false and
+// `total_usd` went null for the WHOLE corpus: 4,471,414,795 real tokens priced
+// at nothing, because 73 empty rows were "an unknown model". The tool's headline
+// output was unavailable on every real session on this machine, and 31 green
+// tests did not say so — every test fed it only ids the table knows.
+//
+// 0 tokens x any rate = 0, so charging it zero is arithmetic, not a guess. The
+// unknown-model guard must survive intact for the case it was written for.
+// ---------------------------------------------------------------------------
+
+test('a zero-token unpriced bucket costs 0 and does NOT null the total', () => {
+  const real = {
+    source: 'session', model: 'claude-opus-5', timestamp: '2026-08-04T10:00:00.000Z', message_id: 'r1',
+    usage: { input_tokens: 1_000_000, output_tokens: 0, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 },
+  };
+  const synthetic = {
+    source: 'session', model: '<synthetic>', timestamp: '2026-08-04T10:00:01.000Z', message_id: 's1',
+    stop_reason: 'stop_sequence',
+    usage: { input_tokens: 0, output_tokens: 0, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 },
+  };
+  const agg = aggregate([real, synthetic]);
+  assert.equal(agg.cost.total_usd, 5, '1M Opus 5 input = $5.00; an empty placeholder must not erase it');
+  assert.equal(agg.cost.complete, true, 'nothing priceable is missing — completeness must hold');
+  assert.equal(agg.cost.by_model['<synthetic>'].usd, 0, 'zero tokens cost zero, not null');
+  assert.ok(
+    !agg.notes.some((n) => n.code === 'unknown_model_pricing'),
+    'an empty bucket is not a pricing gap; a note here would cry wolf on every real session',
+  );
+});
+
+test('an unknown model WITH tokens still nulls the total — the guard survives', () => {
+  // The falsifier for the fix above. If this goes green-by-accident the fix has
+  // eaten the guard it was supposed to leave alone, and a genuinely unpriced
+  // model would be silently charged $0 instead of refusing to guess.
+  const agg = aggregate([{
+    source: 'session', model: 'claude-future-9', timestamp: '2026-08-04T10:00:00.000Z', message_id: 'f1',
+    usage: { input_tokens: 1_000_000, output_tokens: 0, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 },
+  }]);
+  assert.equal(agg.cost.total_usd, null, 'real tokens on an unpriced model must refuse a number');
+  assert.equal(agg.cost.complete, false);
+  assert.equal(agg.cost.by_model['claude-future-9'].usd, null);
+  assert.ok(agg.notes.some((n) => n.code === 'unknown_model_pricing'), 'and it must say why');
+});
