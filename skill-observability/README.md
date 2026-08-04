@@ -353,3 +353,43 @@ executes the real hook binary against a fixture transcript tree (session +
 subagents) and asserts on cursor behavior across repeated firings. Also
 validated live against a real session transcript (99 API calls, two models,
 mixed 5m/1h cache writes, one subagent) with zero degradation notes.
+
+## Verifying the store
+
+```sh
+node skill-observability/bin/verify-logs.mjs        # exits 1 on any problem
+```
+
+The tests prove the **writer** is right against fixtures. This proves the
+**store** is right against whatever actually accumulated on disk — including
+records written by older code, which no test can retroactively cover. Run it
+before trusting a dashboard build; it's the check that earns the trust, since
+every defect on this project so far was found by replaying real records rather
+than by a green test.
+
+What it enforces:
+
+- **The index does not lie.** Every indexed file exists, every file on disk is
+  indexed, no duplicate `run_id`. (This broke for real: two records written in
+  the same second collided, leaving two index lines pointing at one file.)
+- **The partition reconciles.** `attributed + unattributed` *is* the window, not
+  a filter of it. Tokens are integers so this is checked **exactly**; costs are
+  6dp-rounded per bucket so they get a 1e-5 tolerance. A tolerance tighter than
+  the data's own precision is a bug in the checker — a 1e-9 one produced three
+  false positives on real records.
+- **Join keys resolve.** `unattributed_belongs_to_run_id` names a record that
+  exists, or is null. A dangling key is worse than none: it invites a silent
+  inner-join drop.
+- **Windows never overlap** within a session — the property that guarantees no
+  token is counted twice. Gaps are normal (unlogged non-skill turns); overlaps
+  never are.
+- **`marginal_comparable` is derived, never asserted** — it must agree with
+  `cache_state`.
+
+Pre-attribution records are skipped explicitly and counted in the output, not
+defaulted to zero: a checker that silently treats a missing block as empty would
+report a clean store that isn't actually comparable.
+
+The failure paths are exercised, not assumed — each of the five classes above
+was reproduced by corrupting a copy of the real store and confirming the exact
+message fires.
