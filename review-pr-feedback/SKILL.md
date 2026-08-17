@@ -292,7 +292,7 @@ Requirements:
 | Domain | Agent |
 |--------|-------|
 | Server routes/middleware/services | `junior_engineer` |
-| Security (leaks, auth, headers) | `security_analyst` |
+| Security (leaks, auth, headers) | `junior_engineer` |
 | Frontend (components, a11y, CSS) | `senior_frontend_engineer` |
 | Documentation | `junior_engineer` |
 | Config/infra | `junior_engineer` |
