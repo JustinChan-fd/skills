@@ -1,0 +1,13 @@
+{
+  "Story": {
+    "fields": {},
+    "constraints": [
+      {
+        "type": "parentRequired",
+        "note": "Not flagged required by getJiraIssueTypeMetaWithFields (only issuetype/project/summary are marked required), but every recent UR story in practice has a parent Epic. Recent stories span multiple epics by sub-domain (RS-452 general User Ratings backend, TARS-1282 User Flagged Moderation, RS-567 Strata Reviews Workflow, RS-447 Snyk) — match the new story's domain to the sibling's summary, don't default to most-recent.",
+        "learnedFrom": "UR-1166",
+        "learnedOn": "2026-08-27"
+      }
+    ]
+  }
+}

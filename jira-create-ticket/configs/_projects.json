@@ -10,5 +10,11 @@
     "aliases": ["webtarsthree", "tars3", "tars-3"],
     "learnedFrom": "TARS-1414",
     "learnedOn": "2026-08-27"
+  },
+  "UR": {
+    "name": "RT User Ratings Service",
+    "aliases": ["user ratings", "user ratings service", "rt user ratings"],
+    "learnedFrom": "UR-1166",
+    "learnedOn": "2026-08-27"
   }
 }
