@@ -1,0 +1,49 @@
+{
+  "Bug": {
+    "fields": {
+      "customfield_10838": {
+        "name": "Steps to Reproduce",
+        "required": true,
+        "fieldType": "adf",
+        "note": "Jira metadata reports this as a plain textarea string, but create/edit actually rejects a string and requires ADF doc content. Use an orderedList — one listItem per step; steps with a visible result use a bold 'Expected:' lead-in; route/URL/query fragments use inline code marks.",
+        "learnedFrom": "CR-1012",
+        "learnedOn": "2026-08-27"
+      },
+      "customfield_14239": {
+        "name": "Method of Testing",
+        "required": true,
+        "fieldType": "select",
+        "allowedValues": [
+          { "id": "15618", "value": "Manual" },
+          { "id": "15619", "value": "Automation" },
+          { "id": "15620", "value": "Known Issue" }
+        ],
+        "learnedFrom": "CR-1012",
+        "learnedOn": "2026-08-27"
+      },
+      "customfield_14627": {
+        "name": "Environment(s) Reported",
+        "required": true,
+        "fieldType": "multiselect",
+        "allowedValues": [
+          { "id": "16948", "value": "INT" },
+          { "id": "16949", "value": "STG" },
+          { "id": "16950", "value": "PROD" },
+          { "id": "16951", "value": "DARK" },
+          { "id": "16952", "value": "DEV" },
+          { "id": "16953", "value": "QA" }
+        ],
+        "learnedFrom": "CR-1012",
+        "learnedOn": "2026-08-27"
+      }
+    },
+    "constraints": [
+      {
+        "type": "parentRequired",
+        "note": "Not surfaced by getJiraIssueTypeMetaWithFields — only appears as a create-time error: 'Must be linked to an Epic using the Parent field'. Infer a plausible parent Epic from recent sibling tickets in the same project/issue type before asking the user.",
+        "learnedFrom": "CR-1012",
+        "learnedOn": "2026-08-27"
+      }
+    ]
+  }
+}
