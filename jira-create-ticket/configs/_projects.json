@@ -1,0 +1,14 @@
+{
+  "CR": {
+    "name": "RT Critic Ratings Service",
+    "aliases": ["critics service", "critic ratings", "rt critics", "critics"],
+    "learnedFrom": "CR-1012",
+    "learnedOn": "2026-08-27"
+  },
+  "TARS": {
+    "name": "TARS",
+    "aliases": ["webtarsthree", "tars3", "tars-3"],
+    "learnedFrom": "TARS-1414",
+    "learnedOn": "2026-08-27"
+  }
+}
