@@ -1,0 +1,49 @@
+{
+  "Bug": {
+    "fields": {
+      "customfield_10838": {
+        "name": "Steps to Reproduce",
+        "required": true,
+        "fieldType": "adf",
+        "note": "Same quirk as CR: metadata reports plain textarea/string, but create/edit rejects a string and requires ADF doc content. Use an orderedList — one listItem per step; steps with a visible result use a bold 'Expected:' lead-in; route/URL/query fragments use inline code marks.",
+        "learnedFrom": "TARS-1414",
+        "learnedOn": "2026-08-27"
+      },
+      "customfield_14239": {
+        "name": "Method of Testing",
+        "required": true,
+        "fieldType": "select",
+        "allowedValues": [
+          { "id": "15618", "value": "Manual" },
+          { "id": "15619", "value": "Automation" },
+          { "id": "15620", "value": "Known Issue" }
+        ],
+        "learnedFrom": "TARS-1414",
+        "learnedOn": "2026-08-27"
+      },
+      "customfield_14627": {
+        "name": "Environment(s) Reported",
+        "required": true,
+        "fieldType": "multiselect",
+        "allowedValues": [
+          { "id": "16948", "value": "INT" },
+          { "id": "16949", "value": "STG" },
+          { "id": "16950", "value": "PROD" },
+          { "id": "16951", "value": "DARK" },
+          { "id": "16952", "value": "DEV" },
+          { "id": "16953", "value": "QA" }
+        ],
+        "learnedFrom": "TARS-1414",
+        "learnedOn": "2026-08-27"
+      }
+    },
+    "constraints": [
+      {
+        "type": "parentRequired",
+        "note": "Not surfaced by getJiraIssueTypeMetaWithFields — same undocumented constraint as CR. Unlike CR, 'most recent sibling ticket's parent' is not a safe default here: recent TARS bugs span multiple unrelated epics (e.g. TARS-1026 'webtarsthree MVP Post Launch' vs TARS-807 'webtarsthree RTB' vs a ticket's own pipeline epic like TARS-1350). Infer by matching the new ticket's domain/component to the sibling's summary, not just recency, and always confirm with the user before creating.",
+        "learnedFrom": "TARS-1414",
+        "learnedOn": "2026-08-27"
+      }
+    ]
+  }
+}
