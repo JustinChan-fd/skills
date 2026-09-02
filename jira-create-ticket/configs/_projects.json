@@ -16,5 +16,11 @@
     "aliases": ["user ratings", "user ratings service", "rt user ratings"],
     "learnedFrom": "UR-1166",
     "learnedOn": "2026-08-27"
+  },
+  "MC": {
+    "name": "Media Catalog",
+    "aliases": ["media catalog", "catalog-ui-public", "catalog ui public", "catalog-ui-management", "catalog ui management"],
+    "learnedFrom": "MC-1230",
+    "learnedOn": "2026-09-02"
   }
 }

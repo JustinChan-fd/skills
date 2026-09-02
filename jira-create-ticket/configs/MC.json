@@ -1,0 +1,15 @@
+{
+  "Task": {
+    "fields": {},
+    "constraints": [
+      {
+        "type": "parentOptional",
+        "note": "Recent sibling Tasks (MC-1276, MC-1281, MC-1290, MC-1291, MC-1293) all set a parent Epic, but create-metadata does not mark parent as required for Task in this project. Set it anyway when a clear parent exists.",
+        "learnedFrom": "MC-1230-sync-ticket",
+        "learnedOn": "2026-09-02"
+      }
+    ],
+    "learnedFrom": "MC-1230-sync-ticket",
+    "learnedOn": "2026-09-02"
+  }
+}
