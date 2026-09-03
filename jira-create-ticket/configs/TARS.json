@@ -45,5 +45,12 @@
         "learnedOn": "2026-08-27"
       }
     ]
+  },
+  "Story": {
+    "fields": {},
+    "constraints": [],
+    "note": "getJiraIssueTypeMetaWithFields (requiredFieldsOnly, id 7) surfaced only issuetype/project/summary as required — no custom fields, no parent constraint enforced at create time. Confirm parent epic with user anyway per the domain-matching guidance used for Bug.",
+    "learnedFrom": "TARS-1425",
+    "learnedOn": "2026-08-27"
   }
 }
