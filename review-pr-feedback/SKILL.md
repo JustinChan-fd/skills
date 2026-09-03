@@ -168,7 +168,7 @@ npm run test
 2. Check if test assertion needs updating (test was asserting old behavior)
 3. Ask user: "Test X failed after fixing Y. Fix the test / revert the change / investigate?"
 
-### Phase 5: Commit + Push + Resolve Threads
+### Phase 5: Commit + Push + Reply-and-Resolve Threads
 
 **Single commit for all fixes:**
 
@@ -185,10 +185,19 @@ git push
 
 Extract ticket number from branch name (e.g., `feature/MC-564-...` → `MC-564`).
 
-**Resolve each implemented thread:**
+**Reply to every thread, then resolve it — implemented or not.** Every unresolved thread gets exactly one brief reply before it's resolved, so the reasoning is visible right in the thread, not just buried in the summary comment below. Capture each reply's `url` — the summary table links to it.
 
 ```bash
-for thread_id in $IMPLEMENTED_THREAD_IDS; do
+for thread_id in $ALL_PROCESSED_THREAD_IDS; do
+  # $REPLY_BODY is a VERY brief one-liner — see wording rules below
+  REPLY_URL=$(gh api graphql -f query="
+    mutation {
+      addPullRequestReviewThreadReply(input: { pullRequestReviewThreadId: \"$thread_id\", body: \"$REPLY_BODY\" }) {
+        comment { id url }
+      }
+    }" --jq '.data.addPullRequestReviewThreadReply.comment.url')
+  # Store REPLY_URL keyed by thread_id — the summary table links each Issue cell to it
+
   gh api graphql -f query="
     mutation {
       resolveReviewThread(input: { threadId: \"$thread_id\" }) {
@@ -198,30 +207,11 @@ for thread_id in $IMPLEMENTED_THREAD_IDS; do
 done
 ```
 
-**Dismiss skipped/rejected threads with a reply:**
+**Reply wording — VERY brief, one line, no exceptions:**
+- **Implemented:** `"Fixed — see commit \`<SHA>\`."` or, if it adds real clarity, one clause naming what changed, e.g. `"Fixed — extracted to getCharCountClass()."` Never restate the reviewer's comment back to them.
+- **Not implemented:** the same one-sentence dismissal reason as before, e.g. `"False positive — this line already asserts \`toHaveLength(1)\` after the merge conflict fix."` Factual, not defensive.
 
-For threads assessed as ❌ false positive or intentionally skipped, post a single-line reply explaining why, then resolve the thread. This prevents stale unresolved threads from piling up for the user to manually close.
-
-```bash
-for thread_id in $SKIPPED_THREAD_IDS; do
-  # Post a one-line dismissal reply on the thread's PR review comment
-  gh api graphql -f query="
-    mutation {
-      addPullRequestReviewThreadReply(input: { pullRequestReviewThreadId: \"$thread_id\", body: \"$DISMISSAL_REASON\" }) {
-        comment { id }
-      }
-    }"
-  # Then resolve it
-  gh api graphql -f query="
-    mutation {
-      resolveReviewThread(input: { threadId: \"$thread_id\" }) {
-        thread { id isResolved }
-      }
-    }"
-done
-```
-
-The dismissal reply should be a single sentence — e.g., "False positive — this line already asserts `toHaveLength(1)` after the merge conflict fix." Keep it factual, not defensive.
+Either way: one sentence, no bullet lists, no restating the issue — the thread already has that context.
 
 ### Phase 6: Post Summary Comment
 
@@ -242,19 +232,20 @@ All N review comments addressed in commit `<SHA>`.
 
 | # | File | Issue | Fix |
 |---|------|-------|-----|
-| 1 | `file.js:line` | Brief issue description | → What was done |
+| 1 | `file.js:line` | [Brief issue description](REPLY_URL) | → What was done |
 
 ### ❌ Not Implemented
 
 | # | File | Issue | Reason |
 |---|------|-------|--------|
-| 1 | `file.js:line` | Brief issue description | Why it was skipped |
+| 1 | `file.js:line` | [Brief issue description](REPLY_URL) | Why it was skipped |
 
 (Or "None — all N comments were valid and addressed." if all implemented)
 ```
 
 **Rules for the table:**
 - Keep "Issue" column to <80 chars (truncate with ellipsis if needed)
+- Always link the Issue cell text to that thread's `REPLY_URL` from Phase 5, so a reader can jump straight to the in-context reply instead of scrolling the whole PR
 - Keep "Fix" column actionable: "→ use `res.getHeader()`" not "→ Fixed"
 - Keep "Reason" column honest: "False positive — our setup handles this via X" not just "Skipped"
 
@@ -310,7 +301,9 @@ Requirements:
 
 ## Common Mistakes
 
-- ❌ Resolving a thread without explanation (implemented threads are resolved silently; skipped threads get a one-line reply before resolving)
+- ❌ Resolving a thread without a reply first — every thread gets a brief one-liner, implemented or not, before it's resolved
+- ❌ Writing a reply that restates the reviewer's comment or explains at length — one sentence, always
+- ❌ Forgetting to capture the reply's `url` for the summary table's Issue-cell link
 - ❌ Updating a test assertion without understanding why it changed (investigate first)
 - ❌ Implementing a "fix" that contradicts documented patterns (read docs first)
 - ❌ Force-pushing after resolving threads (thread resolution references the SHA)
