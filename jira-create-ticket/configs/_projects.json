@@ -22,5 +22,11 @@
     "aliases": ["media catalog", "catalog-ui-public", "catalog ui public", "catalog-ui-management", "catalog ui management"],
     "learnedFrom": "MC-1230",
     "learnedOn": "2026-09-02"
+  },
+  "CM": {
+    "name": "Change Management",
+    "aliases": ["change management"],
+    "learnedFrom": "CM-43771",
+    "learnedOn": "2026-09-16"
   }
 }

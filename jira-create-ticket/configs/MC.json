@@ -11,5 +11,24 @@
     ],
     "learnedFrom": "MC-1230-sync-ticket",
     "learnedOn": "2026-09-02"
+  },
+  "Story": {
+    "fields": {},
+    "constraints": [
+      {
+        "type": "parentOptional",
+        "note": "create-metadata for Story in MC only requires issuetype/project/summary, but the user's MC-1335-MC-1341 batch all set parent explicitly to the relevant Epic (MC-863). Set it anyway when a clear parent Epic exists, same as Task.",
+        "learnedFrom": "MC-1335-visibility-batch",
+        "learnedOn": "2026-09-16"
+      },
+      {
+        "type": "customReferencesSection",
+        "note": "SUPERSEDED 2026-09-16: this was originally a one-off MC-specific ask (catalog-ui-management wanted a '### References' section linking the API docs tag page at https://int-catalog-svc-management.mta.fand.co/docs#tag/<tag> plus a source-of-truth Confluence page). '### References' is now a standard section in every issue-type template (see templates/*.md), so this is no longer MC-specific — kept here only as a record of MC's own typical References content (that API docs tag page pattern) for future MC tickets.",
+        "learnedFrom": "MC-1335-visibility-batch",
+        "learnedOn": "2026-09-16"
+      }
+    ],
+    "learnedFrom": "MC-1335-visibility-batch",
+    "learnedOn": "2026-09-16"
   }
 }

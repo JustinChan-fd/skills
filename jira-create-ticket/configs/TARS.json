@@ -48,9 +48,38 @@
   },
   "Story": {
     "fields": {},
-    "constraints": [],
-    "note": "getJiraIssueTypeMetaWithFields (requiredFieldsOnly, id 7) surfaced only issuetype/project/summary as required — no custom fields, no parent constraint enforced at create time. Confirm parent epic with user anyway per the domain-matching guidance used for Bug.",
+    "constraints": [
+      {
+        "type": "parentRequired",
+        "note": "CORRECTED 2026-09-16: getJiraIssueTypeMetaWithFields (requiredFieldsOnly, id 7) reports Parent as required: false — but a live createJiraIssue with no parent was rejected with 'Must be linked to an Epic using the Parent field', same undocumented create-time-only constraint already known for Bug. The prior note here ('no parent constraint enforced at create time') was wrong/stale — do not trust that field's metadata for Story in TARS. Always infer and confirm a parent epic (Step 5/7) before create, same as Bug.",
+        "learnedFrom": "live-verification-2026-09-16",
+        "learnedOn": "2026-09-16"
+      }
+    ],
+    "note": "getJiraIssueTypeMetaWithFields (requiredFieldsOnly, id 7) surfaced only issuetype/project/summary as metadata-required, but see the parentRequired constraint above — metadata is wrong on this point. Confirm parent epic with user per the domain-matching guidance used for Bug.",
     "learnedFrom": "TARS-1425",
     "learnedOn": "2026-08-27"
+  },
+  "Tech Story": {
+    "fields": {},
+    "constraints": [
+      {
+        "type": "parentRequired",
+        "note": "CORRECTED 2026-09-16: getJiraIssueTypeMetaWithFields (issueTypeId 11252, requiredFieldsOnly) reports Parent as required: false — but a live createJiraIssue with no parent was rejected with 'Must be linked to an Epic using the Parent field', same undocumented create-time-only constraint already known for Bug. The prior note here ('no parent constraint enforced at create time... unlike Bug') was wrong/stale — Tech Story behaves exactly like Bug on this point. Always infer and confirm a parent epic (Step 5/7) before create.",
+        "learnedFrom": "live-verification-2026-09-16",
+        "learnedOn": "2026-09-16"
+      }
+    ],
+    "note": "getJiraIssueTypeMetaWithFields (issueTypeId 11252, requiredFieldsOnly) surfaced only issuetype/project/summary as metadata-required, but see the parentRequired constraint above — metadata is wrong on this point. Description authored in markdown from templates/TechStory.md (no Steps to Reproduce — it's work, not a defect).",
+    "learnedFrom": "TARS-1398",
+    "learnedOn": "2026-09-08"
+  },
+  "Internal Package Software": {
+    "issueTypeId": "11513",
+    "fields": {},
+    "constraints": [],
+    "note": "getJiraIssueTypeMetaWithFields (issueTypeId 11513, requiredFieldsOnly: false) surfaced only issuetype/project/summary/reporter as required — no custom fields, no parent constraint enforced at create time. Decision boundary (per user correction 2026-09-08, supersedes the original broader framing): ISP is a CODE change that is never seen running as deployed application code on PRD, AND is not the build/CI orchestration itself. Concretely: a Dockerfile's base image or pinned apt/dependency versions = ISP (defines what's baked into a build artifact). The pipeline definition that runs the build (.github/workflows/*.yml, Jenkinsfile) = NOT ISP — editing how the build runs is process tooling, route to Task (or Bug/Story if fixing a defect/adding a capability). Test files (*.test.*, specs) = NOT ISP even though they don't run on PRD either — those stay Story, test coverage is product work. Non-code changes (docs, ticket housekeeping, manual vendor-UI config) = NOT ISP — that's Task's job. Content is a documentation record (what changed, why, where it's consumed), not repro steps or testable AC in the usual sense. Description authored in markdown from templates/InternalPackageSoftware.md. Caveat: TARS-1434 was originally created as a plain Task and only reclassified to this type after the fact — when the new ticket's subject matches this boundary, create as this type from the start rather than defaulting to Task.",
+    "learnedFrom": "TARS-1434",
+    "learnedOn": "2026-09-08"
   }
 }

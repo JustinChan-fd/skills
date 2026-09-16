@@ -23,3 +23,16 @@ in Overview or a separate ticket.
 -->
 - {testable condition}
 - {testable condition}
+
+### References
+<!--
+Omit this whole section if there's nothing to link. Don't pad it with a generic
+"see the codebase" filler — only include a link if it actually helps whoever
+picks this up next skip a step they'd otherwise have to do themselves.
+Plain bullet list, one link per bullet, each with a one-phrase label saying what
+it is (not just a bare URL). Typical contents: a Confluence page, a vendor-UI
+config screen this task references, a related/sibling ticket key, or the source
+this task's instructions came from. Never re-link something already linked via
+the formal Jira link relationship (Step 10) — that's redundant.
+-->
+- {label}: {url or ticket key}

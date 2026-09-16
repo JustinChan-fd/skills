@@ -39,6 +39,53 @@ for the tsquery crash" or "file a story in TARS for the publication search harde
 type (defaults to Bug if unclear), and any link relationship to another ticket
 ("blocks X", "follow-up to X", "relates to X").
 
+## Model policy
+
+This skill's own session (Steps 1–7: project/type/link resolution, field-config
+lookup, parent inference, the `AskUserQuestion` batch) should run on **Sonnet** —
+those steps are judgment calls (routing decisions, ambiguity detection, matching a
+sibling ticket's domain), not deep multi-hop reasoning, so they don't need Opus,
+but they're too consequential (a wrong project/issue-type/parent silently
+mis-files the ticket) to hand to Haiku either.
+
+Step 8 (turning the facts Steps 1–7 already settled into the template's exact
+prose/ADF shape) is a fixed-tier `Agent` call pinned to `model: "haiku"` — see
+that step for the full delegation contract. That split — Sonnet for the calls
+that decide something, Haiku for the call that only transcribes what was already
+decided — keeps the expensive tier off the one step in this skill that's pure
+mechanical formatting.
+
+## Versioning
+
+This skill is semantically versioned. `VERSION` (in this skill directory) holds
+the current version as a bare `MAJOR.MINOR.PATCH` string, no leading `v`, no
+trailing newline content beyond the version itself. Step 11 stamps every created
+ticket with a `jira-ticket-create:<VERSION>` label read from this file, so a
+ticket's originating skill/template version is always visible on the ticket
+itself — see that step for the mechanics.
+
+Bump rule of thumb (bumped by hand when editing this skill, not automatically,
+and recorded in `CHANGELOG.md` in the same edit):
+
+- **Patch** (`x.y.Z`) — wording/doc-only tweaks that don't change what a ticket
+  looks like or how routing decisions are made (a clarified comment, a typo
+  fix, a reworded guardrail with the same effect).
+- **Minor** (`x.Y.0`) — a new capability that's purely additive: a new
+  issue-type template, a new template section, a new routing rule, a new
+  `AskUserQuestion` case, a new config-learning pattern. Existing tickets'
+  structure isn't invalidated by it.
+- **Major** (`X.0.0`) — a change that makes a ticket created under the new
+  version structurally inconsistent with one created under the old version in
+  a way that matters downstream — removing or renaming a required section,
+  changing what a section means, changing the model tier in a way that
+  changes output quality/shape, or any change `ticket-refine`'s
+  definition-of-ready checklist would treat differently depending on which
+  version wrote the ticket.
+
+When in doubt between two levels, pick the higher one — the label's whole point
+is letting someone later distinguish "which version wrote this," and
+under-bumping defeats that.
+
 ## Workflow
 
 ### Step 1: Parse intent
@@ -47,9 +94,60 @@ Extract from the prompt:
 - **Project** — a key-shaped token ("CR", "TARS"), a project name, or a description
   ("the critics project", "webtarsthree"). Resolve the key in Step 2 — don't assume a
   bare uppercase word is already a valid key without checking.
-- **Issue type** — explicit ("bug", "story", "task", "ISP") or inferred from context
-  (a crash/defect defaults to Bug; a net-new capability defaults to Story). Ask if
-  genuinely ambiguous.
+- **Issue type** — explicit ("bug", "story", "task", "ISP"/"internal package") or
+  inferred from context. Work through these in order — the first rule that
+  applies wins:
+  1. **Not a code change at all** (docs, Jira/Confluence housekeeping, a manual
+     config toggle in a vendor UI, renaming a ticket, etc.) → **Task**. Task is
+     reserved for non-code changes; if a diff/PR is involved, it's not a Task.
+  2. **A code change that is a test file only** (a new/updated `*.test.*`, a
+     spec file, a QA automation script) → **Story**, even though it never runs
+     as deployed PRD application code on its own. Test coverage is still
+     product work, not package inventory — don't route it to ISP just because
+     it "isn't seen on PRD."
+  3. **A code change that is never seen running on PRD as deployed application
+     code, and is not itself the build/CI orchestration** → **Internal Package
+     Software** ("ISP"). This covers artifacts that define *what* gets baked
+     into a build — a Dockerfile's base image or pinned package/dependency
+     versions, an internal library version bump, a build-tooling recipe/config
+     consumed by another app's build. It does **not** cover the pipeline
+     definition itself (`.github/workflows/*.yml`, `Jenkinsfile`, CI script
+     orchestration) — editing *how the build runs* is process tooling, not
+     package inventory; treat that as a Task (or Bug/Story if it's fixing a
+     defect or adding a pipeline capability).
+     ISP is an inventory/tracking record, not a unit of work: the ticket's job
+     is to document what the package is, why it changed, and where it's
+     consumed. Signal phrases: "track this package," "document the base
+     image/dependency change," "internal package."
+     Example: TARS-1434 tracks a Docker base-image migration (bullseye →
+     bookworm) plus apt package-version pins and a jq mirror URL in
+     `Dockerfile`/`Dockerfile-CI` — those files define what's baked into the
+     image, never run as deployed application code themselves, and the change
+     didn't touch the `.github/workflows/*.yml` pipeline definition. ISP.
+     Contrast: a PR that only edits `.github/workflows/webtarsthree-build-deploy.yml`
+     (e.g. changing a runner label or adding a step) is build orchestration,
+     not package inventory — Task, not ISP.
+  4. **A code change that deploys and runs as application code on PRD, but has
+     no user-facing behavior change and is not fixing a defect** (a refactor,
+     an internal data-model migration, extracting/consolidating a module,
+     a dependency bump that touches app code paths rather than just a
+     Dockerfile/lockfile pin, cross-cutting technical debt work) →
+     **Tech Story**, if the target project's Jira instance has that issue
+     type (check `configs/<PROJECT_KEY>.json`, or `getJiraProjectIssueTypesMetadata`
+     if not yet cached); fall back to **Story** if the project has no Tech
+     Story type. This is distinct from ISP (which never runs as deployed app
+     code at all) and from Task (reserved for non-code changes) — Tech Story
+     *does* run on PRD, it just isn't visible to an end user and isn't a bug
+     fix.
+  5. **Everything else that deploys and runs as application code on PRD**: a
+     crash/defect → **Bug**; a net-new user-facing capability → **Story**.
+  Ask if genuinely ambiguous — in particular, a change that touches both a
+  Dockerfile/package pin *and* the pipeline YAML in the same PR isn't
+  automatically one type; ask whether the ticket's primary subject is the
+  package or the pipeline. Likewise, a change that's both an internal
+  refactor *and* fixes a reported defect isn't automatically Tech Story —
+  ask whether the ticket exists because of the defect (Bug) or the refactor
+  was the actual ask (Tech Story).
 - **Link target + relationship** — a referenced ticket key and the relationship word
   ("blocks", "is blocked by", "relates to", "duplicates"). Map to Jira's link type
   names via `getIssueLinkTypes` if not already known:
@@ -165,7 +263,9 @@ in the sibling's own summary, not just timestamp, and always confirm in Step 7.
 
 ### Step 6: Load content template
 
-Read `templates/<IssueType>.md` in this skill directory. If it doesn't exist:
+Read `templates/<IssueType>.md` in this skill directory, where `<IssueType>` is
+the issue type name with spaces removed (e.g. "Tech Story" → `TechStory.md`,
+"Internal Package Software" → `InternalPackageSoftware.md`). If it doesn't exist:
 - Fall back to `templates/Bug.md`'s shape (Overview / Evidence / Steps to
   Reproduce-or-equivalent / Acceptance Criteria) as a generic default.
 - After the ticket is created, offer to save that generic shape as a new
@@ -190,18 +290,69 @@ Include, only as applicable:
   confidently.
 - **Ambiguous project match**, if Step 2 found more than one plausible alias/name hit
   and couldn't pick one with confidence.
+- **Missing named surface** — for Bug/Story/Tech Story only, if nothing in the
+  prompt or the Step 3 link-target context names a concrete file, page, endpoint,
+  or component: ask for one directly (e.g. "Which file/page/endpoint does this
+  concern?"), free text, no preset options. This is required, not a nice-to-have
+  — Overview's template guidance (see `templates/Bug.md`/`Story.md`/`TechStory.md`)
+  mandates a named surface specifically so this ticket doesn't hit
+  research-loop's `ticket-refine` zero-signal bounce gate with no investigation
+  ever attempted. Skip this question only when a surface is already evident from
+  context — don't ask when the prompt already named one.
 
-### Step 8: Generate the description
+### Step 8: Delegate mechanical writing to a Haiku task-writer
 
-Using the template from Step 6 and the context from Step 3, write each section.
-Follow the Philosophy section above strictly — omit Evidence if there's nothing
-concrete, keep AC bullets independently testable, keep Steps to Reproduce concrete
-with real paths/URLs.
+All judgment for this ticket is already settled by this point — project, issue
+type, parent, field values, link relationship (Steps 1–7). What's left is
+mechanical: arrange already-decided facts into the template's fixed shape. Don't
+do that arranging yourself — spawn a subagent via the `Agent` tool with
+`model: "haiku"` (no `subagent_type`, so it starts fresh with no context of its
+own) to do it, and treat its output as a plain formatting pass, not a second
+opinion.
+
+Build one self-contained prompt for that call containing everything it needs and
+nothing it should decide:
+- The **exact template** loaded in Step 6, verbatim (its HTML comments are the
+  writing rules — leave them in).
+- The **concrete facts** this session already gathered/decided: the link-target
+  context extracted in Step 3, the named surface/current-vs-desired framing
+  settled for Overview, any AC conditions already agreed, the field values from
+  Step 4/7.
+- **Explicit instructions**: only place the given facts into the template's
+  sections in the given order; never invent, infer, or add a fact not supplied;
+  if a section has no supplied content, omit it exactly as the template's own
+  comments direct rather than padding it; keep AC bullets as independently
+  testable conditions with no open questions; for any field flagged
+  `fieldType: "adf"` in `configs/<PROJECT_KEY>.json` (see Step 4), also emit
+  that field's content as real ADF doc JSON (orderedList/listItem nodes, bold
+  `Expected:` lead-ins, inline code marks for routes/paths) using the exact
+  shape already documented there — not a plain string.
+- If it finds a supplied fact doesn't fit any section, or a required section has
+  nothing supplied for it, it should say so back rather than guessing filler —
+  that response means Steps 1–7 weren't actually finished, not that the writer
+  should compensate.
+
+Take its returned section text (and any ADF doc content) as the literal ticket
+content for Step 9 — don't re-derive or re-word it yourself; if something reads
+wrong, fix the input facts and re-run the call rather than hand-editing its
+output, so the actual writing stays fully on the cheaper tier.
 
 Sections that map to Jira fields other than `description` (e.g. Steps to Reproduce →
 `customfield_10838` in CR) are written as their own field value, not inlined into the
 `description` body — check `configs/<PROJECT_KEY>.json` for which section maps to a
-dedicated field vs. staying in `description`.
+dedicated field vs. staying in `description`; tell the Haiku call this mapping too,
+so it returns them as separate pieces rather than one blob.
+
+**Why Haiku, and why a separate call at all**: Steps 1–7 (project/type/parent
+resolution, field inference, the `AskUserQuestion` batch) are the actual judgment
+calls this skill exists to make, and they stay on this session's own tier.
+Turning already-decided facts into template-shaped prose/ADF has exactly one
+correct answer per input and needs no reasoning about the codebase, Jira
+semantics, or the user's intent — the same mechanical/judgment split
+`research-loop`'s `ticket-refine` draws between its own Sonnet-tier orchestration
+and its subagents. Keeping this step on the parent session's tier would mean
+paying for judgment-grade reasoning on a step that doesn't use it, every single
+ticket.
 
 ### Step 9: Create the issue
 
@@ -238,12 +389,39 @@ createIssueLink({
 })
 ```
 
-### Step 11: Output
+### Step 11: Stamp the version label
+
+Read this skill's `VERSION` file and add label `jira-ticket-create:<VERSION>` to
+the just-created issue (e.g. `jira-ticket-create:1.1.0`) via `editJiraIssue`'s
+`fields.labels`:
+
+```js
+editJiraIssue({
+  cloudId: "fandango.atlassian.net",
+  issueIdOrKey: "<ISSUE-KEY>",
+  fields: {
+    labels: ["jira-ticket-create:<VERSION>"],   // merge with any labels already
+                                                  // set by additional_fields in
+                                                  // Step 9 — don't clobber them
+  },
+})
+```
+
+If Step 9 already set other labels via `additional_fields`, append this label to
+that same array instead of overwriting it with a second call — one label set,
+one write. This label is purely a provenance marker for which skill version
+produced the ticket; it is never read by `research-loop`'s `triggerLabel`/
+`handoffLabel` pipeline-stage labels (see research-loop's `docs/config.md`) and
+must never collide with or be confused for those — different label, different
+purpose, both can coexist on the same ticket.
+
+### Step 12: Output
 
 ```
 ✅ Created <ISSUE-KEY>: <summary>
 🔗 https://fandango.atlassian.net/browse/<ISSUE-KEY>
 🔗 Linked: <ISSUE-KEY> blocks <TARGET-KEY>
+🏷️ Labeled: jira-ticket-create:<VERSION>
 ```
 
 ## Guardrails
