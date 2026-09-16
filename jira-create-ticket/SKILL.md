@@ -186,6 +186,35 @@ If the key was already in `_projects.json` but the user's phrase isn't yet in it
 `aliases`, append the new phrase to the existing `aliases` array (don't overwrite the
 entry) so the same wording resolves locally next time too.
 
+**Repo detection, for the `repo:*` label (Step 11).** Determine the current
+working directory's repo slug — run `git remote get-url origin` from cwd and
+derive the slug the same way `repoSlugFromUrl()` does in research-loop's/
+dev-loop's `src/config.ts` (last path segment, minus a trailing `.git`), e.g.
+`"catalog-ui-management"` from `git@github.com:fandango/catalog-ui-management.git`.
+If cwd isn't a git repo, or has no `origin` remote, this yields no slug — that's
+fine, it just means no `repo:*` label gets added (Step 11), not an error.
+
+Check the resolved project key's `repos` array in `_projects.json` (added
+alongside `aliases`/`learnedFrom`):
+- **cwd's slug is in that project's `repos` array**: this is the automatic,
+  no-question case — carry the slug forward to Step 11, no `AskUserQuestion`
+  needed. This is also how a project with multiple repos (MC has
+  `catalog-ui-management` and `catalog-ui-public`) resolves *which one*
+  automatically, since cwd's slug picks the right one without asking.
+- **cwd's slug is a real repo but not in that project's `repos` array** (or the
+  project has no `repos` array yet): a real mismatch signal — the ticket's
+  target project doesn't match the repo the user is sitting in. Surface this in
+  Step 7's `AskUserQuestion` batch rather than silently guessing either way.
+- **cwd yields no slug at all** (not a git repo, no origin): skip the `repo:*`
+  label entirely, no question asked — there's nothing to guess from and nothing
+  to confirm.
+- **A project's `repos` array doesn't exist yet and this is the first ticket
+  created for it from a real repo**: after the user confirms (via the Step 7
+  guard question) that cwd's slug is correct for this project, add a `repos`
+  array to that project's `_projects.json` entry (`["<slug>"]`, or append to an
+  existing array) — same self-healing convention as `aliases`, so the next
+  ticket from the same repo resolves automatically.
+
 ### Step 3: Fetch link-target context (if any)
 
 If a ticket was referenced, `getJiraIssue` on it (summary, description, comments).
@@ -299,6 +328,17 @@ Include, only as applicable:
   research-loop's `ticket-refine` zero-signal bounce gate with no investigation
   ever attempted. Skip this question only when a surface is already evident from
   context — don't ask when the prompt already named one.
+- **Repo/project mismatch guard** — if Step 2's repo detection found a real cwd
+  slug that is *not* in the target project's `repos` array (a new project with no
+  `repos` array yet counts as a mismatch too): ask directly, e.g. "You're in
+  `catalog-ui-management` but this ticket targets TARS — should this ticket be
+  labeled `repo:catalog-ui-management`, a different repo, or no repo label at
+  all?" — options: the detected slug, "a different repo" (free text), "no repo
+  label." This is the one guard that exists specifically because the `repo:*`
+  label is applied automatically the rest of the time (Step 2/Step 11) — silently
+  guessing here is exactly the wrong-repo-labeled-ticket risk that guard exists to
+  catch. Skip this question when cwd yielded no slug at all (nothing to confirm),
+  or when the slug is already in the project's `repos` array (no mismatch).
 
 ### Step 8: Delegate mechanical writing to a Haiku task-writer
 
@@ -389,31 +429,43 @@ createIssueLink({
 })
 ```
 
-### Step 11: Stamp the version label
+### Step 11: Stamp the version label and repo label
 
 Read this skill's `VERSION` file and add label `jira-ticket-create:<VERSION>` to
 the just-created issue (e.g. `jira-ticket-create:1.1.0`) via `editJiraIssue`'s
-`fields.labels`:
+`fields.labels`. If Step 2 resolved a repo slug for this ticket (either
+automatically, or confirmed via Step 7's mismatch guard — never a slug that was
+asked about and declined via "no repo label"), add `repo:<slug>` in the same
+write:
 
 ```js
 editJiraIssue({
   cloudId: "fandango.atlassian.net",
   issueIdOrKey: "<ISSUE-KEY>",
   fields: {
-    labels: ["jira-ticket-create:<VERSION>"],   // merge with any labels already
-                                                  // set by additional_fields in
-                                                  // Step 9 — don't clobber them
+    labels: ["jira-ticket-create:<VERSION>", "repo:<slug>"],   // merge with any
+                                                  // labels already set by
+                                                  // additional_fields in Step 9
+                                                  // — don't clobber them; omit
+                                                  // "repo:<slug>" entirely if
+                                                  // Step 2 found no slug or the
+                                                  // user declined one in Step 7
   },
 })
 ```
 
-If Step 9 already set other labels via `additional_fields`, append this label to
+If Step 9 already set other labels via `additional_fields`, append these labels to
 that same array instead of overwriting it with a second call — one label set,
-one write. This label is purely a provenance marker for which skill version
-produced the ticket; it is never read by `research-loop`'s `triggerLabel`/
-`handoffLabel` pipeline-stage labels (see research-loop's `docs/config.md`) and
-must never collide with or be confused for those — different label, different
-purpose, both can coexist on the same ticket.
+one write. `jira-ticket-create:<VERSION>` is purely a provenance marker for which
+skill version produced the ticket. `repo:<slug>` identifies which repo this
+ticket belongs to — the same label research-loop's/dev-loop's `jira.repoLabel`
+config field polls for (see research-loop's `docs/config.md`), needed because
+more than one target repo can share a single Jira project (MC:
+`catalog-ui-management` + `catalog-ui-public`). Neither label is
+`pipeline:research`/`pipeline:dev` (the stage labels that actually trigger a
+loop to pick the ticket up) — this skill never adds a stage label; that stays a
+separate, deliberate decision the user makes when a ticket is actually ready to
+enter the pipeline, not something ticket creation should do automatically.
 
 ### Step 12: Output
 
@@ -421,7 +473,7 @@ purpose, both can coexist on the same ticket.
 ✅ Created <ISSUE-KEY>: <summary>
 🔗 https://fandango.atlassian.net/browse/<ISSUE-KEY>
 🔗 Linked: <ISSUE-KEY> blocks <TARGET-KEY>
-🏷️ Labeled: jira-ticket-create:<VERSION>
+🏷️ Labeled: jira-ticket-create:<VERSION>, repo:<slug>
 ```
 
 ## Guardrails

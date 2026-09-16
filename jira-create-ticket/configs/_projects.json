@@ -8,6 +8,7 @@
   "TARS": {
     "name": "TARS",
     "aliases": ["webtarsthree", "tars3", "tars-3"],
+    "repos": ["webtarsthree"],
     "learnedFrom": "TARS-1414",
     "learnedOn": "2026-08-27"
   },
@@ -20,6 +21,7 @@
   "MC": {
     "name": "Media Catalog",
     "aliases": ["media catalog", "catalog-ui-public", "catalog ui public", "catalog-ui-management", "catalog ui management"],
+    "repos": ["catalog-ui-management", "catalog-ui-public"],
     "learnedFrom": "MC-1230",
     "learnedOn": "2026-09-02"
   },

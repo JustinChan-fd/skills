@@ -3,6 +3,33 @@
 All notable changes to this skill are recorded here. Versions follow the
 bump policy in `SKILL.md`'s "Versioning" section (patch/minor/major).
 
+## 1.2.0
+
+- Added automatic **`repo:<slug>` labeling** (Step 2 detection, Step 11
+  write): the current working directory's git remote is resolved to a repo
+  slug and, when it's in the target project's `repos` array
+  (`configs/_projects.json`), `repo:<slug>` is added to the created ticket
+  automatically — no extra prompt for the common case. This is the same
+  label research-loop's/dev-loop's `jira.repoLabel` config field polls for
+  (see those repos' `docs/config.md`), needed because more than one target
+  repo can share a single Jira project (MC: `catalog-ui-management` +
+  `catalog-ui-public` both file there — cwd's slug is what disambiguates
+  which one automatically).
+- Added a **repo/project mismatch guard** to Step 7's `AskUserQuestion`
+  batch: if cwd's detected slug is a real repo but isn't in the target
+  project's `repos` array (including a project with no `repos` array yet),
+  the user is asked to confirm rather than the skill silently guessing —
+  covers "I'm in `catalog-ui-management` but asked for a TARS ticket."
+  Confirming for a new project/repo pairing self-heals `_projects.json`'s
+  `repos` array, same convention as `aliases`.
+- This skill still never adds a pipeline stage label
+  (`pipeline:research`/`pipeline:dev`) — `repo:*` only identifies which
+  repo a ticket belongs to; entering the pipeline stays a separate,
+  deliberate decision.
+- `configs/_projects.json`: added `repos` arrays for `TARS`
+  (`["webtarsthree"]`) and `MC`
+  (`["catalog-ui-management", "catalog-ui-public"]`).
+
 ## 1.1.0
 
 - Added **Tech Story** routing (Step 1) and a `templates/TechStory.md`
