@@ -495,3 +495,13 @@ enter the pipeline, not something ticket creation should do automatically.
 - Never call `getVisibleJiraProjects` (or any live Jira lookup for project identity)
   when `configs/_projects.json` already resolves the key or name/alias match — the
   whole point of the project index is to make repeat resolution local.
+- Never paste a raw env var value, `.envrc`/`.env` content, API key, token, or
+  password into a ticket's Overview/Evidence/description — report presence/shape
+  only (e.g. "hasClientSecret: true"). This is enforced at the code level too: a
+  global `PreToolUse` hook (`hooks/block-secret-writes.sh`, wired via
+  `~/.claude/settings.json` since this skill has no fixed project directory) scans
+  every `createJiraIssue`/`createIssueLink`/`editJiraIssue` call and denies one
+  containing secret-shaped content before it reaches Jira (same mechanism
+  research-loop's/dev-loop's own pipelines use — see `scripts/redact.ts`). This
+  does *not* flag plain prose or email addresses — an Evidence section that
+  legitimately needs a user's email for repro context is unaffected.

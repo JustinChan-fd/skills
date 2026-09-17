@@ -3,6 +3,39 @@
 All notable changes to this skill are recorded here. Versions follow the
 bump policy in `SKILL.md`'s "Versioning" section (patch/minor/major).
 
+## 1.2.1
+
+- Added code-level secret-scanning to this skill's three Jira write calls
+  (`createJiraIssue`, `createIssueLink`, `editJiraIssue` -- Steps 9-11):
+  `scripts/redact.ts` (`containsSecret()`, copied from research-loop's
+  and dev-loop's own `src/redact.ts`, already fixed there for the same
+  bare-`KEY`-matches-`parent.key` false positive this skill's own Step 9
+  create call would otherwise hit) plus a `PreToolUse` hook
+  (`hooks/block-secret-writes.sh`) wired into the *global*
+  `~/.claude/settings.json`, not a project-level one -- this skill has no
+  fixed project directory the way research-loop/dev-loop do, since it's
+  invoked from whatever repo the user happens to be sitting in.
+  `containsSecret()` only matches key/token/password/credential-shaped
+  values; it does not touch plain prose or email addresses, so an
+  Evidence section needing a user's email for repro context is
+  unaffected.
+- Found and fixed a real bug surfaced while wiring this in:
+  `check-secret-in-tool-input.ts`'s "am I being run as a script, not
+  imported by tests" guard compared `import.meta.url` (symlink-resolved
+  by Node) against a raw, unresolved `process.argv[1]` path. Since this
+  skill is reached through `~/.claude/skills ->
+  .../Desktop/Repos/skills`, that guard was silently false every time,
+  skipping the scan entirely and exiting 0 (fail-*open*) without ever
+  reading stdin. Fixed with a `realpathSync()`-based comparison; ported
+  the same fix back into research-loop's and dev-loop's own copies of
+  this file too (see those repos' `CHANGELOG.md`, 2026-09-17), since
+  both had the identical latent bug, just not yet triggered there.
+- Tests: `scripts/redact.test.ts`, `scripts/check-secret-in-tool-
+  input.test.ts` -- this repo has no existing test tooling/`package.json`,
+  so these use Node's built-in `node:test` runner
+  (`node --experimental-strip-types --test scripts/*.test.ts`), no new
+  dependency added.
+
 ## 1.2.0
 
 - Added automatic **`repo:<slug>` labeling** (Step 2 detection, Step 11
