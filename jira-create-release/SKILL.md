@@ -1,6 +1,6 @@
 ---
 name: jira-create-release
-description: Create a Jira Release ticket for a fix version (e.g. "3.13.23-beta"), after hard-stop prereq checks, with derived and carried-forward fields filled from the previous release, assigned to the invoker and moved to Pending Approvals
+description: Create a Jira Release ticket for a fix version (e.g. "3.13.23-beta"), after hard-stop prereq checks, with derived and carried-forward fields filled from the previous release, assigned to the invoker and moved to Pending Approvals, then move the release's tickets to Deployed to STG
 argument-hint: for fix version <version>. previous release deploy was <jenkins url>
 ---
 
@@ -56,6 +56,7 @@ fix version. Changes from the normal flow:
   flag it; this is not an error in dev mode.
 - **Skip the CODE FREEZE transition by default**, since it starts the approver chain. Run it
   only if the arguments also say `with transition`.
+- **Skip Step 6b** (moving tickets to Deployed to STG). There are no tickets on a test version.
 - Everything else (PRD version lookup, previous release, defaults, carry-forward, link format,
   assignee) runs exactly as in a real run.
 - Print `DEV MODE: ticket/status checks skipped` as the first line of the Step 8 output.
@@ -105,7 +106,7 @@ Run all four (in dev mode, run only checks 3 and 4), report every offender, then
    means stop. Also run
    `project = <KEY> AND status in (<acceptedStatuses>) AND (fixVersion is EMPTY OR fixVersion != "<version>")`
    and list any hits as "ready but not on this version" (stop; the user decides whether
-   they belong).
+   they belong). Keep the key list from the first query; Step 6b uses it.
 2. **Statuses.** Every ticket on the version must be in `prereqs.acceptedStatuses`
    (config). Any other status fails; list key, summary and status.
 
@@ -217,6 +218,23 @@ need to be sent. After it runs, confirm the ticket's status is Pending Approvals
 If the transition is unavailable or fails, stop and report. The ticket already exists, so
 show its key and the exact error.
 
+### Step 6b: Move the release's tickets to Deployed to STG
+
+Skip this step in dev mode (a placeholder version has no tickets) and when Phase 1 found zero
+tickets. Otherwise use the key list from the Step 2 check 1 query; Phase 1 already confirmed
+every one is Ready for Release. Transition config is `ticketTransition` in the project config
+(`transitionId` 71). Match on the target status `Deployed to STG`, never the transition name,
+which is just `Deployed`. The transition has no screen, so send only `{ "id": "71" }`.
+
+1. **Canary.** Call `transitionJiraIssue` on the first key alone. The response includes the new
+   status: it must be `Deployed to STG`. If the call fails or the status is anything else, stop
+   here, report the error, and do not touch the other tickets.
+2. **The rest.** Transition all remaining keys together in one turn (they are independent).
+3. **Tally.** Count moved and failed. One failure does not stop the others. A ticket that no
+   longer offers the transition (already moved, or its status changed since Phase 1) counts as
+   failed with that reason. Do not retry automatically.
+4. Never transition a ticket that was not in the Phase 1 list.
+
 ### Step 7: Description
 
 Empty by default. If the user supplied free text, save it as the description, templated as:
@@ -240,6 +258,8 @@ templating pass can expand this; today it is a pass-through.)
 📋 Defaults: Release Type = Code, Development Team(s) = Creative Business Unit III
 📋 Carry-forward (provisional, from <PREV-KEY>): <field: value, ...>
 🏷️ Labeled: jira-create-release:<VERSION>
+🚚 Tickets moved to Deployed to STG: <moved>/<n>   (dev mode: "skipped")
+❌ <KEY>: <error>   (one line per ticket that failed, omit when none)
 ⚠️ Manual still: Snyk counts + PDF, approvers, due date, scheduled start
 ⚠️ <any soft flags, e.g. Build Artifact not found>
 ```
@@ -248,6 +268,7 @@ templating pass can expand this; today it is a pass-through.)
 
 - Never create the ticket if any Step 2 check fails.
 - Never fill a `neverFill` field.
+- Step 6b moves only tickets from the Phase 1 list, canary first, and never retries on its own.
 - Never invent a URL. Missing Build Artifact is a flag, not a guess.
 - Every self-healing write to `configs/` carries `learnedFrom` and `learnedOn`.
 - Never paste secrets or tokens into a ticket field.

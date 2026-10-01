@@ -98,6 +98,12 @@ test("transition is CODE FREEZE id 21 into Pending Approvals and ready-for-relea
   assert.equal(config.titleTemplate, "Release {repo} {fixVersion}");
 });
 
+test("ticket transition goes from Ready for Release to Deployed to STG with id 71", () => {
+  assert.equal(config.ticketTransition.transitionId, "71");
+  assert.equal(config.ticketTransition.from, config.prereqs.acceptedStatuses[0]);
+  assert.equal(config.ticketTransition.to, "Deployed to STG");
+});
+
 test("VERSION matches the newest CHANGELOG heading", () => {
   const top = /^## (\d+\.\d+\.\d+)$/m.exec(read("../CHANGELOG.md"));
   assert.ok(top, "CHANGELOG has no version heading");

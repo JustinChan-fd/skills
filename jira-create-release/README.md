@@ -15,6 +15,10 @@ quick reference.
 - Project defaults to TARS. Add new projects in `configs/_projects.json` and
   `configs/<KEY>.json`.
 
+After the release ticket is in Pending Approvals, the skill moves every ticket on the fix
+version from Ready for Release to Deployed to STG (one ticket first as a canary, then the
+rest). Dev mode skips this.
+
 Hard stops (nothing is created): no tickets on the version, any ticket not in
 `prereqs.acceptedStatuses`, a Release ticket already exists for the version, or the
 containers on PRD disagree on version.

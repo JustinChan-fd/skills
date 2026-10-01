@@ -2,6 +2,17 @@
   "Release": {
     "issueTypeId": "10401",
     "titleTemplate": "Release {repo} {fixVersion}",
+    "ticketTransition": {
+      "from": "Ready for Release",
+      "to": "Deployed to STG",
+      "transitionId": "71",
+      "transitionName": "Deployed",
+      "verified": true,
+      "verifiedOn": "TARS-1503, 2026-10-01: 23/23 tickets moved to Deployed to STG with only {id: 71}.",
+      "note": "Applied to every ticket on the fix version after the release ticket reaches Pending Approvals. Id 71 is named 'Deployed' but targets Deployed to STG, so match on the target status. Read-only check 2026-10-01 on TARS-1443 and TARS-1463 (Bug) and TARS-886 (Story), all Ready for Release: identical transition, hasScreen false, isConditional false. Verified on TARS-1503: all 23 tickets moved with only {id: 71}. The skill moves one ticket first and stops if the result is not Deployed to STG.",
+      "learnedFrom": "TARS-1443",
+      "learnedOn": "2026-10-01"
+    },
     "prodVersionLookup": {
       "url": "http://prd-containerinfovip.prd-uswest2.aws/api/v1/byService?env=prd&filter=webtarsthree",
       "shape": "object keyed by container id; each value has .version, .health.status",
@@ -17,25 +28,74 @@
       "learnedOn": "2026-10-01"
     },
     "prereqs": {
-      "acceptedStatuses": ["Ready for Release"],
+      "acceptedStatuses": [
+        "Ready for Release"
+      ],
       "note": "The user called this gate 'Verified on INT', but no TARS ticket has ever held that status (JQL 'status was \"Verified on INT\"' returns 0). Real path is Deployed to INT -> Ready for Release (TARS-1455 changelog); 3.13.1-beta tickets also passed through Ready for Release before Deployed to PROD. Ready for Release is the gate.",
       "learnedFrom": "TARS-1455",
       "learnedOn": "2026-10-01"
     },
     "fields": {
-      "fixVersions": { "name": "Fix versions", "required": true, "fieldType": "versions", "source": "argument" },
-      "components": { "name": "Components", "fieldType": "components", "source": "config", "value": [{ "name": "webtarsthree" }] },
-      "customfield_14330": { "name": "Rollback Version", "fieldType": "version", "source": "previousReleasedVersion" },
-      "customfield_14332": { "name": "Previous Release Issue", "fieldType": "string", "source": "previousReleaseTicketUrl" },
-      "customfield_14154": { "name": "Build Artifact", "fieldType": "string", "source": "githubActionsRunUrl" },
-      "customfield_14331": { "name": "Previous Deploy Job", "fieldType": "string", "source": "userPromptedJenkinsUrl" },
-      "customfield_14151": { "name": "Release Rollback Plan", "fieldType": "string", "source": "userPromptedJenkinsUrl", "note": "User preference 2026-10-01: a single markdown link, [<rollback version>](<jenkins url>), so the version is the hyperlink. Verified on TARS-1497 that the textarea stores the markdown and renders it as an anchor." }
+      "fixVersions": {
+        "name": "Fix versions",
+        "required": true,
+        "fieldType": "versions",
+        "source": "argument"
+      },
+      "components": {
+        "name": "Components",
+        "fieldType": "components",
+        "source": "config",
+        "value": [
+          {
+            "name": "webtarsthree"
+          }
+        ]
+      },
+      "customfield_14330": {
+        "name": "Rollback Version",
+        "fieldType": "version",
+        "source": "previousReleasedVersion"
+      },
+      "customfield_14332": {
+        "name": "Previous Release Issue",
+        "fieldType": "string",
+        "source": "previousReleaseTicketUrl"
+      },
+      "customfield_14154": {
+        "name": "Build Artifact",
+        "fieldType": "string",
+        "source": "githubActionsRunUrl"
+      },
+      "customfield_14331": {
+        "name": "Previous Deploy Job",
+        "fieldType": "string",
+        "source": "userPromptedJenkinsUrl"
+      },
+      "customfield_14151": {
+        "name": "Release Rollback Plan",
+        "fieldType": "string",
+        "source": "userPromptedJenkinsUrl",
+        "note": "User preference 2026-10-01: a single markdown link, [<rollback version>](<jenkins url>), so the version is the hyperlink. Verified on TARS-1497 that the textarea stores the markdown and renders it as an anchor."
+      }
     },
     "defaults": {
       "note": "Confirmed by the user 2026-10-01. Applied as-is; never read from the previous ticket.",
       "fields": {
-        "customfield_14308": { "name": "Release Type", "value": { "value": "Code" } },
-        "customfield_14336": { "name": "Development Team(s)", "value": [{ "value": "Creative Business Unit III" }] }
+        "customfield_14308": {
+          "name": "Release Type",
+          "value": {
+            "value": "Code"
+          }
+        },
+        "customfield_14336": {
+          "name": "Development Team(s)",
+          "value": [
+            {
+              "value": "Creative Business Unit III"
+            }
+          ]
+        }
       },
       "learnedFrom": "user",
       "learnedOn": "2026-10-01"

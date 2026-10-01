@@ -3,6 +3,19 @@
 Versions follow the bump policy in `SKILL.md`'s "Versioning" section. Every ticket this skill
 creates carries the label `jira-create-release:<VERSION>`.
 
+## 1.2.0
+
+- New Step 6b: after the release ticket reaches Pending Approvals, every ticket on the fix
+  version is moved from Ready for Release to Deployed to STG (transition id 71, named
+  "Deployed"). The first ticket is moved alone as a canary and the run stops if its new status
+  is not Deployed to STG; the rest go together, failures are reported per ticket and never
+  retried automatically. Skipped in dev mode. The release ticket itself is unchanged.
+- Verified on TARS-1503 (first real run of 1.2.0): release ticket passes the baseline check with
+  0 mismatches, and all 23 tickets on 3.13.23-beta moved from Ready for Release to Deployed to
+  STG with only `{ "id": "71" }`. The user confirmed the canary step worked. The per-ticket
+  failure path and the stop-on-bad-canary path have not been exercised (nothing failed).
+  `ticketTransition.verified` is now true in the config.
+
 ## 1.1.0
 
 - Workflow is now two phases: Phase 1 (Steps 1-4) only reads and ends with every input known
