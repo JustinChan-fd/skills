@@ -52,6 +52,23 @@ Cleanup (the skill cannot delete): find the ticket with
 `labels = jira-create-release-dev`, delete it in the Jira UI, then delete the placeholder
 version from the TARS Releases page (needs project admin).
 
+## Baseline test
+
+Checks that a created ticket has the agreed baseline fields (title, labels, assignee, status,
+fixed values, derived links, human-owned fields left empty), and that the config, `VERSION`
+and `CHANGELOG.md` agree with it. Run from this directory, no install needed (Node 24+):
+
+```
+node --experimental-strip-types --test scripts/baseline.test.ts
+```
+
+- `scripts/baseline.ts`: `checkTicketFields(fields, { version, dev, transitioned })` returns a
+  list of mismatches; empty means the ticket matches the baseline.
+- `scripts/fixtures/TARS-1501.fields.json`: the golden ticket (first end-to-end run, v1.0.2).
+- To check a live ticket: `getJiraIssue` it, pass `fields` to `checkTicketFields`. Any change to
+  the baseline (a new default, a new never-fill field) means updating `baseline.ts`, the
+  fixture and `configs/TARS.json` together; the config-sync tests fail if they drift.
+
 ## Files
 
 | File | Purpose |

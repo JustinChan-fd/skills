@@ -77,6 +77,19 @@ Do not copy any of them from the previous ticket.
 
 ## Workflow
 
+The run has two phases. **Phase 1 (Steps 1-4) only reads.** It gathers every value and runs
+every check, and ends with either all inputs known or a stop. **Phase 2 (Steps 5-8) writes.**
+Do not call `createJiraIssue` until Phase 1 has finished with every input known and no check
+failed. Every stop listed in Phase 1 happens before any write, so a stopped run leaves nothing
+behind.
+
+**Batch Phase 1.** The reads in Steps 1-3 do not depend on each other, so issue them together
+in one turn: the version-exists check, the Step 2 JQL checks, the PRD lookup, the tag and run
+lookup, and the previous-release query. The previous-release query needs the live version, so
+it goes in the next turn after the PRD lookup returns. Evaluate all results after they come
+back, then apply the stops. A failed check does not cancel reads already sent; that costs
+nothing because Phase 1 writes nothing.
+
 ### Step 1: Resolve project and version
 
 Look up the project in `configs/_projects.json` by key or alias. Load `configs/<KEY>.json`
@@ -114,8 +127,9 @@ Do not ask the user anything before these pass.
   - Exactly one distinct version: that is the live version.
   - More than one (a deploy is mid-flight) or any container not `passing`: stop and tell the
     user; do not pick one.
-  - Unreachable (timeout, non-200, bad JSON): fall back to the newest Release ticket whose
-    fix version is released, and add "PRD version unverified" to the end-summary flags.
+  - Unreachable (timeout, non-200, bad JSON): do not guess. Ask the user which version is live
+    on PRD (one question, batched with any other gap) and use their answer. If they cannot say,
+    stop.
 - **Previous release ticket** (query it fresh every run; do not reuse an earlier run's result)
   = the Release ticket for the live version:
   `project = <KEY> AND issuetype = Release AND fixVersion = "<live version>" ORDER BY created DESC`,
@@ -125,16 +139,21 @@ Do not ask the user anything before these pass.
   Do NOT use "most recent Release ticket": builds can run ahead of what is deployed.
 - **Rollback Version** (`customfield_14330`): the live version from the lookup above (its Jira
   version object, matched by exact name).
-- **Build Artifact** (`customfield_14154`): search runs of the workflow file
-  `webtarsthree-build-deploy.yml` (`gh run list --repo <githubRepo> --workflow webtarsthree-build-deploy.yml --limit 100`),
-  on ANY branch, not just master. For each run, `gh run view <id> --json jobs` and look at the
-  job named `Update Hiera Versions / Update webtarsthree → <X> in hiera-versions`. It matches
-  when `<X>` equals the fix version exactly, or equals `<branch>-<version>` (branch builds are
-  prefixed, e.g. `TARS-1474-implement-dd-trace-3.13.15-beta`). Never substring-match: `3.13.1-beta`
-  must not hit `3.13.11-beta`. If several runs match (a version can be built twice), take the
-  newest and list the others in the end-summary flags. URL form:
-  `https://github.com/<githubRepo>/actions/runs/<id>`. If none matches, leave it empty and flag
-  it; do not guess.
+- **Build Artifact** (`customfield_14154`): resolve the version's git tag to a commit, then find
+  the workflow run for that commit. Two calls, no scanning:
+  1. `gh api repos/<githubRepo>/git/ref/tags/v<version> --jq '.object.type + " " + .object.sha'`.
+     If the type is `tag` (an annotated tag), dereference it:
+     `gh api repos/<githubRepo>/git/tags/<sha> --jq .object.sha`. The result is the commit sha.
+  2. `gh run list --repo <githubRepo> --workflow webtarsthree-build-deploy.yml --commit <commit sha> --json databaseId,headBranch,conclusion,createdAt`.
+     Take the newest run; if there are several, list the others in the end-summary flags.
+     URL form: `https://github.com/<githubRepo>/actions/runs/<id>`.
+  The tag is exact, so `3.13.1-beta` can never match `3.13.11-beta`. Verified 2026-10-01: both
+  `v3.13.23-beta` and `v3.13.1-beta` resolve to one master run. Measured about 3 seconds versus
+  about 2 seconds per run for the old scan.
+  Fallback only if step 1 returns 404 (no tag, e.g. a branch build or a placeholder version):
+  scan `gh run list --limit 100` and match the `Update Hiera Versions / Update webtarsthree → <X> in hiera-versions`
+  job name where `<X>` equals the version exactly or `<branch>-<version>`, never a substring.
+  If nothing matches, leave Build Artifact empty and flag it; do not guess.
 - **Defaults**: apply `defaults.fields` from the config as-is (Release Type = Code,
   Development Team(s) = Creative Business Unit III).
 - **Carry-forward**: read each field in `carryForward.fields` from the previous release
@@ -157,7 +176,9 @@ are the safeguard, and Step 8 reports everything that was created. Go straight t
 every input is known. Stop before creating only if a required input is still missing after the
 gap question, or a Step 2 check failed.
 
-### Step 5: Create
+**End of Phase 1.** Nothing has been written up to here.
+
+### Step 5: Create (Phase 2 starts: this and the steps after it write)
 
 `createJiraIssue` with `projectKey`, `issueTypeName: "Release"`, the title, `fixVersions`,
 `components`, `labels` (`jira-create-release:<VERSION>` read from this skill's `VERSION` file,
