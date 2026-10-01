@@ -1,0 +1,97 @@
+{
+  "Release": {
+    "issueTypeId": "10401",
+    "titleTemplate": "Release {repo} {fixVersion}",
+    "prodVersionLookup": {
+      "url": "http://prd-containerinfovip.prd-uswest2.aws/api/v1/byService?env=prd&filter=webtarsthree",
+      "shape": "object keyed by container id; each value has .version, .health.status",
+      "note": "Source of truth for what is live on PRD. Confirmed 2026-10-01: 4 containers, all 3.13.1-beta, all passing. Reachable from the user's machine without auth (likely needs the corporate network).",
+      "learnedFrom": "user",
+      "learnedOn": "2026-10-01"
+    },
+    "initialStatus": {
+      "name": "On-Hold",
+      "id": "10046",
+      "note": "Confirmed on TARS-1497: a new Release ticket lands in On-Hold (id 10046). Also offers 'Ready to Deploy to STG' (id 341), which this skill never uses.",
+      "learnedFrom": "TARS-1497",
+      "learnedOn": "2026-10-01"
+    },
+    "prereqs": {
+      "acceptedStatuses": ["Ready for Release"],
+      "note": "The user called this gate 'Verified on INT', but no TARS ticket has ever held that status (JQL 'status was \"Verified on INT\"' returns 0). Real path is Deployed to INT -> Ready for Release (TARS-1455 changelog); 3.13.1-beta tickets also passed through Ready for Release before Deployed to PROD. Ready for Release is the gate.",
+      "learnedFrom": "TARS-1455",
+      "learnedOn": "2026-10-01"
+    },
+    "fields": {
+      "fixVersions": { "name": "Fix versions", "required": true, "fieldType": "versions", "source": "argument" },
+      "components": { "name": "Components", "fieldType": "components", "source": "config", "value": [{ "name": "webtarsthree" }] },
+      "customfield_14330": { "name": "Rollback Version", "fieldType": "version", "source": "previousReleasedVersion" },
+      "customfield_14332": { "name": "Previous Release Issue", "fieldType": "string", "source": "previousReleaseTicketUrl" },
+      "customfield_14154": { "name": "Build Artifact", "fieldType": "string", "source": "githubActionsRunUrl" },
+      "customfield_14331": { "name": "Previous Deploy Job", "fieldType": "string", "source": "userPromptedJenkinsUrl" },
+      "customfield_14151": { "name": "Release Rollback Plan", "fieldType": "string", "source": "userPromptedJenkinsUrl", "note": "User preference 2026-10-01: a single markdown link, [<rollback version>](<jenkins url>), so the version is the hyperlink. Verified on TARS-1497 that the textarea stores the markdown and renders it as an anchor." }
+    },
+    "defaults": {
+      "note": "Confirmed by the user 2026-10-01. Applied as-is; never read from the previous ticket.",
+      "fields": {
+        "customfield_14308": { "name": "Release Type", "value": { "value": "Code" } },
+        "customfield_14336": { "name": "Development Team(s)", "value": [{ "value": "Creative Business Unit III" }] }
+      },
+      "learnedFrom": "user",
+      "learnedOn": "2026-10-01"
+    },
+    "carryForward": {
+      "note": "Values the user has not confirmed yet, copied from the previous Release ticket at runtime (TARS-1445 had Opex / NA / SRE Support). Treat as provisional and show them in the confirmation summary. Only fields set at create time belong here: a field that appears in the changelog as set by an approver (Tech Lead, CAB, QA) is manual and must NOT be listed.",
+      "fields": {
+        "customfield_14543": "Capex/Opex",
+        "customfield_14585": "PII",
+        "customfield_14564": "SRE Classification"
+      },
+      "learnedFrom": "TARS-1445",
+      "learnedOn": "2026-10-01"
+    },
+    "neverFill": {
+      "note": "Deliberately left for a human. Do not copy from the previous ticket.",
+      "fields": {
+        "customfield_14573": "Snyk Scan Flaw Count: Critical",
+        "customfield_14574": "Snyk Scan Flaw Count: High",
+        "customfield_14575": "Snyk Scan Flaw Count: Medium",
+        "customfield_14576": "Snyk Scan Flaw Count: Low",
+        "customfield_14152": "QA Approver - STG",
+        "customfield_14147": "Tech Lead Approver",
+        "customfield_14146": "CAB Approver",
+        "customfield_14126": "Release Signoff",
+        "customfield_13504": "Covered Information Data Inventory",
+        "customfield_11110": "Scheduled Start Date",
+        "duedate": "Due date",
+        "labels": "cab_ovrd is added by CAB, not at create",
+        "customfield_12508": "Release Package (hidden legacy text, not on the visible screen)",
+        "customfield_11204": "Deployment Instructions (legacy wiki text)",
+        "customfield_12600": "QA signoff check points (legacy wiki text)"
+      },
+      "jiraFillsOnCreate": "Confirmed on TARS-1497: Release Package, Deployment Instructions and QA signoff check points were populated with the same legacy text although the skill sent nothing. Jira sets them as field defaults, so the skill neither copies nor clears them.",
+      "learnedFrom": "TARS-1445",
+      "learnedOn": "2026-10-01"
+    },
+    "transition": {
+      "to": "Pending Approvals",
+      "transitionId": "21",
+      "transitionName": "CODE FREEZE",
+      "hasScreen": true,
+      "isConditional": true,
+      "verified": true,
+      "verifiedOn": "TARS-1497, 2026-10-01: transitionJiraIssue with only {id: 21} succeeded, no screen fields needed.",
+      "screenFields": {
+        "fixVersions": "required; already set at create, no extra input needed",
+        "components": "optional; already set at create",
+        "customfield_14154": "Build Artifact, optional; already set at create",
+        "customfield_14151": "Release Rollback Plan, optional; already set at create",
+        "priority": "optional; leave unset"
+      },
+      "note": "The transition into Pending Approvals is named 'CODE FREEZE' (id 21), so always match on to.name, never on the transition name. Discovered on TARS-1497: it is conditional and has a screen, but every screen field is either already filled at create or optional. Verified on TARS-1497: a transition with only the id succeeds. If the transition fails or is unavailable, the skill stops and reports; the ticket already exists. DISCOVERY MODE applies only while transitionId is null.",
+      "learnedFrom": "TARS-1497",
+      "learnedOn": "2026-10-01"
+    },
+    "constraints": []
+  }
+}

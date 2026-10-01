@@ -1,0 +1,10 @@
+{
+  "TARS": {
+    "name": "TARS",
+    "aliases": ["webtarsthree", "tars3", "tars-3"],
+    "repo": "webtarsthree",
+    "githubRepo": "fandango/webtarsthree",
+    "learnedFrom": "TARS-1445",
+    "learnedOn": "2026-10-01"
+  }
+}
