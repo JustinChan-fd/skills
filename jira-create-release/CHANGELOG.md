@@ -3,6 +3,34 @@
 Versions follow the bump policy in `SKILL.md`'s "Versioning" section. Every ticket this skill
 creates carries the label `jira-create-release:<VERSION>`.
 
+## 1.3.0
+
+- Step 6b now runs `scripts/bulk-transition.ts`: pre-check (the transition must be offered to
+  every key and lead to the expected status), one canary moved alone through the REST API, one
+  `POST /rest/api/3/bulk/issues/transition` for the rest, task polling, then a direct read of
+  every ticket. One tool call replaces one `transitionJiraIssue` call per ticket. Measured
+  motive: the 1.2.0 run (TARS-1503) made 24 transition calls over 10 model requests and cost
+  $0.99, against $0.41 for the 1.1.0 run with no ticket moves.
+- Credentials come from `JIRA_EMAIL`, `JIRA_API_TOKEN`, `JIRA_BASE_URL` in the environment, else
+  the same `export` lines in `~/.zshrc`. With no credentials (exit 3) the skill falls back to the
+  per-ticket MCP loop, now told to send the remaining calls in one message.
+- `.gitignore` in the skills repo now ignores `.env`, `.env.*` and `*.token`.
+- 20 tests for the script against a fake Jira (canary stops, partial failure, timeout, paging,
+  credentials never in output).
+- Verified live before the script existed: `/myself`, the bulk GET, and a 23-ticket bulk submit
+  (Deployed to STG back to Ready for Release) that completed with 0 failures; the account has the
+  bulk-change permission.
+- Verified end to end on TARS-1504 (first real run of 1.3.0): the release ticket passes the
+  baseline check with 0 mismatches, and the script moved all 23 tickets to Deployed to STG (exit 0,
+  canary TARS-1482, task COMPLETE, 0 failed); every ticket was then read directly and is in
+  Deployed to STG. The run found the credentials through the `~/.zshrc` fallback, so it took the
+  script path, not the MCP loop.
+- Cost and time from the session transcript: $0.37, 8 requests, about 1 min 4 s, with 1
+  `transitionJiraIssue` call. Compare 1.2.0 (TARS-1503): $0.99, 11 requests, 24 transition calls,
+  and 1.1.0 (TARS-1502, no ticket moves): $0.41, 10 requests, 56 s.
+- Not exercised in a real run: the per-ticket failure report, the stop-on-bad-canary path, the
+  no-credentials MCP fallback, and whether the bulk request notifies anyone.
+
 ## 1.2.0
 
 - New Step 6b: after the release ticket reaches Pending Approvals, every ticket on the fix

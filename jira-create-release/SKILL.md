@@ -226,14 +226,41 @@ every one is Ready for Release. Transition config is `ticketTransition` in the p
 (`transitionId` 71). Match on the target status `Deployed to STG`, never the transition name,
 which is just `Deployed`. The transition has no screen, so send only `{ "id": "71" }`.
 
+**Preferred: one script call.** Run the bulk script once, passing the Phase 1 keys. It does the
+pre-check, the canary, one bulk request, the task polling and a direct read of every ticket, all
+in a single process, so this step costs one tool call instead of one per ticket:
+
+```
+node --experimental-strip-types ~/.claude/skills/jira-create-release/scripts/bulk-transition.ts \
+  --keys <KEY1,KEY2,...> --transition 71 --to "Deployed to STG"
+```
+
+It prints one JSON result (`moved`, `failed`, `canary`, `aborted`, `wrote`) and exits:
+`0` all moved, `1` some failed (list them), `2` aborted (pre-check or canary; `wrote` says whether
+anything changed), `3` no Jira credentials, `4` bad arguments. Credentials come from
+`JIRA_EMAIL`, `JIRA_API_TOKEN` and `JIRA_BASE_URL` (environment, else `~/.zshrc`). Never print
+them. Do not pass `--notify`.
+
+- Exit `0` or `1`: use `moved` and `failed` for the Step 8 tally. Do not retry failures.
+- Exit `2`: stop and report `aborted`. Do not fall back to the per-ticket loop: the reason
+  (transition not offered, bad canary status) applies to it too.
+- Exit `3`: no credentials, so use the fallback below.
+- Exit `4`: fix the arguments and run it again.
+
+**Fallback (no credentials): per-ticket MCP calls.**
 1. **Canary.** Call `transitionJiraIssue` on the first key alone. The response includes the new
    status: it must be `Deployed to STG`. If the call fails or the status is anything else, stop
    here, report the error, and do not touch the other tickets.
-2. **The rest.** Transition all remaining keys together in one turn (they are independent).
+2. **The rest.** Issue every remaining `transitionJiraIssue` call in a single message, as
+   parallel tool calls, not one per turn. This is the expensive path: TARS-1503 made 24 calls
+   over 10 model requests and cost $0.99 against $0.41 for a run with no ticket moves.
 3. **Tally.** Count moved and failed. One failure does not stop the others. A ticket that no
    longer offers the transition (already moved, or its status changed since Phase 1) counts as
    failed with that reason. Do not retry automatically.
-4. Never transition a ticket that was not in the Phase 1 list.
+
+Either way, never transition a ticket that was not in the Phase 1 list, and do not use a search
+to confirm the result: search lags behind writes (TARS-1503 showed 16 of 23 right after a bulk
+write). The script reads each ticket directly.
 
 ### Step 7: Description
 
@@ -269,6 +296,7 @@ templating pass can expand this; today it is a pass-through.)
 - Never create the ticket if any Step 2 check fails.
 - Never fill a `neverFill` field.
 - Step 6b moves only tickets from the Phase 1 list, canary first, and never retries on its own.
+- Never print, log or write `JIRA_API_TOKEN`, `JIRA_EMAIL` or the contents of `~/.zshrc`.
 - Never invent a URL. Missing Build Artifact is a flag, not a guess.
 - Every self-healing write to `configs/` carries `learnedFrom` and `learnedOn`.
 - Never paste secrets or tokens into a ticket field.

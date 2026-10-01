@@ -10,3 +10,8 @@ node_modules/
 # only catch stray local scratch — there is no in-repo log store to protect.
 *.log
 *.state
+
+# Local credentials and tokens: keep them in the environment, never in the repo.
+.env
+.env.*
+*.token

@@ -73,6 +73,23 @@ node --experimental-strip-types --test scripts/baseline.test.ts
   the baseline (a new default, a new never-fill field) means updating `baseline.ts`, the
   fixture and `configs/TARS.json` together; the config-sync tests fail if they drift.
 
+## Bulk ticket moves
+
+Step 6b moves the release's tickets with `scripts/bulk-transition.ts` (one process: pre-check,
+canary, one bulk request, poll, verify). It needs `JIRA_EMAIL`, `JIRA_API_TOKEN` and
+`JIRA_BASE_URL` in the environment or as `export` lines in `~/.zshrc`. Without them it exits 3
+and the skill falls back to per-ticket MCP calls. Create a token at
+https://id.atlassian.com/manage-profile/security/api-tokens. The account needs the Jira
+"Global bulk change" permission (confirmed for this account).
+
+```
+node --experimental-strip-types scripts/bulk-transition.ts --keys TARS-1,TARS-2 --transition 71 --to "Deployed to STG" --dry-run
+node --experimental-strip-types --test scripts/bulk-transition.test.ts
+```
+
+`--dry-run` runs only the read-only pre-check. Exit codes: 0 all moved, 1 some failed, 2 aborted,
+3 no credentials, 4 bad arguments.
+
 ## Files
 
 | File | Purpose |
@@ -80,6 +97,7 @@ node --experimental-strip-types --test scripts/baseline.test.ts
 | `SKILL.md` | Workflow and guardrails |
 | `configs/_projects.json` | Project key, aliases, repo name, GitHub repo |
 | `configs/TARS.json` | Field ids, defaults, carry-forward, never-fill list, transition id, PRD version URL |
+| `scripts/bulk-transition.ts`, `.test.ts` | Bulk ticket mover and its fake-Jira tests |
 | `VERSION`, `CHANGELOG.md` | Skill version and history. Tickets get the label `jira-create-release:<VERSION>`; find them with `labels = "jira-create-release:1.0.0"` (JQL has no wildcard match on labels, so query one exact version at a time, or `labels in ("jira-create-release:1.0.0", "jira-create-release:1.1.0")`). Bump both files together on every edit. |
 
 ## Manual steps the skill does not do
