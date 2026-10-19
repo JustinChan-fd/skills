@@ -3,6 +3,23 @@
 All notable changes to this skill are recorded here. Versions follow the
 bump policy in `SKILL.md`'s "Versioning" section (patch/minor/major).
 
+## 1.3.0
+
+- New **Spike** issue type: Step 1 routing rule 0 (research / go-no-go
+  deliverable -> Spike) and `templates/Spike.md`. The first Acceptance
+  Criteria bullet, "Create a page under {spikeParentPage}", is filled from a
+  new per-project config key `Spike.spikeParentPage` and omitted when a
+  project has none. TARS sets it to the TARS-3 Research Tech Spikes
+  Confluence page. Long research context goes in a ticket comment, not the
+  description.
+  Learned from TARS-1532.
+
+## 1.2.2
+
+- Step 1 routing now prefers **Story** over **Tech Story** for internal
+  refactors/tech-debt code changes; Tech Story is used only when the user
+  explicitly asks for it.
+
 ## 1.2.1
 
 - Added code-level secret-scanning to this skill's three Jira write calls

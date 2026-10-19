@@ -23,12 +23,94 @@
       },
       {
         "type": "customReferencesSection",
-        "note": "SUPERSEDED 2026-09-16: this was originally a one-off MC-specific ask (catalog-ui-management wanted a '### References' section linking the API docs tag page at https://int-catalog-svc-management.mta.fand.co/docs#tag/<tag> plus a source-of-truth Confluence page). '### References' is now a standard section in every issue-type template (see templates/*.md), so this is no longer MC-specific — kept here only as a record of MC's own typical References content (that API docs tag page pattern) for future MC tickets.",
+        "note": "SUPERSEDED 2026-09-16: this was originally a one-off MC-specific ask (catalog-ui-management wanted a '### References' section linking the API docs tag page at https://int-catalog-svc-management.mta.fand.co/docs#tag/<tag> plus a source-of-truth Confluence page). '### References' is now a standard section in every issue-type template (see templates/*.md), so this is no longer MC-specific \u2014 kept here only as a record of MC's own typical References content (that API docs tag page pattern) for future MC tickets.",
         "learnedFrom": "MC-1335-visibility-batch",
         "learnedOn": "2026-09-16"
       }
     ],
     "learnedFrom": "MC-1335-visibility-batch",
     "learnedOn": "2026-09-16"
+  },
+  "Bug": {
+    "fields": {
+      "customfield_10838": {
+        "name": "Steps to Reproduce",
+        "required": true,
+        "fieldType": "adf",
+        "note": "Metadata reports textarea but accepts ADF doc content (same as CR)",
+        "learnedFrom": "MC-1427",
+        "learnedOn": "2026-10-19"
+      },
+      "customfield_14239": {
+        "name": "Method of Testing",
+        "required": true,
+        "fieldType": "select",
+        "allowedValues": [
+          {
+            "id": "15618",
+            "value": "Manual"
+          },
+          {
+            "id": "15619",
+            "value": "Automation"
+          },
+          {
+            "id": "15620",
+            "value": "Known Issue"
+          }
+        ],
+        "learnedFrom": "MC-1427",
+        "learnedOn": "2026-10-19"
+      },
+      "customfield_14627": {
+        "name": "Environment(s) Reported",
+        "required": true,
+        "fieldType": "multiselect",
+        "allowedValues": [
+          {
+            "id": "16948",
+            "value": "INT"
+          },
+          {
+            "id": "16949",
+            "value": "STG"
+          },
+          {
+            "id": "16950",
+            "value": "PROD"
+          },
+          {
+            "id": "16951",
+            "value": "DARK"
+          },
+          {
+            "id": "16952",
+            "value": "DEV"
+          },
+          {
+            "id": "16953",
+            "value": "QA"
+          }
+        ],
+        "learnedFrom": "MC-1427",
+        "learnedOn": "2026-10-19"
+      }
+    },
+    "constraints": [
+      {
+        "type": "parentOptional",
+        "note": "Parent not required by create-metadata; set the Epic when the user names one (MC-1427 used MC-1393).",
+        "learnedFrom": "MC-1427",
+        "learnedOn": "2026-10-19"
+      },
+      {
+        "type": "sprintField",
+        "note": "Sprint is customfield_10506; pass the numeric sprint id (e.g. 21083) in additional_fields to put a new ticket in a sprint. Read it from a sibling ticket (the user's current ticket) rather than guessing.",
+        "learnedFrom": "MC-1427",
+        "learnedOn": "2026-10-19"
+      }
+    ],
+    "learnedFrom": "MC-1427",
+    "learnedOn": "2026-10-19"
   }
 }

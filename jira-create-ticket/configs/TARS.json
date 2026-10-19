@@ -74,6 +74,15 @@
     "learnedFrom": "TARS-1398",
     "learnedOn": "2026-09-08"
   },
+  "Spike": {
+    "issueTypeId": "11317",
+    "spikeParentPage": "https://fandango.atlassian.net/wiki/spaces/TARS/pages/5432868887/TARS-3+-+Research+Tech+Spikes",
+    "fields": {},
+    "constraints": [],
+    "note": "getJiraIssueTypeMetaWithFields (issueTypeId 11317) surfaced only issuetype/project/summary/reporter as required. Created with parent epic set (no rejection observed, but parent was supplied so parentRequired is unverified either way). Description authored in markdown from templates/Spike.md; its first AC bullet is 'Create a page under {spikeParentPage}' (per user, 2026-10-19). Long research context goes in a comment, not the description.",
+    "learnedFrom": "TARS-1532",
+    "learnedOn": "2026-10-19"
+  },
   "Internal Package Software": {
     "issueTypeId": "11513",
     "fields": {},

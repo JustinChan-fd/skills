@@ -1,0 +1,22 @@
+{
+  "Task": {
+    "fields": {
+      "customfield_10506": {
+        "name": "Sprint",
+        "required": false,
+        "fieldType": "sprint",
+        "note": "Pass the numeric sprint id. 'Sprint 21' matches many boards; MC team board is 3182 (MC 2025 Sprint 21 = 21083).",
+        "learnedFrom": "STRT-64",
+        "learnedOn": "2026-10-02"
+      }
+    },
+    "constraints": [
+      {
+        "type": "parentOptional",
+        "note": "Parent is an Epic (e.g. STRT-64). STRT is an Initiative project; no required custom fields on Task.",
+        "learnedFrom": "STRT-64",
+        "learnedOn": "2026-10-02"
+      }
+    ]
+  }
+}

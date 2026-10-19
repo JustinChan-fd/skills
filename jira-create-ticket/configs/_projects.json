@@ -1,34 +1,72 @@
 {
   "CR": {
     "name": "RT Critic Ratings Service",
-    "aliases": ["critics service", "critic ratings", "rt critics", "critics"],
+    "aliases": [
+      "critics service",
+      "critic ratings",
+      "rt critics",
+      "critics"
+    ],
     "learnedFrom": "CR-1012",
     "learnedOn": "2026-08-27"
   },
   "TARS": {
     "name": "TARS",
-    "aliases": ["webtarsthree", "tars3", "tars-3"],
-    "repos": ["webtarsthree"],
+    "aliases": [
+      "webtarsthree",
+      "tars3",
+      "tars-3"
+    ],
+    "repos": [
+      "webtarsthree"
+    ],
     "learnedFrom": "TARS-1414",
     "learnedOn": "2026-08-27"
   },
   "UR": {
     "name": "RT User Ratings Service",
-    "aliases": ["user ratings", "user ratings service", "rt user ratings"],
+    "aliases": [
+      "user ratings",
+      "user ratings service",
+      "rt user ratings"
+    ],
     "learnedFrom": "UR-1166",
     "learnedOn": "2026-08-27"
   },
   "MC": {
     "name": "Media Catalog",
-    "aliases": ["media catalog", "catalog-ui-public", "catalog ui public", "catalog-ui-management", "catalog ui management"],
-    "repos": ["catalog-ui-management", "catalog-ui-public"],
+    "aliases": [
+      "media catalog",
+      "catalog-ui-public",
+      "catalog ui public",
+      "catalog-ui-management",
+      "catalog ui management"
+    ],
+    "repos": [
+      "catalog-ui-management",
+      "catalog-ui-public"
+    ],
     "learnedFrom": "MC-1230",
     "learnedOn": "2026-09-02"
   },
   "CM": {
     "name": "Change Management",
-    "aliases": ["change management"],
+    "aliases": [
+      "change management"
+    ],
     "learnedFrom": "CM-43771",
     "learnedOn": "2026-09-16"
+  },
+  "STRT": {
+    "name": "Strata",
+    "aliases": [
+      "strata",
+      "strt"
+    ],
+    "repos": [
+      "catalog-ui-management"
+    ],
+    "learnedFrom": "STRT-64",
+    "learnedOn": "2026-10-02"
   }
 }

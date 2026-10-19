@@ -97,6 +97,12 @@ Extract from the prompt:
 - **Issue type** — explicit ("bug", "story", "task", "ISP"/"internal package") or
   inferred from context. Work through these in order — the first rule that
   applies wins:
+  0. **Research to answer a question / reach a go-no-go decision**, where the
+     deliverable is a written finding rather than shipped code ("spike",
+     "research whether…", "investigate and decide") → **Spike**. Uses
+     `templates/Spike.md`, whose first AC bullet ("Create a page under …")
+     is filled from the project config's `Spike.spikeParentPage`, and
+     omitted when the project has none.
   1. **Not a code change at all** (docs, Jira/Confluence housekeeping, a manual
      config toggle in a vendor UI, renaming a ticket, etc.) → **Task**. Task is
      reserved for non-code changes; if a diff/PR is involved, it's not a Task.
@@ -132,22 +138,21 @@ Extract from the prompt:
      an internal data-model migration, extracting/consolidating a module,
      a dependency bump that touches app code paths rather than just a
      Dockerfile/lockfile pin, cross-cutting technical debt work) →
-     **Tech Story**, if the target project's Jira instance has that issue
-     type (check `configs/<PROJECT_KEY>.json`, or `getJiraProjectIssueTypesMetadata`
-     if not yet cached); fall back to **Story** if the project has no Tech
-     Story type. This is distinct from ISP (which never runs as deployed app
-     code at all) and from Task (reserved for non-code changes) — Tech Story
-     *does* run on PRD, it just isn't visible to an end user and isn't a bug
-     fix.
+     **Story** — prefer Story over Tech Story by default, even when the
+     project's Jira instance has a Tech Story type. Only use **Tech Story**
+     if the user explicitly asks for it. This is distinct from ISP (which
+     never runs as deployed app code at all) and from Task (reserved for
+     non-code changes) — it *does* run on PRD, it just isn't visible to an
+     end user and isn't a bug fix.
   5. **Everything else that deploys and runs as application code on PRD**: a
      crash/defect → **Bug**; a net-new user-facing capability → **Story**.
   Ask if genuinely ambiguous — in particular, a change that touches both a
   Dockerfile/package pin *and* the pipeline YAML in the same PR isn't
   automatically one type; ask whether the ticket's primary subject is the
   package or the pipeline. Likewise, a change that's both an internal
-  refactor *and* fixes a reported defect isn't automatically Tech Story —
+  refactor *and* fixes a reported defect isn't automatically Story —
   ask whether the ticket exists because of the defect (Bug) or the refactor
-  was the actual ask (Tech Story).
+  was the actual ask (Story).
 - **Link target + relationship** — a referenced ticket key and the relationship word
   ("blocks", "is blocked by", "relates to", "duplicates"). Map to Jira's link type
   names via `getIssueLinkTypes` if not already known:
