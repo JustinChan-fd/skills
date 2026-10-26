@@ -32,6 +32,18 @@ happens and what should exist/happen instead, not just "what needs
 to change." This framing is what lets a currency check (one grep,
 before any deeper investigation) confirm the gap still exists as
 described.
+
+EXPERIMENTAL (added 1.4.0, clarified 1.4.1 — Story only): optional grouped
+AC (parent bullet + indented children) and the Implementation Notes section
+below are a pattern tried first on TARS-1565 to cut down on AC bloat and
+separate testable conditions from implementation bookkeeping. Grouping is
+for human/agent scanning clarity only — it must never be used to make a
+ticket's real scope look smaller (parent-level bullets are what's counted
+toward ticket size). If this holds up in practice (humans find it easier
+to scan, no loss of per-condition testability, no count-gaming), port the
+same split to the other templates (Bug, Task, TechStory, Spike,
+InternalPackageSoftware) and remove this note. If it doesn't hold up,
+revert Story.md to flat AC bullets and drop Implementation Notes.
 -->
 
 ### Overview
@@ -48,12 +60,40 @@ ticket that surfaced it.}
 
 ### Acceptance Criteria
 <!--
-Plain bullet list, not numbered — conditions aren't sequential. Each bullet is one
-testable, unambiguous condition someone can check off with no extra context.
-No open questions, no "confirm with X" — those go in Overview or a separate ticket.
+Default to flat bullets, ordered from the ticket's core goal down to features
+that are nice-to-have enhancements not required for that goal to work. Group
+into a bold parent bullet + indented children ONLY when it genuinely aids
+scanning — several related conditions under one named feature, or a note the
+implementer should acknowledge while satisfying that one criterion. This is
+optional and for clarity, not a required shape — don't force grouping where
+flat bullets already read fine, and don't use grouping to make a ticket look
+smaller than it is (parent bullets are what get counted toward ticket size,
+not the ticket's total condition count).
+
+Still not numbered — conditions aren't sequential. Every parent/flat bullet
+must be independently testable with no extra context; an indented child may
+be its own testable sub-condition, or a plain acknowledgment note scoped to
+its parent — not itself a separately-counted AC either way. No open
+questions, no "confirm with X" — those go in Overview or a separate ticket.
+File names, test locations, and other implementation context that isn't
+itself a testable condition go in Implementation Notes below, not here —
+don't let bookkeeping masquerade as AC.
 -->
-- {testable condition}
-- {testable condition}
+- {testable condition} — flat bullet, the default shape
+- **{feature name}**: {testable condition} — grouped only because related
+  conditions follow
+  - {testable sub-condition of the same feature}
+  - {acknowledgment note scoped to this criterion, not independently testable}
+- **{enhancement feature name}** (does not block the above): {testable condition}
+
+### Implementation Notes
+<!--
+Omit this whole section if there's nothing here. Context for whoever implements —
+named files/modules, where tests should live, which existing component/hook to
+reuse — that isn't itself an independently-checkable condition, so it doesn't
+belong in Acceptance Criteria. Plain bullet list.
+-->
+- {file/module/test-location context}
 
 ### References
 <!--

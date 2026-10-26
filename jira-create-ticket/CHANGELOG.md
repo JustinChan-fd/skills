@@ -3,6 +3,48 @@
 All notable changes to this skill are recorded here. Versions follow the
 bump policy in `SKILL.md`'s "Versioning" section (patch/minor/major).
 
+## 1.4.1
+
+- **`templates/Story.md` only** (experimental — see the template's own note):
+  clarified that Acceptance Criteria grouping (parent bullet + indented
+  children) is **optional and for scanning clarity only**, never a required
+  or default shape — flat bullets stay the default, ordered core-goal-first
+  down to nice-to-have enhancements, and grouping is used only when it
+  genuinely aids scanning (several related conditions under one named
+  feature, or an acknowledgment note scoped to one criterion). Added an
+  explicit anti-count-gaming note: grouping must never be used to make a
+  ticket's real scope look smaller, since parent-level bullets — not the
+  ticket's total condition count — are what get counted toward ticket-size
+  judgments downstream.
+  Motivation: field feedback after trying the 1.4.0 grouped shape on real
+  tickets following TARS-1565 — grouping needed to read as a scanning aid,
+  not a way to compress how large a ticket looks. No change to `SKILL.md`
+  itself; this is a wording clarification of an existing experimental
+  feature, not a new capability or structural change.
+
+## 1.4.0
+
+- **`templates/Story.md` only** (experimental — see the template's own note):
+  Acceptance Criteria now groups conditions under one bold parent bullet per
+  main feature/capability, ordered core-goal-first down to enhancements that
+  don't block that goal, with related sub-conditions as indented children
+  instead of flat siblings. Added a new, optional **Implementation Notes**
+  section for file/module/test-location context that isn't itself an
+  independently-testable condition, so it no longer has to be jammed into AC
+  just to get written down anywhere.
+  Motivation: recent skill runs were producing Story tickets with large flat
+  AC lists mixing real testable conditions with implementation bookkeeping,
+  making it harder to scan for what's core vs. nice-to-have and harder for
+  `ticket-refine`'s verifier to judge "no open questions" per bullet.
+  No change to `SKILL.md` itself — Steps 6/8 already read templates verbatim
+  and place only supplied facts into whatever sections the template defines,
+  so the new section needed no orchestration change.
+  First tried on TARS-1565 (webtarsthree). If this holds up in practice, port
+  the same split to `Bug.md`/`Task.md`/`TechStory.md`/`Spike.md`/
+  `InternalPackageSoftware.md` and remove the experimental note from
+  `Story.md`; if not, revert `Story.md` to flat AC bullets and drop
+  Implementation Notes.
+
 ## 1.3.0
 
 - New **Spike** issue type: Step 1 routing rule 0 (research / go-no-go
