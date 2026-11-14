@@ -1,0 +1,75 @@
+{
+  "Task": {
+    "fields": {
+      "customfield_14237": {
+        "name": "Product Line",
+        "required": true,
+        "fieldType": "select",
+        "allowedValues": [
+          {
+            "id": "15604",
+            "value": "Fandango.com"
+          },
+          {
+            "id": "15606",
+            "value": "Rotten Tomatoes"
+          },
+          {
+            "id": "15607",
+            "value": "Flixster"
+          },
+          {
+            "id": "15608",
+            "value": "MovieTickets"
+          },
+          {
+            "id": "15609",
+            "value": "BI"
+          },
+          {
+            "id": "15610",
+            "value": "Corporate"
+          },
+          {
+            "id": "15611",
+            "value": "Operational"
+          },
+          {
+            "id": "15847",
+            "value": "Rewards"
+          },
+          {
+            "id": "16419",
+            "value": "Vudu"
+          },
+          {
+            "id": "16800",
+            "value": "Data Engineering"
+          },
+          {
+            "id": "20105",
+            "value": "Fandango1"
+          }
+        ],
+        "learnedFrom": "SRE-28793",
+        "learnedOn": "2026-10-20"
+      },
+      "duedate": {
+        "name": "Due date",
+        "required": true,
+        "fieldType": "date",
+        "note": "Format YYYY-MM-DD",
+        "learnedFrom": "SRE-28793",
+        "learnedOn": "2026-10-20"
+      }
+    },
+    "constraints": [
+      {
+        "type": "parentRequired",
+        "note": "Parent Epic (e.g. SRE-28446 'SRE Run the Business Q4') accepted at create; not verified whether it is enforced.",
+        "learnedFrom": "SRE-28793",
+        "learnedOn": "2026-10-20"
+      }
+    ]
+  }
+}

@@ -68,5 +68,16 @@
     ],
     "learnedFrom": "STRT-64",
     "learnedOn": "2026-10-02"
+  },
+  "SRE": {
+    "name": "Site Reliability Engineering",
+    "aliases": [
+      "sre"
+    ],
+    "repos": [
+      "webtarsthree"
+    ],
+    "learnedFrom": "SRE-28446",
+    "learnedOn": "2026-10-20"
   }
 }

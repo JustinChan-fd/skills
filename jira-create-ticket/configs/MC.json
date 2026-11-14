@@ -13,7 +13,24 @@
     "learnedOn": "2026-09-02"
   },
   "Story": {
-    "fields": {},
+    "fields": {
+      "customfield_10002": {
+        "name": "Story Points",
+        "required": false,
+        "fieldType": "number",
+        "note": "Team estimate field (Fibonacci). customfield_10016/10026 are not used in MC.",
+        "learnedFrom": "MC-1571",
+        "learnedOn": "2026-11-05"
+      },
+      "customfield_10506": {
+        "name": "Sprint",
+        "required": false,
+        "fieldType": "sprint",
+        "note": "Numeric sprint id on board 3182. Media Catalog 2025 Sprint 23 = 21223 (names alternate 2025/2026 prefixes).",
+        "learnedFrom": "MC-1571",
+        "learnedOn": "2026-11-05"
+      }
+    },
     "constraints": [
       {
         "type": "parentOptional",
