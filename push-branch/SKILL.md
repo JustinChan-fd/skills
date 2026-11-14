@@ -1,16 +1,28 @@
 ---
 name: push-branch
-description: Push branch to GitHub and create PR with auto-populated description
-model: anthropic.claude-haiku-4-5-20251001
+description: Push branch to GitHub and create or update a PR with auto-populated description. Runs unattended (no prompts); infers version bump and create-vs-update.
+model: anthropic.claude-haiku-5-5[1m]
 ---
 
 # Push Branch & Create PR
 
-Push your current branch to GitHub and automatically create a PR with populated title and description.
+Push your current branch to GitHub and automatically create a PR with populated title and description. **Runs unattended — never prompts.** Everything a prompt used to decide is inferred (see "Inference Rules").
 
 ## When to Use
 
-When you've completed work on a feature branch and are ready to push your branch and create a PR.
+When you've completed work on a feature branch and are ready to push your branch and create or update a PR. Used both by hand and by the dev-loop's `ticket-to-pr` skill (Phase 5).
+
+## Arguments
+
+All optional. With none, the skill infers everything from the branch and commit history.
+
+| Argument | Effect |
+|---|---|
+| `--title "<title>"` + a `Body:` block | **Content supplied.** The caller already reasoned about the PR; use the title and body **verbatim**. No title/body generation, no bump inference (the title's type prefix is the intended bump, which the version guard checks). Only mechanical work remains: version guard, push, create-or-edit, output. |
+| `--update-pr` | If a PR already exists, regenerate and replace its title and body. Without this (and without supplied content) an existing PR is left untouched. |
+| `--push-only` | Push the branch, skip all PR and Jira operations. |
+| `--new-pr` | If a PR already exists, close it with a "Superseded" comment and open a fresh one. Never inferred — explicit only. |
+| `--no-jira` | Skip Jira Cleanup. The dev-loop passes this because `loop-runner.ts` owns the Jira transition. |
 
 ## ⚠️ CRITICAL: Git Hooks Requirement
 
@@ -18,7 +30,7 @@ When you've completed work on a feature branch and are ready to push your branch
 
 **MANDATORY ORDER:**
 1. ✅ Push with `git push -u origin {branch}` FIRST (triggers pre-push hook)
-2. ✅ THEN use `gh pr create` (branch already exists on remote)
+2. ✅ THEN use `gh pr create` / `gh pr edit` (branch already exists on remote)
 
 **NEVER:**
 - ❌ Use `gh pr create` without pushing first
@@ -29,22 +41,68 @@ When you've completed work on a feature branch and are ready to push your branch
 
 ## Workflow
 
-1. **Verify state**: Check current branch, extract JIRA ticket (e.g., `MC-461-something` → `MC-461`), count commits ahead of target branch
-2. **Check for existing PR**: Run `gh pr list --head {branch}` to see if PR already exists
-3. **Ask all questions upfront**: Use a single AskUserQuestion with all questions at once (see "Upfront Questions" below) — NO further user prompts after this point
-4. **Push with hooks**: `git push -u origin {branch}` — WAIT FOR THIS TO COMPLETE SUCCESSFULLY
-5. **Verify push succeeded**: Check exit code $? and confirm branch is on remote
-6. **Generate PR content**: Create title and description from commit history/context, applying the version bump chosen in step 3
-7. **Create or update PR**: Execute the action chosen in step 3 with `gh pr create`
-8. **Jira Cleanup**: Only if a PR was created or updated — generate QA notes from the PR body, then transition ticket to Code Review with those QA notes (no user confirmation needed — see "Jira Cleanup" below)
-9. **Output**: Success message with PR URL and Jira status
+1. **Verify state**: Check current branch (refuse on main/master), extract JIRA ticket (e.g., `MC-461-something` → `MC-461`), count commits ahead of target branch
+2. **Check for existing PR**: `gh pr list --head {branch} --json number --jq '.[0].number'`
+3. **Resolve mode** from arguments + step 2 (see "Inference Rules"). If the bump can't be determined, STOP here — before pushing.
+3a. **Version guard** (see "Version guard"): when the intended bump is minor or major, make sure the branch name or a label will actually produce it. Renaming the branch is the first option and must happen here, before the first push.
+4. **Push with hooks**: `git push -u origin {branch}` — WAIT FOR THIS TO COMPLETE SUCCESSFULLY; on failure STOP
+5. **Verify push succeeded**: Check exit code and confirm branch is on remote
+6. **Get PR content**: use supplied title/body verbatim, or generate from commit history/context (skipped when leaving an existing PR untouched)
+7. **Create or update PR** per the resolved mode
+7a. **Bump label (MANDATORY for minor/major when the version guard applies)**: once a PR exists — newly created, updated, or an existing PR you only pushed to — ensure the `bump:minor` / `bump:major` label exists in the repo and is on the PR (`gh pr edit {n} --add-label bump:minor`). This runs **regardless of the branch name**. Verify with `gh pr view {n} --json labels --jq '.labels[].name'` and include the result in the output. Never add it to a patch PR.
+8. **Jira Cleanup**: Only if a PR was created or updated and `--no-jira` was not passed — generate QA notes from the PR body, then transition ticket to Code Review (no confirmation — see "Jira Cleanup" below)
+9. **Output**: Success message with PR URL, the bump line, and Jira status
+
+## Inference Rules
+
+Replaces the old upfront questions. No `AskUserQuestion` anywhere.
+
+### Version bump (only when generating the title yourself)
+
+Determine the commit type from, in order: the newest commit on the branch with a conventional prefix (`feat`, `fix`, `chore`, `docs`, `refactor`, …), then the branch name prefix.
+
+- `feat` → minor · a `!` after the type/scope or a `BREAKING CHANGE:` footer → major · anything else conventional → patch
+- **No conventional type found → STOP before pushing** with: `Cannot infer version bump: no conventional commit type on this branch. Re-run with --title "type(TICKET): description".` This is the only case where the skill halts on inference. Never silently default to patch.
+- Always print the result as one line, e.g. `Bump: patch (from fix(MC-461))`. Informational; it does not pause anything. When the version guard applies, the line states whether the pipeline will really honor it (see below).
+
+### Version guard
+
+Some repos version through `fandango/gha-reusable-workflows` `semantic-version-calculate.yml`. That workflow does **not** read the PR title first. In priority order it uses: a `bump:major|minor|patch` PR label, then the **source branch name** of the merge commit (`feat/*` or `feature/*` → minor, `fix/*` or `bugfix/*` → patch, `breaking/*` or `major/*` → major), then commit messages. In `webtarsthree` the commit-message step never yields a minor or major (its tag lookup misses the `-beta` tags), so a `feat(...)` title on a plain `TICKET-123-name` branch merges as a patch. Evidence: #552 and the other Okta waves.
+
+**Applies only when** `grep -lE 'semantic-version-calculate\.yml' .github/workflows/*.yml` finds a match. Otherwise skip the guard and the bump line stays as before.
+
+**Intended bump** is the one resolved above: `feat` → minor, `!` or `BREAKING CHANGE:` → major, anything else → patch. A patch needs no guard (it is what every other path falls back to). For minor and major, check the branch:
+
+| Intended | Branch is fine if it starts with |
+|---|---|
+| minor | `feat/` or `feature/` |
+| major | `breaking/` or `major/` |
+
+**The label is ALWAYS added for a minor or major bump, even when the branch name is already fine.** A correct branch name alone is not enough: a later rename or a squash merge can drop it, and the label is the guard the workflow reads first. So a fine branch skips step 1 below but never step 2. Print `Bump: minor (branch feat/…, label bump:minor)`.
+
+If the branch is not fine, fix it without prompting. Use both guards: the rename is first, and the label is added too once the PR exists, so either one is enough if the other is missed:
+
+1. **Rename the branch (first option).** Allowed only when all of these hold: no PR exists for the branch (step 2), the branch is not on the remote (`git ls-remote --heads origin {branch}` is empty), and it is not part of a stack (`gh stack view` fails, meaning no stack). Run `git branch -m {branch} {prefix}/{rest}`, where `{prefix}` is `feat` (minor) or `breaking` (major) and `{rest}` is the old name with any one leading `word/` segment removed. Then use the new name for the push and the PR. Print `Renamed branch {old} → {new} so the version workflow sees a {prefix}/ branch`. The ticket key is still found because it is searched for anywhere in the name, not only at the start.
+2. **Label (always, once the PR exists).** Whether or not step 1 renamed the branch, for a minor or major bump make sure the repo has the label (`gh label create bump:minor --color 0E8A16 --description "Minor version bump on merge"` if `gh label list` lacks it; `bump:major` likewise) and add it with `gh pr edit {n} --add-label bump:minor`. Create the PR first when there is none yet, then add the label. A repeat run is harmless: adding a label that is already there changes nothing. Print `Added label bump:minor` (and, when step 1 could not rename, `branch {name} cannot be renamed, so the label is the only guard`). The workflow reads this label first and it overrides the branch name, so never add `bump:minor` to a PR that should be a patch.
+3. **Warn only (last resort).** If neither works, print `Bump: patch — {type} title will NOT bump {minor|major}; add the bump label or use a feat/ branch`. Never print a minor or major bump line that the pipeline will not honor.
+
+For a stack, the version run reads the top PR's branch or label, so apply the guard to the top PR only.
+
+### Create vs. update
+
+| Situation | Action |
+|---|---|
+| No existing PR | Push, then `gh pr create` (unless `--push-only`) |
+| Existing PR, content supplied or `--update-pr` | Push, then `gh pr edit {n} --title … --body …` |
+| Existing PR, neither | Push only. Output `Pushed to existing PR #{n} (description unchanged)`. Title/body are never overwritten implicitly — a human may have edited them. |
+| Existing PR, `--new-pr` | Push, `gh pr close {n} --comment "Superseded by new PR"`, then `gh pr create` |
 
 ## Format Requirements
 
 ### PR Title
 `{type}({JIRA-TICKET}): {description}`
 
-The PR title becomes the squash commit message on merge, which determines the semantic version bump. See "Semantic Versioning" section below.
+The PR title is the conventional-commit summary people read in history and states the intended bump. In repos that use `semantic-version-calculate.yml` it does not by itself set the version: see "Semantic Versioning" and "Version guard".
 
 Examples:
 - `feat(MC-564): Node.js BFF server replacing nginx` → minor bump
@@ -54,6 +112,9 @@ Examples:
 ### PR Body
 
 ```markdown
+## Jira Ticket
+https://fandango.atlassian.net/browse/{JIRA-TICKET}
+
 ## Changes
 - {concise bullet 1}
 - {concise bullet 2}
@@ -64,24 +125,23 @@ Manual testing steps:
 
 1. Navigate to `/actual/route/url` (use real paths, not "Page Name")
 2. {action to perform}
-3. {expected result}
+3. Expected: {expected result}
 4. {edge case if relevant}
 ```
 
+The `## Jira Ticket` section is always first, linking to the ticket key extracted from the branch name. If no ticket key is found, omit it entirely. When content is supplied, the caller's body is used exactly as given — do not add, drop, or reorder sections.
+
 ## Semantic Versioning (IMPORTANT)
 
-The CD pipeline auto-bumps version based on the **merge commit message** on `main`. Since GitHub uses the PR title as the squash commit message, the PR title directly controls the version bump:
+Repos that call `gha-reusable-workflows` `semantic-version-calculate.yml` decide the bump on the merge to `master`/`main` in this order:
 
-- **Minor bump** (new feature): PR title must start with `feat(MC-XXX):` or `feat:`
-  - Example: `feat(MC-564): Node.js BFF server replacing nginx`
-- **Major bump** (breaking): PR title contains `!:` or `BREAKING CHANGE:`
-  - Example: `feat(MC-XXX)!: remove legacy API`
-- **Patch** (default): anything else (`fix:`, `chore:`, `docs:`, `refactor:`)
+1. **PR label** `bump:major`, `bump:minor` or `bump:patch` (checked first, wins over everything).
+2. **Source branch name** of the merge commit: `feat/*`, `feature/*` → minor · `fix/*`, `bugfix/*` → patch · `breaking/*`, `major/*` → major.
+3. **Commit messages**: `feat(...)` → minor, `!:` / `BREAKING CHANGE:` → major, otherwise patch. In `webtarsthree` this step does not work (its tag lookup misses the `-beta` tags and it scans the whole history), so it can only produce a patch.
 
-The version bump is collected in the upfront AskUserQuestion (see "Upfront Questions" below). Format the PR title based on the user's answer:
-- Minor: `feat(MC-XXX): description`
-- Patch: `fix(MC-XXX): description` or `chore(MC-XXX): description`
-- Major: `feat(MC-XXX)!: description`
+So the title states the intent, but the branch prefix or label delivers it. History: `feature/` branches with `fix(...)` or `chore(...)` titles bumped minor (3.10.0, 3.13.0); every `feat(...)` title on a plain `TICKET-123-name` branch bumped patch. Run the "Version guard" before pushing.
+
+Other repos that version differently (squash merge with title-based bumping) keep the old rule: the PR title's type prefix (`feat` → minor, `!:` / `BREAKING CHANGE:` → major, others → patch) is the bump.
 
 ## Critical Rules
 
@@ -95,95 +155,49 @@ The version bump is collected in the upfront AskUserQuestion (see "Upfront Quest
 - ✅ Use actual URLs: `/configuration/rating-classifications`
 - ❌ Not page names: "Rating Classifications Page"
 
+**Never write into the title/body:** absolute filesystem paths (leaks the home directory), raw env var values, `.env`/`.envrc` content, or any credential/token/key/password value. Repo-relative paths only; report presence/shape of secrets, never the value.
+
+**Always pass the title and body inline** (`--title "…" --body "$(cat <<'EOF' … EOF)"`), never `--body-file`. The dev-loop's `block-secret-comments.sh` hook scans the command string for secret-shaped content; a body read from a file would bypass it.
+
 ## Example Output
 
 ### Example 1: No existing PR
 
 ```
-[AskUserQuestion: version bump + confirm push & create PR — answered upfront]
-
+Bump: minor (from feat(MC-461))
 ✅ Pushed branch to origin/MC-461-refactor-api-client
-
 ✅ PR created successfully!
-
 🔗 https://github.com/your-org/catalog-ui-management/pull/123
 ```
 
-### Example 2: PR already exists
+### Example 1b: Version guard renames the branch (repo uses semantic-version-calculate.yml)
 
 ```
-[AskUserQuestion: version bump + PR action (existing PR #98) — answered upfront]
+Renamed branch TARS-1586-okta-auth-docs → feat/TARS-1586-okta-auth-docs so the version workflow sees a feat/ branch
+Bump: minor (branch feat/TARS-1586-okta-auth-docs, label bump:minor)
+✅ Pushed branch to origin/feat/TARS-1586-okta-auth-docs
+✅ PR created successfully!
+✅ Added label bump:minor (verified on PR)
+🔗 https://github.com/fandango/webtarsthree/pull/557
+```
 
+### Example 1c: Branch already fine (feature/…) — label is still added
+
+```
+Bump: minor (branch feature/TARS-1633-adjusted-score-critics, label bump:minor)
+✅ Pushed branch to origin/feature/TARS-1633-adjusted-score-critics
+✅ PR created successfully!
+✅ Added label bump:minor (verified on PR)
+🔗 https://github.com/fandango/webtarsthree/pull/584
+```
+
+### Example 2: PR already exists, nothing supplied
+
+```
+Bump: patch (from fix(MC-461))
 ✅ Pushed branch to origin/MC-461-refactor-api-client
-
-✅ Commits pushed to existing PR #98
-
+✅ Pushed to existing PR #98 (description unchanged)
 🔗 https://github.com/your-org/catalog-ui-management/pull/98
-```
-
-## Upfront Questions
-
-Before pushing or doing any work, ask **all** questions in a single AskUserQuestion call. No further user prompts after this point — execute the rest of the workflow unattended.
-
-The number of questions and their options depend on whether a PR already exists (checked silently in step 2).
-
-### Case 1: No existing PR
-
-```
-AskUserQuestion({
-  questions: [
-    {
-      question: "What version bump should this PR trigger?",
-      header: "Version bump",
-      multiSelect: false,
-      options: [
-        { label: "Patch (fix/chore)", description: "Bug fix or maintenance — PR title uses fix:/chore:" },
-        { label: "Minor (feat)", description: "New feature/capability — PR title uses feat:" },
-        { label: "Major (breaking)", description: "Breaking change — PR title uses feat!:" }
-      ]
-    },
-    {
-      question: "Proceed with push and PR creation?",
-      header: "Confirm",
-      multiSelect: false,
-      options: [
-        { label: "Yes, push and create PR", description: "Push branch (triggers hooks) then create PR" },
-        { label: "Push only, no PR", description: "Push branch but skip PR creation" },
-        { label: "Cancel", description: "Do nothing" }
-      ]
-    }
-  ]
-})
-```
-
-### Case 2: PR already exists
-
-```
-AskUserQuestion({
-  questions: [
-    {
-      question: "What version bump should this PR trigger?",
-      header: "Version bump",
-      multiSelect: false,
-      options: [
-        { label: "Patch (fix/chore)", description: "Bug fix or maintenance — PR title uses fix:/chore:" },
-        { label: "Minor (feat)", description: "New feature/capability — PR title uses feat:" },
-        { label: "Major (breaking)", description: "Breaking change — PR title uses feat!:" }
-      ]
-    },
-    {
-      question: "PR #{{number}} already exists. What would you like to do?",
-      header: "PR Action",
-      multiSelect: false,
-      options: [
-        { label: "Push to existing PR", description: "Push commits to existing PR #{{number}}" },
-        { label: "Create new PR", description: "Create a new pull request (closes existing PR #{{number}})" },
-        { label: "Push only, no PR change", description: "Push branch but skip PR operations" },
-        { label: "Cancel", description: "Do nothing" }
-      ]
-    }
-  ]
-})
 ```
 
 ## Implementation
@@ -198,7 +212,6 @@ EXISTING_PR=$(gh pr list --head {branch} --json number --jq '.[0].number')
 # CRITICAL: Use git push, NOT gh pr create --push
 git push -u origin {branch}
 
-# Verify push succeeded
 if [ $? -ne 0 ]; then
   echo "❌ Push failed (likely due to pre-push hook failure)"
   echo "Fix the issues above before creating PR"
@@ -208,61 +221,42 @@ fi
 echo "✅ Pushed branch to origin/{branch}"
 ```
 
-**Step 3: Generate PR content and show to user**
+**Step 3: Create or update, per "Create vs. update"**
 
-**Step 4: Present dynamic options based on PR existence** (see "Dynamic PR Options" above)
-
-**Step 5: Execute chosen action**
-
-### If "Yes, create PR" (no existing PR):
+New PR (branch already pushed, so `gh` only creates the PR record):
 ```bash
-# Branch already pushed in Step 2, so gh won't push again
-# This just creates the PR metadata on GitHub
-gh pr create --title "MC-461 - refactor API client" --body "$(cat <<'EOF'
+gh pr create --title "fix(MC-461): refactor API client" --body "$(cat <<'EOF'
+## Jira Ticket
+https://fandango.atlassian.net/browse/MC-461
+
 ## Changes
 - Bullet 1
 - Bullet 2
 
 ## QA Notes
 Manual testing steps:
+
 1. Step 1
-2. Step 2
+2. Expected: result
 EOF
 )"
 ```
 
-**Note:** Because we already pushed in Step 2, `gh pr create` will NOT push again - it only creates the PR record.
-
-### If "Yes, push to existing PR":
-Output: "✅ Commits pushed to existing PR #{number}"
-
-### If "Yes, create new PR" (with existing PR):
+Existing PR being updated:
 ```bash
-# Close existing PR first
-gh pr close {existing_pr_number} --comment "Superseded by new PR"
-
-# Create new PR
-gh pr create --title "MC-461 - refactor API client" --body "$(cat <<'EOF'
-## Changes
-- Bullet 1
-- Bullet 2
-
-## QA Notes
-Manual testing steps:
-1. Step 1
-2. Step 2
+gh pr edit {existing_pr_number} --title "..." --body "$(cat <<'EOF'
+...same body shape...
 EOF
 )"
 ```
 
-### If "No, not yet":
-Output: "✅ Branch pushed successfully. PR operations skipped."
+`--new-pr` only: `gh pr close {existing_pr_number} --comment "Superseded by new PR"` first, then `gh pr create` as above.
 
 ## Jira Cleanup
 
-Runs automatically after a PR is created or updated. No user confirmation needed. Two sub-steps: generate QA notes from the PR body, then transition the ticket to Code Review with those notes.
+Runs automatically after a PR is created or updated (unless `--no-jira`). No user confirmation needed. Two sub-steps: generate QA notes from the PR body, then transition the ticket to Code Review with those notes.
 
-**Skip entirely if:** push-only (no PR created/updated), no ticket key found in branch name, or PR creation failed.
+**Skip entirely if:** `--no-jira` was passed, push-only, existing PR left with description unchanged, no ticket key found in branch name, or PR creation failed.
 
 ### Sub-step A: Generate QA Notes from PR body
 
@@ -440,20 +434,22 @@ for (const subtask of subtasks) {
 ```
 _(No Jira cleanup runs — Jira Cleanup only triggers when a PR is created or updated.)_
 
+
 ## Guardrails
 
 - Refuses to run on main/master branches
-- **Asks ALL questions upfront in a single AskUserQuestion before any action** — no mid-flow prompts
+- **Never prompts.** No `AskUserQuestion`; the only halts are a failed push and an un-inferable version bump (both before/at push, with a clear message)
 - **ALWAYS uses `git push` first to trigger pre-push hooks** (tests, linting, build)
 - **Verifies push succeeded before proceeding to PR creation**
 - **NEVER uses `git push --no-verify` or any hook-bypass flags**
-- Detects existing PRs silently and includes relevant options in the upfront question
-- Automatically generates PR description (no copy/paste needed)
-- **Jira Cleanup runs only when a PR is created or updated** — generates QA notes from the PR body, then transitions ticket to Code Review; skipped entirely on push-only
-- Uses Haiku model (text generation/formatting task)
+- **Never overwrites an existing PR's title/body implicitly** — only with supplied content or `--update-pr`
+- **Never closes a PR implicitly** — only with `--new-pr`
+- **Always labels minor/major PRs** (`bump:minor` / `bump:major`) when the repo uses `semantic-version-calculate.yml` — even if the branch is already `feat/`/`feature/` — and verifies the label landed before reporting success
+- Supplied content is used verbatim; nothing is regenerated
+- Automatically generates PR description when no content is supplied (no copy/paste needed)
+- **Jira Cleanup runs only when a PR is created or updated and `--no-jira` is absent** — skipped entirely on push-only, on "existing PR, description unchanged", and when no ticket key is in the branch name
+- Uses Haiku model (mechanical work only; when a caller supplies content, all reasoning already happened upstream)
 - Outputs direct PR URL for immediate access
-- Outputs Jira ticket URL if transition succeeds
-- When creating new PR with existing one, explicitly closes old PR with comment
 - Jira errors don't block PR success output
 
 ## Common Mistakes to Avoid
