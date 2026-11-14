@@ -229,6 +229,45 @@ classification (see #3 above) — quote the directive comment(s) in full,
 since that's the actual scope decision the next research-loop pass will
 act on, not just a footnote.
 
+**Manual completion sub-classification (for ✅ Landed tickets)**
+
+A ticket can reach ✅ Landed (a PR exists) without ever having been fully
+carried by the automated loop. Check every landed ticket for this
+regardless of whether it looked like it landed cleanly:
+
+- **Detect it**: look for either (a) a `skill_version: "manual"` run line
+  for this ticket in either repo's `runs.jsonl` (see Step 2's note on
+  this), or (b) commits on the PR branch authored by a human — not part of
+  any logged `claude -p` run — after the PR was opened (`git log <branch>`
+  or the PR's commit list on GitHub).
+- **If found, categorize why** — don't leave it as an undifferentiated
+  "needed a human touch":
+  - **Scope change, human-directed** — the manual work exists because a
+    human changed or clarified the requirement *after* the loop had
+    already been handed a spec (a steering comment, a scope reframe, an AC
+    edit) — the loop was working against a target that moved out from
+    under it. This is not a pipeline defect: judge the loop's own output
+    against the spec/AC it actually had at hand-off (the `Refined Spec`
+    comment if research-loop ran, else the original ticket AC as it stood
+    when dev-loop claimed it) — never against the ticket's current text.
+    Cite the comment/changelog entry that made the change.
+  - **Agent capability gap** — the manual work exists because the loop's
+    output didn't satisfy the spec/AC it was actually given (a missed AC,
+    a bug, a verify-budget exhaustion on a real recurring failure). This
+    DOES count against the pipeline's autonomous-success rate — it's a
+    real signal the loop couldn't finish the job it was assigned.
+  - A ticket can have both (e.g. TARS-1399: two automated bounces on a real
+    bug — capability gap — followed by a human hand-fix once the loop's
+    verify budget was exhausted). Report both categories when both apply;
+    don't force a single label.
+- **Report it, don't fold it into cost/time**: exactly like Human gate
+  timing below, manual-completion sessions are effort outside
+  `runs.jsonl`'s cost accounting — never sum an estimated dollar figure for
+  a manual session into `cost_usd`, and never let a manually-completed
+  ticket's clean-looking loop `cost_usd`/time read as "this ticket was
+  fully autonomous." State it plainly as its own fact, e.g. "Manual
+  completion: Yes — capability gap, ~1 session."
+
 ## Step 2 — compute this sub-batch's KPIs
 
 Pull every `runs.jsonl` line (both repos) belonging to this sub-batch's
@@ -339,6 +378,16 @@ ticket keys. For each ticket compute, then roll up sub-batch totals/averages:
   other open gate). A ticket sitting open in review across multiple
   sub-batch runs is not a problem this skill flags or escalates — it's just
   reported, same as any other open gate, until it closes.
+- **Manual completion tracking**: for every ✅ Landed ticket flagged under
+  Step 1's manual completion sub-classification, record the reason
+  category (scope change / capability gap / both), the evidence (manual
+  run line and/or human-authored commits), and an approximate session
+  count (count distinct clusters of human-authored commits/comments, not
+  individual commits). Keep this figure entirely separate from
+  `cost_usd`/time totals — same rule as Human gate timing — since these
+  sessions have no `claude -p` usage report to sum. Do not guess a dollar
+  cost for a manual session; report "cost not captured," same as any other
+  run with no usage report.
 - **`red_confirmed` rate**: fraction of this sub-batch's dev-loop landed
   runs where `red_confirmed: true`.
 - **Outcome distribution**: count of tickets in each Step 1 classification,

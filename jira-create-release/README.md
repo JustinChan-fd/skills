@@ -90,6 +90,37 @@ node --experimental-strip-types --test scripts/bulk-transition.test.ts
 `--dry-run` runs only the read-only pre-check. Exit codes: 0 all moved, 1 some failed, 2 aborted,
 3 no credentials, 4 bad arguments.
 
+## Future enhancements
+
+### Snyk evidence: attach the official PDF and fill the four counts (not built; manual today)
+
+Today the Snyk counts (`customfield_14573` to `14576`), the Snyk PDF and all approver fields are
+left for a human. Idea, for when there is time:
+
+1. **The PDF stays a manual export.** The approvers' evidence is the Snyk dashboard "Issues Detail"
+   report (see the one on TARS-1445: org project `fandango/webtarsthree`, filters Issue Status: Open
+   and Project Origin: github-cloud-app). Checked 2026-10-01: Snyk's public REST API spec (GA 2026-03-25,
+   plus the beta and experimental versions) never mentions PDF, its export endpoint
+   (`POST /orgs/{org_id}/export`) only produces CSV and needs the "View Organization reports"
+   permission plus an org id, and the CLI (`snyk test`, `snyk code test`) outputs JSON or SARIF only.
+   A locally rendered PDF is NOT equivalent evidence and was ruled out. The user exports it by hand
+   and saves it to a known folder, for example `~/Downloads`.
+2. **A step after ticket creation attaches it.** Jira: `POST /rest/api/3/issue/{key}/attachments`,
+   multipart field `file`, header `X-Atlassian-Token: no-check`. The existing API token can do it
+   (the MCP tools cannot). Not yet called.
+3. **Check it is the right PDF before attaching.** `pdftotext` is installed. Confirm the text shows
+   project `fandango/webtarsthree`, today's report date and the expected severity counts; refuse
+   last week's report.
+4. **Fill the four counts from the PDF**, so the fields always match the evidence next to them.
+5. **Do not auto-fill from a local scan.** On 2026-10-01 `snyk test` on `v3.13.23-beta` was clean
+   (matches the dashboard's 0/0/0/0), but `snyk code test` returned 29 findings (13 DOM XSS, 16
+   notes) while the dashboard showed 0 after its ignores. The CLI cannot see dashboard ignores and
+   its note/warning levels do not map to Critical/High/Medium/Low, so the dashboard stays the
+   authority.
+
+Open questions: where the user saves the PDF, and whether it could instead be found as the newest
+Snyk PDF in a folder. Would be a minor version bump (new capability).
+
 ## Files
 
 | File | Purpose |

@@ -1,7 +1,7 @@
 ---
 name: review-pr-feedback
 description: Process unresolved PR review comments — triage, implement, test, resolve threads, post summary
-model: anthropic.claude-sonnet-4-6
+model: anthropic.claude-sonnet-5-5
 ---
 
 # Review PR Feedback
@@ -179,7 +179,7 @@ git commit -m "fix(MC-XXX): address PR review feedback
 - bullet per fix
 - bullet per fix
 
-Co-Authored-By: Claude Sonnet 4.5 <noreply@anthropic.com>"
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>"
 git push
 ```
 
