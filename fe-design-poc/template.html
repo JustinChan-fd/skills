@@ -1,0 +1,126 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{Feature}} (POC)</title>
+<!-- {{ICON_FONT}}: the repo's icon set from a CDN (e.g. bootstrap-icons@1.11.3), or delete -->
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css">
+<style>
+/* Tokens copied from the target repo. Cite each source file here:
+   {{TOKEN_SOURCES e.g. src/client/styles/_buttons.css, Header.css, <Page>.css}} */
+:root{
+  --header:#333; --link:#0066cc; --btn:#2563eb; --btn-h:#0056b3; --sel:#0d6efd; --sel-bg:#e3f2fd;
+  --line:#e0e0e0; --input:#ccc; --muted:#666; --ok:#28a745; --bad:#dc3545;
+  --tab-bg:#f0f0f0; --tab-on:#1a73e8; --page-bg:#ececec; --surface:#fff; --text:#222;
+  --mono:"SFMono-Regular",Consolas,"Liberation Mono",monospace;
+}
+/* {{DARK_MODE}}: include ONLY if the repo ships a dark theme pages actually use.
+   Copy its values; the Theme control below toggles data-theme on <html>.
+:root[data-theme=dark]{ --page-bg:#111418; --surface:#1b1f24; --text:#e6e6e6; --line:#2e343b; ... }
+*/
+*{box-sizing:border-box}
+html,body{background:var(--page-bg)}
+body{margin:0;font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;color:var(--text);font-size:14px;line-height:1.4}
+button,input,select{font-family:inherit}
+:focus-visible{outline:2px solid var(--sel);outline-offset:2px}
+[hidden]{display:none!important}
+.mono{font-family:var(--mono);font-size:12px}
+
+/* ---------- POC page chrome (not part of the app) ---------- */
+.page{max-width:1560px;margin:0 auto;padding:24px 20px 56px}
+.intro{margin-bottom:14px}
+.intro h1{font-size:22px;margin:0 0 6px}.intro h1 .ver{font-size:13px;font-weight:500;color:var(--muted);margin-left:6px}
+.intro h1 a{color:var(--link);text-decoration:none}.intro h1 a:hover{text-decoration:underline}
+.intro p{margin:0 0 8px;color:#444;max-width:68ch}
+.ctrl{display:flex;flex-wrap:wrap;gap:12px 30px;align-items:flex-start;margin-bottom:12px;background:var(--surface);border:1px solid var(--line);border-radius:8px;padding:10px 14px;position:sticky;top:0;z-index:50;box-shadow:0 2px 8px rgba(0,0,0,.06)}
+.ctrl .g{display:flex;flex-direction:column;gap:4px}
+.ctrl .gl{font-size:11.5px;color:var(--muted);font-weight:600}
+.ctrl .src{font-size:11px;color:var(--muted);font-weight:400}
+.seg2{display:inline-flex;background:var(--tab-bg);border-radius:999px;padding:3px;gap:2px;flex-wrap:wrap}
+.seg2 button{border:0;background:none;padding:4px 12px;border-radius:999px;font-size:12.5px;font-weight:500;color:#555;cursor:pointer;white-space:nowrap}
+.seg2 button:hover:not([aria-pressed=true]){color:var(--tab-on)}
+.seg2 button[aria-pressed=true]{background:var(--tab-on);color:#fff}
+.seg2 button small{opacity:.75;font-size:11px;margin-left:3px}
+.ctrl .reset{margin-left:auto;align-self:center}
+.framebox{overflow-x:auto;padding:2px 2px 10px}
+.framewrap{width:max-content;min-width:100%;display:flex;justify-content:center}
+.notes{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:14px;margin-top:16px}
+.card{background:var(--surface);border:1px solid var(--line);border-radius:8px;padding:12px 14px}
+.card h2{font-size:14px;margin:0 0 8px}
+.card ul{margin:0;padding:0;list-style:none;display:grid;gap:6px;font-size:13px;color:#444}
+.card li{display:flex;gap:8px}.card li>i{color:var(--tab-on);margin-top:2px;flex:none}
+.foot{font-size:12.5px;color:var(--muted);margin:14px 0 0}
+.foot a{color:var(--link)}
+
+/* ---------- app frame: resized by the Window control, children respond via @container ---------- */
+.frame{position:relative;width:var(--fw,1280px);height:var(--fh,780px);flex:none;background:var(--surface);border:1px solid #bbb;border-radius:6px;overflow:hidden;display:flex;flex-direction:column;box-shadow:0 8px 28px rgba(0,0,0,.14);container-type:inline-size;container-name:app}
+/* {{APP_CHROME}}: rebuild the repo's real header/nav/sidebar from its component CSS. */
+#header{background:var(--header);color:#fff;padding:0 20px;height:48px;flex:none;display:flex;align-items:center;justify-content:space-between}
+.stage{flex:1;min-height:0;overflow:auto;padding:16px 24px 32px}
+/* Breakpoints inside the app use @container app (...) with the repo's own widths, never @media. */
+@container app (max-width:768px){ .stage{padding:14px 16px 28px} }
+
+/* ---------- {{COMPONENT}} options: one block per option, scoped by .frame[data-opt=...] ---------- */
+.frame[data-opt=a] .opt-b,.frame[data-opt=b] .opt-a{display:none}
+@media(prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
+</style>
+</head>
+<body>
+<div class="page">
+  <!-- REQUIRED: brief. h1 = feature + ticket link (only if a ticket was given). 1–2 sentences of problem context. -->
+  <div class="intro">
+    <h1>{{Feature}} <span class="ver"><a href="{{JIRA_URL}}" target="_blank" rel="noopener">{{TICKET}}</a></span></h1>
+    <p>{{Problem in one or two sentences: what's wrong today and what this POC decides.}}</p>
+  </div>
+
+  <div class="ctrl" id="ctrl" aria-label="POC controls">
+    <!-- REQUIRED: options. Pills for 2–5 options, a <select> for 6+. Name options by what differs. -->
+    <div class="g"><span class="gl">{{Decision}}</span><div class="seg2" data-g="opt"><button type="button" data-v="a">{{Option A}}</button><button type="button" data-v="b">{{Option B}}</button></div></div>
+    <!-- REQUIRED: window widths, with their source stated next to the label. -->
+    <div class="g"><span class="gl">Window width <span class="src">{{from repo breakpoints: file:line… | standard fallback}}</span></span><div class="seg2" data-g="win">{{WIDTH_BUTTONS e.g. <button type="button" data-v="1280">1280<small>laptop</small></button>}}</div></div>
+    <!-- OPTIONAL: states (empty / filled / loading / error) when the component has them. -->
+    <!-- ONLY IF REPO HAS DARK MODE: <div class="g"><span class="gl">Theme</span><div class="seg2" data-g="theme"><button type="button" data-v="light">Light</button><button type="button" data-v="dark">Dark</button></div></div> -->
+    <button class="reset" type="button" id="resetDemo">Reset</button>
+  </div>
+
+  <div class="framebox"><div class="framewrap">
+    <div class="frame" id="frame" data-opt="a">
+      <div id="header">{{APP_CHROME}}</div>
+      <div class="stage">{{PAGE + COMPONENT MARKUP, real copy, sample data labeled as such}}</div>
+    </div>
+  </div></div>
+
+  <!-- Notes: what each option trades off, responsive behavior, what matches today's code. -->
+  <div class="notes">
+    <div class="card"><h2>{{Option tradeoffs}}</h2><ul><li><i class="bi bi-check2"></i><span>…</span></li></ul></div>
+    <div class="card"><h2>Window widths</h2><ul><li><i class="bi bi-check2"></i><span>{{Where each width came from}}</span></li></ul></div>
+    <div class="card"><h2>Reuses from {{repo}}</h2><ul><li><i class="bi bi-check2"></i><span>{{Components/classes this maps to, with paths}}</span></li></ul></div>
+  </div>
+  <!-- REQUIRED footer -->
+  <p class="foot">Sample data. Made with <a href="https://github.com/JustinChan-fd/skills/tree/main/fe-design-poc" target="_blank" rel="noopener">fe-design-poc</a> v{{VERSION}}.</p>
+</div>
+
+<script>
+const $ = (s, r = document) => r.querySelector(s), $$ = (s, r = document) => [...r.querySelectorAll(s)];
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+const frame = $('#frame');
+const S = { opt: 'a' };
+
+function render() { /* re-render the component from S */ }
+
+function press(g, v) { $$(`[data-g=${g}] button`).forEach(b => b.setAttribute('aria-pressed', b.dataset.v === String(v))); }
+function setOpt(v) { S.opt = v; frame.dataset.opt = v; press('opt', v); render(); }
+function setWin(w) { frame.style.setProperty('--fw', w + 'px'); press('win', w); }
+function setTheme(v) { document.documentElement.dataset.theme = v; press('theme', v); }
+$('#ctrl').addEventListener('click', e => {
+  const b = e.target.closest('[data-v]'); if (!b) return;
+  const g = b.parentElement.dataset.g, v = b.dataset.v;
+  if (g === 'opt') setOpt(v); if (g === 'win') setWin(+v); if (g === 'theme') setTheme(v);
+});
+$('#resetDemo').onclick = init;
+function init() { setWin({{DEFAULT_WIDTH}}); setOpt('a'); }
+init();
+</script>
+</body>
+</html>
