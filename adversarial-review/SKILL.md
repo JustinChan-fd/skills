@@ -132,7 +132,7 @@ fi
 
 ### Phase 1: Logical Consistency & Completeness
 
-**Agent**: `claude-haiku-4-5-20251001` (~35K in, ~5K out, $0.05)
+**Agent**: `haiku` (~35K in, ~5K out, $0.05)
 
 **Purpose**: Find logical contradictions, missing edge cases, and violations of project-specific constraints.
 
@@ -170,7 +170,7 @@ DOCUMENT TO REVIEW:
 
 ### Phase 1.5: Runtime Risk Assessment (Scale & Cost only)
 
-**Agent**: `claude-haiku-4-5-20251001` (~35K in, ~5K out, $0.05)
+**Agent**: `haiku` (~35K in, ~5K out, $0.05)
 
 **Purpose**: Identify runtime scale and cost failure modes. **Mutually exclusive with Phase 1** (Phase 1 checks document logic) and **mutually exclusive with the Security seat** (security is its own dedicated Phase 1 agent — see committee description above).
 
@@ -211,7 +211,7 @@ DOCUMENT TO REVIEW:
 
 ### Phase 1.6: Security Review (Dedicated Seat)
 
-**Agent**: `claude-sonnet-4-6` (NOT haiku — security requires judgment-quality model)
+**Agent**: `sonnet` (NOT haiku — security requires judgment-quality model)
 
 **Purpose**: OWASP Top 10 pass. Security findings must not be diluted into the runtime-risk reviewer's scope. This is a dedicated seat.
 
@@ -254,7 +254,7 @@ DOCUMENT TO REVIEW:
 
 ### Phase 2: Adversarial Challenge
 
-**Agent**: `claude-haiku-4-5-20251001` (~15K in, ~3K out, $0.02)
+**Agent**: `haiku` (~15K in, ~3K out, $0.02)
 
 **Prompt** (keep <1K tokens):
 

@@ -1,7 +1,7 @@
 ---
 name: push-branch
 description: Push branch to GitHub and create or update a PR with auto-populated description. Runs unattended (no prompts); infers version bump and create-vs-update.
-model: anthropic.claude-haiku-5-5[1m]
+model: haiku
 ---
 
 # Push Branch & Create PR

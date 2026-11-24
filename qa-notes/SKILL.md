@@ -1,7 +1,7 @@
 ---
 name: qa-notes
 description: Generate and publish QA Notes to a Jira ticket from the current branch/PR context
-model: anthropic.claude-haiku-4-5-20251001
+model: haiku
 ---
 
 # /qa-notes

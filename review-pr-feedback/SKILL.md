@@ -1,7 +1,7 @@
 ---
 name: review-pr-feedback
 description: Process unresolved PR review comments — triage, implement, test, resolve threads, post summary
-model: anthropic.claude-sonnet-5-5
+model: sonnet
 ---
 
 # Review PR Feedback
