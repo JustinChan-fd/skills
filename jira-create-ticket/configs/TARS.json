@@ -5,7 +5,7 @@
         "name": "Steps to Reproduce",
         "required": true,
         "fieldType": "adf",
-        "note": "Same quirk as CR: metadata reports plain textarea/string, but create/edit rejects a string and requires ADF doc content. Use an orderedList — one listItem per step; steps with a visible result use a bold 'Expected:' lead-in; route/URL/query fragments use inline code marks.",
+        "note": "Same quirk as CR: metadata reports plain textarea/string, but create/edit rejects a string and requires ADF doc content. Use an orderedList \u2014 one listItem per step; steps with a visible result use a bold 'Expected:' lead-in; route/URL/query fragments use inline code marks.",
         "learnedFrom": "TARS-1414",
         "learnedOn": "2026-08-27"
       },
@@ -14,9 +14,18 @@
         "required": true,
         "fieldType": "select",
         "allowedValues": [
-          { "id": "15618", "value": "Manual" },
-          { "id": "15619", "value": "Automation" },
-          { "id": "15620", "value": "Known Issue" }
+          {
+            "id": "15618",
+            "value": "Manual"
+          },
+          {
+            "id": "15619",
+            "value": "Automation"
+          },
+          {
+            "id": "15620",
+            "value": "Known Issue"
+          }
         ],
         "learnedFrom": "TARS-1414",
         "learnedOn": "2026-08-27"
@@ -26,12 +35,30 @@
         "required": true,
         "fieldType": "multiselect",
         "allowedValues": [
-          { "id": "16948", "value": "INT" },
-          { "id": "16949", "value": "STG" },
-          { "id": "16950", "value": "PROD" },
-          { "id": "16951", "value": "DARK" },
-          { "id": "16952", "value": "DEV" },
-          { "id": "16953", "value": "QA" }
+          {
+            "id": "16948",
+            "value": "INT"
+          },
+          {
+            "id": "16949",
+            "value": "STG"
+          },
+          {
+            "id": "16950",
+            "value": "PROD"
+          },
+          {
+            "id": "16951",
+            "value": "DARK"
+          },
+          {
+            "id": "16952",
+            "value": "DEV"
+          },
+          {
+            "id": "16953",
+            "value": "QA"
+          }
         ],
         "learnedFrom": "TARS-1414",
         "learnedOn": "2026-08-27"
@@ -40,7 +67,7 @@
     "constraints": [
       {
         "type": "parentRequired",
-        "note": "Not surfaced by getJiraIssueTypeMetaWithFields — same undocumented constraint as CR. Unlike CR, 'most recent sibling ticket's parent' is not a safe default here: recent TARS bugs span multiple unrelated epics (e.g. TARS-1026 'webtarsthree MVP Post Launch' vs TARS-807 'webtarsthree RTB' vs a ticket's own pipeline epic like TARS-1350). Infer by matching the new ticket's domain/component to the sibling's summary, not just recency, and always confirm with the user before creating.",
+        "note": "Not surfaced by getJiraIssueTypeMetaWithFields \u2014 same undocumented constraint as CR. Unlike CR, 'most recent sibling ticket's parent' is not a safe default here: recent TARS bugs span multiple unrelated epics (e.g. TARS-1026 'webtarsthree MVP Post Launch' vs TARS-807 'webtarsthree RTB' vs a ticket's own pipeline epic like TARS-1350). Infer by matching the new ticket's domain/component to the sibling's summary, not just recency, and always confirm with the user before creating.",
         "learnedFrom": "TARS-1414",
         "learnedOn": "2026-08-27"
       }
@@ -51,12 +78,12 @@
     "constraints": [
       {
         "type": "parentRequired",
-        "note": "CORRECTED 2026-09-16: getJiraIssueTypeMetaWithFields (requiredFieldsOnly, id 7) reports Parent as required: false — but a live createJiraIssue with no parent was rejected with 'Must be linked to an Epic using the Parent field', same undocumented create-time-only constraint already known for Bug. The prior note here ('no parent constraint enforced at create time') was wrong/stale — do not trust that field's metadata for Story in TARS. Always infer and confirm a parent epic (Step 5/7) before create, same as Bug.",
+        "note": "CORRECTED 2026-09-16: getJiraIssueTypeMetaWithFields (requiredFieldsOnly, id 7) reports Parent as required: false \u2014 but a live createJiraIssue with no parent was rejected with 'Must be linked to an Epic using the Parent field', same undocumented create-time-only constraint already known for Bug. The prior note here ('no parent constraint enforced at create time') was wrong/stale \u2014 do not trust that field's metadata for Story in TARS. Always infer and confirm a parent epic (Step 5/7) before create, same as Bug.",
         "learnedFrom": "live-verification-2026-09-16",
         "learnedOn": "2026-09-16"
       }
     ],
-    "note": "getJiraIssueTypeMetaWithFields (requiredFieldsOnly, id 7) surfaced only issuetype/project/summary as metadata-required, but see the parentRequired constraint above — metadata is wrong on this point. Confirm parent epic with user per the domain-matching guidance used for Bug.",
+    "note": "getJiraIssueTypeMetaWithFields (requiredFieldsOnly, id 7) surfaced only issuetype/project/summary as metadata-required, but see the parentRequired constraint above \u2014 metadata is wrong on this point. Confirm parent epic with user per the domain-matching guidance used for Bug.",
     "learnedFrom": "TARS-1425",
     "learnedOn": "2026-08-27"
   },
@@ -65,12 +92,12 @@
     "constraints": [
       {
         "type": "parentRequired",
-        "note": "CORRECTED 2026-09-16: getJiraIssueTypeMetaWithFields (issueTypeId 11252, requiredFieldsOnly) reports Parent as required: false — but a live createJiraIssue with no parent was rejected with 'Must be linked to an Epic using the Parent field', same undocumented create-time-only constraint already known for Bug. The prior note here ('no parent constraint enforced at create time... unlike Bug') was wrong/stale — Tech Story behaves exactly like Bug on this point. Always infer and confirm a parent epic (Step 5/7) before create.",
+        "note": "CORRECTED 2026-09-16: getJiraIssueTypeMetaWithFields (issueTypeId 11252, requiredFieldsOnly) reports Parent as required: false \u2014 but a live createJiraIssue with no parent was rejected with 'Must be linked to an Epic using the Parent field', same undocumented create-time-only constraint already known for Bug. The prior note here ('no parent constraint enforced at create time... unlike Bug') was wrong/stale \u2014 Tech Story behaves exactly like Bug on this point. Always infer and confirm a parent epic (Step 5/7) before create.",
         "learnedFrom": "live-verification-2026-09-16",
         "learnedOn": "2026-09-16"
       }
     ],
-    "note": "getJiraIssueTypeMetaWithFields (issueTypeId 11252, requiredFieldsOnly) surfaced only issuetype/project/summary as metadata-required, but see the parentRequired constraint above — metadata is wrong on this point. Description authored in markdown from templates/TechStory.md (no Steps to Reproduce — it's work, not a defect).",
+    "note": "getJiraIssueTypeMetaWithFields (issueTypeId 11252, requiredFieldsOnly) surfaced only issuetype/project/summary as metadata-required, but see the parentRequired constraint above \u2014 metadata is wrong on this point. Description authored in markdown from templates/TechStory.md (no Steps to Reproduce \u2014 it's work, not a defect).",
     "learnedFrom": "TARS-1398",
     "learnedOn": "2026-09-08"
   },
@@ -87,8 +114,19 @@
     "issueTypeId": "11513",
     "fields": {},
     "constraints": [],
-    "note": "getJiraIssueTypeMetaWithFields (issueTypeId 11513, requiredFieldsOnly: false) surfaced only issuetype/project/summary/reporter as required — no custom fields, no parent constraint enforced at create time. Decision boundary (per user correction 2026-09-08, supersedes the original broader framing): ISP is a CODE change that is never seen running as deployed application code on PRD, AND is not the build/CI orchestration itself. Concretely: a Dockerfile's base image or pinned apt/dependency versions = ISP (defines what's baked into a build artifact). The pipeline definition that runs the build (.github/workflows/*.yml, Jenkinsfile) = NOT ISP — editing how the build runs is process tooling, route to Task (or Bug/Story if fixing a defect/adding a capability). Test files (*.test.*, specs) = NOT ISP even though they don't run on PRD either — those stay Story, test coverage is product work. Non-code changes (docs, ticket housekeeping, manual vendor-UI config) = NOT ISP — that's Task's job. Content is a documentation record (what changed, why, where it's consumed), not repro steps or testable AC in the usual sense. Description authored in markdown from templates/InternalPackageSoftware.md. Caveat: TARS-1434 was originally created as a plain Task and only reclassified to this type after the fact — when the new ticket's subject matches this boundary, create as this type from the start rather than defaulting to Task.",
+    "note": "getJiraIssueTypeMetaWithFields (issueTypeId 11513, requiredFieldsOnly: false) surfaced only issuetype/project/summary/reporter as required \u2014 no custom fields, no parent constraint enforced at create time. Decision boundary (per user correction 2026-09-08, supersedes the original broader framing): ISP is a CODE change that is never seen running as deployed application code on PRD, AND is not the build/CI orchestration itself. Concretely: a Dockerfile's base image or pinned apt/dependency versions = ISP (defines what's baked into a build artifact). The pipeline definition that runs the build (.github/workflows/*.yml, Jenkinsfile) = NOT ISP \u2014 editing how the build runs is process tooling, route to Task (or Bug/Story if fixing a defect/adding a capability). Test files (*.test.*, specs) = NOT ISP even though they don't run on PRD either \u2014 those stay Story, test coverage is product work. Non-code changes (docs, ticket housekeeping, manual vendor-UI config) = NOT ISP \u2014 that's Task's job. Content is a documentation record (what changed, why, where it's consumed), not repro steps or testable AC in the usual sense. Description authored in markdown from templates/InternalPackageSoftware.md. Caveat: TARS-1434 was originally created as a plain Task and only reclassified to this type after the fact \u2014 when the new ticket's subject matches this boundary, create as this type from the start rather than defaulting to Task.",
     "learnedFrom": "TARS-1434",
     "learnedOn": "2026-09-08"
+  },
+  "Task": {
+    "fields": {},
+    "constraints": [
+      {
+        "type": "noCustomRequiredFields",
+        "note": "getJiraIssueTypeMetaWithFields (issueTypeId 3) lists only issuetype/project/reporter/summary as required. Parent constraint not yet verified live for Task.",
+        "learnedFrom": "webtarsthree Okta docs task",
+        "learnedOn": "2026-11-16"
+      }
+    ]
   }
 }
