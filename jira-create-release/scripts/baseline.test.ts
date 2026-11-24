@@ -7,7 +7,9 @@ import { readFileSync } from "node:fs";
 import { checkTicketFields, EXPECTED, NEVER_FILL } from "./baseline.ts";
 
 const read = (p: string) => readFileSync(new URL(p, import.meta.url), "utf8");
-const golden = () => JSON.parse(read("./fixtures/TARS-1501.fields.json"));
+// TARS-1501 predates the tars-releases label (added in 1.4.0); add it so the golden ticket
+// reflects what a real run creates today.
+const golden = () => { const f = JSON.parse(read("./fixtures/TARS-1501.fields.json")); f.labels.push("tars-releases"); return f; };
 const config = JSON.parse(read("../configs/TARS.json")).Release;
 const VERSION = read("../VERSION").trim();
 const real = { version: "1.0.2", dev: false, transitioned: true, assigneeAccountId: "5cd20ecadfe2e60fdd10ed30" };
@@ -28,6 +30,17 @@ test("TARS-1501 (first end-to-end skill run) satisfies the baseline", () => {
 
 test("missing version label fails", () => fails(mutate((f) => { f.labels = []; }), "labels must include"));
 test("dev label on a real ticket fails", () => fails(mutate((f) => { f.labels.push("jira-create-release-dev"); }), "must not carry the dev label"));
+test("missing tars-releases on a real ticket fails", () => fails(mutate((f) => { f.labels = f.labels.filter((l: string) => l !== "tars-releases"); }), "must carry tars-releases"));
+test("tars-releases on a dev ticket fails", () => {
+  const f = mutate((x) => {
+    x.summary = "[DEV] Release webtarsthree 0.0.0-skilltest";
+    x.fixVersions = [{ name: "0.0.0-skilltest" }];
+    x.labels = ["jira-create-release:1.0.2", "jira-create-release-dev", "tars-releases"];
+    x.customfield_14154 = null;
+    x.status = { name: "On-Hold" };
+  });
+  fails(f, "must not carry tars-releases", { ...real, dev: true, transitioned: false });
+});
 test("cab_ovrd label fails", () => fails(mutate((f) => { f.labels.push("cab_ovrd"); }), "cab_ovrd"));
 test("title without the real-run format fails", () => fails(mutate((f) => { f.summary = "[DEV] Release webtarsthree 3.13.23-beta"; }), "summary must be"));
 test("two fix versions fail", () => fails(mutate((f) => { f.fixVersions.push({ name: "3.13.22-beta" }); }), "exactly one"));

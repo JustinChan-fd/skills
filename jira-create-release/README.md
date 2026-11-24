@@ -40,7 +40,7 @@ What dev mode changes:
 - Skips the "tickets on the version" and "ticket statuses" checks.
 - Keeps the duplicate check and the check that the version exists.
 - Title is `[DEV] Release webtarsthree <version>` and the ticket gets the label
-  `jira-create-release-dev`.
+  `jira-create-release-dev` instead of `tars-releases` (so it stays off the FE release calendar).
 - Build Artifact is left empty and flagged, since a placeholder version matches no build.
 - Refuses any version that already has real tickets on it.
 

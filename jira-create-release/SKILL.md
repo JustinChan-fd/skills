@@ -51,7 +51,8 @@ fix version. Changes from the normal flow:
   has no tickets. Run checks 3 (no duplicate) and 4 (version is empty), plus the Step 1 check
   that the version exists in Jira, since `fixVersions` is required at create.
 - **Prefix the summary**: `[DEV] Release {repo} {fixVersion}`. Add the label
-  `jira-create-release-dev` so test tickets are easy to find and clean up.
+  `jira-create-release-dev` so test tickets are easy to find and clean up. Do **not** add
+  `tars-releases`, so test tickets stay off the team's release calendar.
 - **Build Artifact**: a placeholder version will not match a workflow run. Leave it empty and
   flag it; this is not an error in dev mode.
 - **Skip the CODE FREEZE transition by default**, since it starts the approver chain. Run it
@@ -183,7 +184,7 @@ gap question, or a Step 2 check failed.
 
 `createJiraIssue` with `projectKey`, `issueTypeName: "Release"`, the title, `fixVersions`,
 `components`, `labels` (`jira-create-release:<VERSION>` read from this skill's `VERSION` file,
-plus `jira-create-release-dev` in dev mode), `assignee_account_id` of the invoking user
+plus `tars-releases` on real runs, or `jira-create-release-dev` instead of it in dev mode), `assignee_account_id` of the invoking user
 (`atlassianUserInfo`), `description`
 from Step 7 (omit when empty), and all derived/carry-forward/Jenkins fields in
 `additional_fields`. Always assign to the invoker.
@@ -284,7 +285,7 @@ templating pass can expand this; today it is a pass-through.)
 🔨 Build Artifact: <url, or "not found">   |   Deploy URL: <url>
 📋 Defaults: Release Type = Code, Development Team(s) = Creative Business Unit III
 📋 Carry-forward (provisional, from <PREV-KEY>): <field: value, ...>
-🏷️ Labeled: jira-create-release:<VERSION>
+🏷️ Labeled: jira-create-release:<VERSION>, tars-releases   (dev mode: jira-create-release:<VERSION>, jira-create-release-dev)
 🚚 Tickets moved to Deployed to STG: <moved>/<n>   (dev mode: "skipped")
 ❌ <KEY>: <error>   (one line per ticket that failed, omit when none)
 ⚠️ Manual still: Snyk counts + PDF, approvers, due date, scheduled start
@@ -301,4 +302,6 @@ templating pass can expand this; today it is a pass-through.)
 - Every self-healing write to `configs/` carries `learnedFrom` and `learnedOn`.
 - Never paste secrets or tokens into a ticket field.
 - Do not add stage labels or `cab_ovrd`; CAB owns that. The only labels this skill sets are
-  `jira-create-release:<VERSION>` and, in dev mode, `jira-create-release-dev`.
+  `jira-create-release:<VERSION>`, plus `tars-releases` on real runs (it puts the ticket on the
+  FE release calendar, https://fandango.atlassian.net/wiki/spaces/FE/calendars/9a3f659d-17ab-49df-a82f-c07f2b782d9d)
+  or `jira-create-release-dev` in dev mode.

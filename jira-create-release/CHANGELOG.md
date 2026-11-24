@@ -3,6 +3,13 @@
 Versions follow the bump policy in `SKILL.md`'s "Versioning" section. Every ticket this skill
 creates carries the label `jira-create-release:<VERSION>`.
 
+## 1.4.0
+
+- Step 5 adds the label `tars-releases` to every real release ticket so it shows on the FE
+  release calendar (https://fandango.atlassian.net/wiki/spaces/FE/calendars/9a3f659d-17ab-49df-a82f-c07f2b782d9d).
+  Dev-mode tickets do not get it, so test tickets stay off the calendar.
+- Baseline check requires `tars-releases` on real tickets and rejects it on dev tickets.
+
 ## 1.3.0
 
 - Step 6b now runs `scripts/bulk-transition.ts`: pre-check (the transition must be offered to

@@ -29,6 +29,7 @@ export const EXPECTED = {
   pii: "NA",
   sreClassification: "SRE Support",
   devLabel: "jira-create-release-dev",
+  calendarLabel: "tars-releases",
   versionLabelPrefix: "jira-create-release:",
 };
 
@@ -52,12 +53,13 @@ export function checkTicketFields(f: Record<string, any>, opts: CheckOptions): s
     `summary must be "${titlePrefix}<fixVersion>", got "${f.summary}"`,
   );
 
-  // Labels: version stamp always; dev label only in dev mode; nothing CAB-owned
+  // Labels: version stamp always; calendar label on real runs; dev label only in dev mode; nothing CAB-owned
   const labels: string[] = f.labels ?? [];
   expect(labels.includes(EXPECTED.versionLabelPrefix + opts.version), `labels must include ${EXPECTED.versionLabelPrefix}${opts.version}`);
   expect(labels.includes(EXPECTED.devLabel) === opts.dev, opts.dev ? "dev ticket must carry the dev label" : "real ticket must not carry the dev label");
+  expect(labels.includes(EXPECTED.calendarLabel) === !opts.dev, opts.dev ? `dev ticket must not carry ${EXPECTED.calendarLabel}` : `real ticket must carry ${EXPECTED.calendarLabel}`);
   expect(!labels.includes("cab_ovrd"), "cab_ovrd is CAB-owned and must not be set");
-  expect(labels.every((l) => l === EXPECTED.devLabel || l.startsWith(EXPECTED.versionLabelPrefix)), `unexpected labels: ${labels.join(", ")}`);
+  expect(labels.every((l) => l === EXPECTED.devLabel || l === EXPECTED.calendarLabel || l.startsWith(EXPECTED.versionLabelPrefix)), `unexpected labels: ${labels.join(", ")}`);
 
   // Ownership and status
   expect(!!f.assignee?.accountId, "ticket must be assigned");
