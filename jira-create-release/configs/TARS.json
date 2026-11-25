@@ -144,13 +144,14 @@
       "screenFields": {
         "fixVersions": "required; already set at create, no extra input needed",
         "components": "optional; already set at create",
-        "customfield_14154": "Build Artifact, optional; already set at create",
+        "customfield_14154": "Build Artifact. The screen metadata says optional, but CODE FREEZE is rejected without a value ('Field Build Artifact is required'). Must be set at create.",
         "customfield_14151": "Release Rollback Plan, optional; already set at create",
         "priority": "optional; leave unset"
       },
-      "note": "The transition into Pending Approvals is named 'CODE FREEZE' (id 21), so always match on to.name, never on the transition name. Discovered on TARS-1497: it is conditional and has a screen, but every screen field is either already filled at create or optional. Verified on TARS-1497: a transition with only the id succeeds. If the transition fails or is unavailable, the skill stops and reports; the ticket already exists. DISCOVERY MODE applies only while transitionId is null.",
-      "learnedFrom": "TARS-1497",
-      "learnedOn": "2026-10-01"
+      "note": "The transition into Pending Approvals is named 'CODE FREEZE' (id 21), so always match on to.name, never on the transition name. Discovered on TARS-1497: it is conditional and has a screen, but every screen field is either already filled at create or optional. Verified on TARS-1497: a transition with only the id succeeds. If the transition fails or is unavailable, the skill stops and reports; the ticket already exists. DISCOVERY MODE applies only while transitionId is null. 2026-11-25 (TARS-1662): CODE FREEZE failed with 'Field Build Artifact is required.' while Build Artifact was empty; after editJiraIssue set it, transitionId 21 alone succeeded.",
+      "learnedFrom": "TARS-1662",
+      "learnedOn": "2026-11-25",
+      "buildArtifactRequired": true
     },
     "constraints": []
   }

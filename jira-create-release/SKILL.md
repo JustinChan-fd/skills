@@ -33,7 +33,11 @@ When in doubt between two levels, pick the higher one.
 
 Infer these from the text; do not require a fixed order:
 
-- **fixVersion** (required): the version-shaped token (e.g. `3.13.23-beta`).
+- **fixVersion** (required): the version-shaped token (e.g. `3.13.23-beta`). The `-beta`
+  suffix is optional: `3.34.2` is a valid version (TARS-1658 removed beta naming). Use the
+  token exactly as given. The rollback version still comes from PRD and may carry `-beta`.
+- **Other URLs** (e.g. a Jira release report like `.../versions/<id>/tab/release-report-all-issues`):
+  not an input. Ignore anything that is not the previous deploy URL.
 - **Previous deploy URL** (optional): any URL the user describes as the previous/last
   deploy. Used for Previous Deploy Job and Release Rollback Plan. If absent, Step 4 asks.
 - **project** (optional): key or alias from `configs/_projects.json`. Defaults to `TARS`.
@@ -77,6 +81,24 @@ Snyk counts and PDF, every approver field (QA/Tech Lead/CAB), Release Signoff, D
 Scheduled Start Date, and legacy hidden fields. The full list is `neverFill` in the config.
 Do not copy any of them from the previous ticket.
 
+## Atlassian MCP v2 tool surface
+
+Verified 2026-11-25 on TARS-1662. The v1 names and parameter shapes this skill used to carry
+no longer work:
+
+- `cloudId` is required on every call: `fandango.atlassian.net`.
+- `searchJiraIssuesUsingJql`: `cloudId`, `jql`, `fields`, `maxResults`.
+- `createJiraIssue`: `issueType` (not `issueTypeName`), `assignee` (not `assignee_account_id`),
+  `labels` as a top-level array, everything else in `additional_fields`.
+- `transitionJiraIssue`: top-level `transitionId` string (not an `{id}` object).
+- `getTransitionsForJiraIssue` is gone. Use `executeRead` with `name: "listJiraIssueTransitions"`,
+  `cloudId`, and `inputs: {issueIdOrKey, expand: "transitions.fields"}`. Each transition has
+  `id`, `name`, `to.name`, `hasScreen`, `isAvailable`, and `fields` when expanded.
+- `editJiraIssue` (`cloudId`, `issueIdOrKey`, `fields`) to set a field after create.
+- `getJiraIssueTypeMetaWithFields` is no longer a primary tool. Do not use it.
+- Primary tools may need `ToolSearch` to load their schema first. If a call fails on schema,
+  load it and retry once.
+
 ## Workflow
 
 The run has two phases. **Phase 1 (Steps 1-4) only reads.** It gathers every value and runs
@@ -84,6 +106,10 @@ every check, and ends with either all inputs known or a stop. **Phase 2 (Steps 5
 Do not call `createJiraIssue` until Phase 1 has finished with every input known and no check
 failed. Every stop listed in Phase 1 happens before any write, so a stopped run leaves nothing
 behind.
+
+**Phase 2 is strictly sequential.** Step 5, then Step 6, then Step 6b, each in its own turn,
+each starting only after the previous one returned success. Never batch a write with the write
+it depends on. (If Step 5 returns a key, Step 6 uses it; if Step 6 fails, Step 6b never runs.)
 
 **Batch Phase 1.** The reads in Steps 1-3 do not depend on each other, so issue them together
 in one turn: the version-exists check, the Step 2 JQL checks, the PRD lookup, the tag and run
@@ -95,8 +121,9 @@ nothing because Phase 1 writes nothing.
 ### Step 1: Resolve project and version
 
 Look up the project in `configs/_projects.json` by key or alias. Load `configs/<KEY>.json`
-and its `Release` entry. Confirm the fix version exists with `getJiraIssueTypeMetaWithFields`
-(its `fixVersions.allowedValues`) or JQL. If it does not exist, stop and say so.
+and its `Release` entry. Confirm the fix version exists: the Step 2 check 1 JQL on
+`fixVersion = "<version>"` errors when the version does not exist in the project, and that
+error is the existence check. If it does not exist, stop and say so.
 
 ### Step 2: Prereq checks (HARD STOP on failure, nothing created)
 
@@ -155,7 +182,10 @@ Do not ask the user anything before these pass.
   Fallback only if step 1 returns 404 (no tag, e.g. a branch build or a placeholder version):
   scan `gh run list --limit 100` and match the `Update Hiera Versions / Update webtarsthree → <X> in hiera-versions`
   job name where `<X>` equals the version exactly or `<branch>-<version>`, never a substring.
-  If nothing matches, leave Build Artifact empty and flag it; do not guess.
+  If nothing matches, Build Artifact is a gap: ask for it in Step 4. Do not guess. (Dev mode
+  leaves it empty and flags it.)
+  Build Artifact is **required to reach Pending Approvals** (CODE FREEZE). Jira's screen metadata
+  says optional, but the transition is rejected without it (TARS-1662, 2026-11-25).
 - **Defaults**: apply `defaults.fields` from the config as-is (Release Type = Code,
   Development Team(s) = Creative Business Unit III).
 - **Carry-forward**: read each field in `carryForward.fields` from the previous release
@@ -170,7 +200,8 @@ whose text is the rollback version and whose target is the URL, e.g.
 Verified on TARS-1497: Jira stores that string as-is and renders it as a real link.
 
 Gaps: if the URL was not given, or Build Artifact / previous release could not be derived,
-ask for exactly those missing items in one batched `AskUserQuestion` ("Paste the URL of the
+ask for exactly those missing items. A missing Build Artifact must be resolved here in a real
+run, before anything is created, because CODE FREEZE rejects the ticket without it in one batched `AskUserQuestion` ("Paste the URL of the
 last deploy in Jenkins (any link)" for the deploy URL).
 
 There is no separate pre-create summary and no confirmation. The hard-stop checks in Step 2
@@ -182,12 +213,12 @@ gap question, or a Step 2 check failed.
 
 ### Step 5: Create (Phase 2 starts: this and the steps after it write)
 
-`createJiraIssue` with `projectKey`, `issueTypeName: "Release"`, the title, `fixVersions`,
-`components`, `labels` (`jira-create-release:<VERSION>` read from this skill's `VERSION` file,
-plus `tars-releases` on real runs, or `jira-create-release-dev` instead of it in dev mode), `assignee_account_id` of the invoking user
-(`atlassianUserInfo`), `description`
-from Step 7 (omit when empty), and all derived/carry-forward/Jenkins fields in
-`additional_fields`. Always assign to the invoker.
+`createJiraIssue` with `cloudId`, `projectKey`, `issueType: "Release"`, `summary` (the title),
+`labels` (`jira-create-release:<VERSION>` read from this skill's `VERSION` file, plus
+`tars-releases` on real runs, or `jira-create-release-dev` instead of it in dev mode),
+`assignee` = the invoking user's accountId (`atlassianUserInfo`), `description` from Step 7
+(omit when empty), and `fixVersions`, `components` and all derived/carry-forward/Jenkins fields
+(including Build Artifact) in `additional_fields`. Always assign to the invoker.
 
 On a "field is required" error not in the config, ask once, retry, and write the learned
 field/constraint to the config with `learnedFrom`/`learnedOn`.
@@ -195,18 +226,20 @@ field/constraint to the config with `learnedFrom`/`learnedOn`.
 ### Step 6: Move to Pending Approvals
 
 **Discovery mode (only if `transition.transitionId` is null in the config; it is set for TARS).** Do not transition.
-Call `getTransitionsForJiraIssue` on the new ticket and report what it returns: each
+List the new ticket's transitions (`listJiraIssueTransitions`, see the v2 section) and report: each
 transition's id, name, target status and `hasScreen`, plus the ticket's current status.
 Creating the ticket counts as a successful run. Then stop and tell the user the next step is
 to transition it together so the id and modal fields can be written to the config. Skip the
 rest of this step.
 
 **Normal mode (`transitionId` is set).** The ticket lands in `initialStatus`. Call
-`getTransitionsForJiraIssue`, pick the transition whose `to.name` equals `transition.to`.
+`listJiraIssueTransitions` (with `expand: "transitions.fields"`), pick the transition whose
+`to.name` equals `transition.to`.
 Match on the target status, never the transition name: the transition into Pending
 Approvals is named `CODE FREEZE` (the two are the same step in the Jira UI). Verified on
-TARS-1497: `transitionJiraIssue` with just `{ "id": "21" }` succeeds, so no screen fields
-need to be sent. After it runs, confirm the ticket's status is Pending Approvals.
+TARS-1497 and TARS-1662: `transitionJiraIssue` with just `transitionId: "21"` succeeds once
+Build Artifact is set, so no screen fields need to be sent. The result returns `statusName`;
+it must be Pending Approvals.
 
 - If `hasScreen` is true, read its fields from the result and fill them from the config's
   `transition.screenFields`. If a required screen field has no value in the config, ask the
@@ -217,9 +250,14 @@ need to be sent. After it runs, confirm the ticket's status is Pending Approvals
   landed somewhere other than On-Hold.
 
 If the transition is unavailable or fails, stop and report. The ticket already exists, so
-show its key and the exact error.
+show its key and the exact error. **Do not run Step 6b.**
 
 ### Step 6b: Move the release's tickets to Deployed to STG
+
+**Runs only after Step 6 has returned success with the ticket in Pending Approvals.** Issue it
+in a later turn than Step 6, never in the same batch: if CODE FREEZE fails, no ticket may move
+(TARS-1662 moved 20 tickets while its transition was failing, because both calls were sent
+together).
 
 Skip this step in dev mode (a placeholder version has no tickets) and when Phase 1 found zero
 tickets. Otherwise use the key list from the Step 2 check 1 query; Phase 1 already confirmed
@@ -254,7 +292,7 @@ them. Do not pass `--notify`.
    here, report the error, and do not touch the other tickets.
 2. **The rest.** Issue every remaining `transitionJiraIssue` call in a single message, as
    parallel tool calls, not one per turn. This is the expensive path: TARS-1503 made 24 calls
-   over 10 model requests and cost $0.99 against $0.41 for a run with no ticket moves.
+   over 10 model requests and cost 0.99 USD against 0.41 USD for a run with no ticket moves.
 3. **Tally.** Count moved and failed. One failure does not stop the others. A ticket that no
    longer offers the transition (already moved, or its status changed since Phase 1) counts as
    failed with that reason. Do not retry automatically.
@@ -282,14 +320,14 @@ templating pass can expand this; today it is a pass-through.)
 🔗 https://fandango.atlassian.net/browse/<KEY>
 📦 Fix version: <version>  |  Rollback: <prev version>  |  Prev release: <PREV-KEY>
 🎫 Tickets on version: <n>, all Ready for Release   (dev mode: "checks skipped")
-🔨 Build Artifact: <url, or "not found">   |   Deploy URL: <url>
+🔨 Build Artifact: <url, or "not found" in dev mode only>   |   Deploy URL: <url>
 📋 Defaults: Release Type = Code, Development Team(s) = Creative Business Unit III
 📋 Carry-forward (provisional, from <PREV-KEY>): <field: value, ...>
 🏷️ Labeled: jira-create-release:<VERSION>, tars-releases   (dev mode: jira-create-release:<VERSION>, jira-create-release-dev)
 🚚 Tickets moved to Deployed to STG: <moved>/<n>   (dev mode: "skipped")
 ❌ <KEY>: <error>   (one line per ticket that failed, omit when none)
 ⚠️ Manual still: Snyk counts + PDF, approvers, due date, scheduled start
-⚠️ <any soft flags, e.g. Build Artifact not found>
+⚠️ <any soft flags, e.g. Build Artifact run not yet finished, or a tag that was missing so the run was supplied by the user>
 ```
 
 ## Guardrails

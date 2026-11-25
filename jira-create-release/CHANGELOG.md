@@ -3,6 +3,29 @@
 Versions follow the bump policy in `SKILL.md`'s "Versioning" section. Every ticket this skill
 creates carries the label `jira-create-release:<VERSION>`.
 
+## 2.0.1
+
+- Fixed the Step 6b cost figures: `$0.99` and `$0.41` were being eaten by the skill loader's
+  argument substitution (rendered as `3.34.2,.99`). Now written as "0.99 USD" / "0.41 USD".
+- Step 8 output no longer treats a missing Build Artifact as a soft flag in real runs.
+- Arguments: the `-beta` suffix is optional on the fix version, and unrelated URLs (such as a
+  Jira release report link) are ignored.
+- Workflow: Phase 2 is stated as strictly sequential, one step per turn.
+
+## 2.0.0
+
+- Moved to the Atlassian MCP v2 tool surface (new "Atlassian MCP v2 tool surface" section in
+  `SKILL.md`): `cloudId` on every call, `issueType`/`assignee` on create, top-level `transitionId`
+  on transition, `listJiraIssueTransitions` (via `executeRead`) in place of the removed
+  `getTransitionsForJiraIssue`. Step 1 no longer uses `getJiraIssueTypeMetaWithFields`.
+- Build Artifact is now required in real runs: CODE FREEZE rejects the ticket without it
+  (TARS-1662), so a missing value is asked for in Step 4 before anything is created.
+- Step 6b may run only after Step 6 returns Pending Approvals, in a later turn. TARS-1662 moved
+  20 tickets to Deployed to STG while its CODE FREEZE call was failing, because both were sent
+  in one batch.
+- `configs/TARS.json`: `transition.buildArtifactRequired` and the corrected Build Artifact
+  screen note.
+
 ## 1.4.0
 
 - Step 5 adds the label `tars-releases` to every real release ticket so it shows on the FE
