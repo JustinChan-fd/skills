@@ -3,6 +3,12 @@
 Versions follow the bump policy in `SKILL.md`'s "Versioning" section. Every ticket this skill
 creates carries the label `jira-create-release:<VERSION>`.
 
+## 2.0.2
+
+- Step 6b: if the bulk script call is denied by permissions (TARS-1663, where the same command
+  had run without a prompt on TARS-1662), the skill stops, reports the unmoved tickets and asks.
+  It does not retry or use the per-ticket fallback, which is only for missing credentials.
+
 ## 2.0.1
 
 - Fixed the Step 6b cost figures: `$0.99` and `$0.41` were being eaten by the skill loader's

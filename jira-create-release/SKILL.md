@@ -285,6 +285,11 @@ them. Do not pass `--notify`.
   (transition not offered, bad canary status) applies to it too.
 - Exit `3`: no credentials, so use the fallback below.
 - Exit `4`: fix the arguments and run it again.
+- **Script denied by permissions** (the tool call is refused before it runs, so there is no
+  exit code; seen on TARS-1663): stop, report which tickets were not moved, and ask the user
+  how to proceed (allow the command, use the fallback, or move them by hand). Do not retry the
+  script and do not switch to the fallback on your own: the fallback is only for exit `3`, and
+  using it here would route around the user's permission setting.
 
 **Fallback (no credentials): per-ticket MCP calls.**
 1. **Canary.** Call `transitionJiraIssue` on the first key alone. The response includes the new
